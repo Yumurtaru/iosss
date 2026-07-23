@@ -1,0 +1,144 @@
+definitions:
+  env_versions: &env_versions
+    xcode: latest
+    cocoapods: default
+
+  base_vars: &base_vars
+    XCODE_PROJECT: "YumurtaPremium.xcodeproj"
+    XCODE_SCHEME: "YumurtaPremium"
+    BUNDLE_ID: "ru.marketplace.client.premium"
+    APP_STORE_APP_ID: 6787053938
+    APP_STORE_CONNECT_KEY_IDENTIFIER: "85HTNJM2J5"
+    APP_STORE_CONNECT_ISSUER_ID: "1f1adf9a-b476-4ea7-b19b-d73e824c890c"
+    DEVELOPMENT_TEAM: "Y9Q3SKDB35"
+
+  prepare_project: &prepare_project
+    name: Генерация .xcodeproj через XcodeGen
+    script: |
+      set -e
+      brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+      # GoogleService-Info.plist хранится в Codemagic как base64-переменная,
+      # чтобы не коммитить ключи Firebase в репозиторий.
+      if [ -n "$GOOGLE_SERVICE_INFO_PLIST" ]; then
+        echo "$GOOGLE_SERVICE_INFO_PLIST" | base64 --decode > Sources/GoogleService-Info.plist
+      fi
+      if [ ! -f Sources/GoogleService-Info.plist ]; then
+        echo "ОШИБКА: нет Sources/GoogleService-Info.plist — FirebaseMessaging не запустится"
+        exit 1
+      fi
+      xcodegen generate --spec project.yml
+      xcodebuild -resolvePackageDependencies -project "$XCODE_PROJECT" -scheme "$XCODE_SCHEME"
+
+workflows:
+
+  # ─────────────────────────────────────────────────────────────
+  # 1. Подписанная сборка → App Store Connect / TestFlight
+  # ─────────────────────────────────────────────────────────────
+  ios-testflight:
+    name: Yumurta iOS — TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      <<: *env_versions
+      groups:
+        - appstore_credentials   # APP_STORE_CONNECT_PRIVATE_KEY, CERTIFICATE_PRIVATE_KEY, GOOGLE_SERVICE_INFO_PLIST
+      vars:
+        <<: *base_vars
+    scripts:
+      - *prepare_project
+
+      - name: Подготовка keychain и профилей
+        script: |
+          set -e
+          keychain initialize
+          # --create сам заведёт App ID и провижн-профиль, если их ещё нет
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --platform IOS \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
+
+      - name: Номер сборки (следующий после последнего в TestFlight)
+        script: |
+          set -e
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APP_ID" 2>/dev/null || echo "0")
+          NEXT=$(($LATEST + 1))
+          echo "Собираем build $NEXT"
+          agvtool new-version -all "$NEXT"
+
+      - name: Сборка IPA
+        script: |
+          set -e
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME" \
+            --config Release
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
+        expire_build_submitted_for_review: true
+      email:
+        recipients:
+          - anar@yumurta.ru
+        notify:
+          success: true
+          failure: true
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. Неподписанный IPA для сайдлоада (AltStore / Sideloadly / TrollStore)
+  # ─────────────────────────────────────────────────────────────
+  ios-unsigned:
+    name: Yumurta iOS — unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    environment:
+      <<: *env_versions
+      groups:
+        - appstore_credentials   # нужен только GOOGLE_SERVICE_INFO_PLIST
+      vars:
+        <<: *base_vars
+    scripts:
+      - *prepare_project
+
+      - name: Сборка без подписи
+        script: |
+          set -e
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_BITCODE=NO \
+            | xcpretty || exit 1
+
+      - name: Упаковка в .ipa (структура Payload/)
+        script: |
+          set -e
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ОШИБКА: .app не найден"
+            exit 1
+          fi
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          # подчищаем остатки подписи, иначе некоторые сайдлоадеры ругаются
+          rm -rf Payload/*.app/_CodeSignature
+          rm -f  Payload/*.app/embedded.mobileprovision
+          mkdir -p artifacts
+          zip -qry "artifacts/YumurtaPremium-unsigned.ipa" Payload
+          ls -lh artifacts/
+    artifacts:
+      - artifacts/*.ipa
+      - /tmp/xcodebuild_logs/*.log
