@@ -166,6 +166,12 @@ struct HomeView: View {
             .navigationBarHidden(true)
             .refreshable { await vm.load(session: session) }
             .task { await vm.firstLoad(session: session) }
+            // Город выбирается в онбординге ПОСЛЕ первой загрузки главной (HomeView рендерится
+            // под онбордингом). Поэтому при смене cityId (онбординг / шторка города) —
+            // перезагружаем данные под новый город, иначе организации не появляются.
+            .onChange(of: session.cityId) { _ in
+                Task { await vm.load(session: session) }
+            }
             // Переходы из карточек: организация → OrgView, популярный товар → ProductView.
             .navigationDestination(isPresented: Binding(
                 get: { pushedShop != nil }, set: { if !$0 { pushedShop = nil } }
@@ -187,10 +193,9 @@ struct HomeView: View {
                     currentId: session.cityId,
                     currentName: session.cityName
                 ) { id, name in
-                    session.cityId = id
                     session.cityName = name
+                    session.cityId = id            // смена cityId → onChange выше перезагрузит данные
                     showCitySheet = false
-                    Task { await vm.load(session: session) }
                 }
             }
             // Профиль модально (вкладки профиля больше нет — доступ из шапки).
