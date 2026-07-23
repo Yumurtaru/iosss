@@ -1,0 +1,50 @@
+name: YumurtaPremium
+options:
+  bundleIdPrefix: ru.marketplace.client.premium
+  createIntermediateGroups: true
+# Firebase Cloud Messaging — доставка push на iOS через тот же FCM-канал,
+# что уже используется сервером для Android (core/Push.php, FCM HTTP v1).
+# Требуется файл GoogleService-Info.plist в Sources/ для bundle id
+# ru.marketplace.client.premium (создать это приложение в Firebase-проекте и скачать plist).
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    from: "10.24.0"
+targets:
+  YumurtaPremium:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources: [Sources]
+    dependencies:
+      - package: Firebase
+        product: FirebaseMessaging
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: Yumurta
+        NSLocationWhenInUseUsageDescription: "Нужно, чтобы определить ваш город и показать курьера на карте во время доставки"
+        UILaunchScreen:
+          UIColorName: LaunchBG
+          UIImageRespectsSafeAreaInsets: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes: [remote-notification]
+        CFBundleURLTypes:
+          - CFBundleURLName: ru.marketplace.client.premium
+            CFBundleURLSchemes: [yumurta]
+    entitlements:
+      path: Generated/YumurtaPremium.entitlements
+      properties:
+        aps-environment: production
+        com.apple.developer.associated-domains: [applinks:yumurta.ru]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.marketplace.client.premium
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: 1
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Manual
