@@ -10,6 +10,8 @@ workflows:
         distribution_type: app_store
         bundle_identifier: ru.marketplace.client.premium
       xcode: latest
+      vars:
+        BUNDLE_ID: "ru.marketplace.client.premium"
     scripts:
       - name: XcodeGen
         script: |
@@ -19,7 +21,11 @@ workflows:
         script: |
           cd "$CM_BUILD_DIR" && agvtool new-version -all "$BUILD_NUMBER"
       - name: Signing
-        script: xcode-project use-profiles
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          keychain add-certificates
+          xcode-project use-profiles
       - name: Build ipa
         script: |
           cd "$CM_BUILD_DIR"
