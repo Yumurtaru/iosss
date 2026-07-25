@@ -1,55 +1,34 @@
-# Codemagic — сборка Yumurta iOS и автозагрузка в TestFlight/App Store.
-# Подпись и публикация — через App Store Connect API Key (без Firebase).
-#
-# ПЕРЕД ПЕРВЫМ ЗАПУСКОМ (один раз, в интерфейсе Codemagic):
-#   Teams → Integrations → App Store Connect → Connect / Add key:
-#     Name (имя интеграции): yumurta_asc      ← ДОЛЖНО совпадать со значением ниже
-#     Issuer ID: 1f1adf9a-b476-4ea7-b19b-d73e824c890c
-#     Key ID:    FG6S685MZ2
-#     API key:   файл AuthKey_FG6S685MZ2.p8 (App Store Connect API key)
-#
-# Bundle id приложения: ru.marketplace.client.premium
-
 workflows:
   ios-release:
     name: Yumurta iOS (TestFlight)
     max_build_duration: 60
     instance_type: mac_mini_m2
     integrations:
-      app_store_connect: yumurta_asc          # имя интеграции из шага выше
+      app_store_connect: yumurta_asc
     environment:
       ios_signing:
-        distribution_type: app_store           # дистрибуция для App Store/TestFlight
+        distribution_type: app_store
         bundle_identifier: ru.marketplace.client.premium
       xcode: latest
-      vars:
-        BUNDLE_ID: "ru.marketplace.client.premium"
     scripts:
-      - name: Установить XcodeGen
+      - name: XcodeGen
         script: |
           which xcodegen || brew install xcodegen
-      - name: Сгенерировать .xcodeproj
+          cd "$CM_BUILD_DIR" && xcodegen generate
+      - name: Build number
+        script: |
+          cd "$CM_BUILD_DIR" && agvtool new-version -all "$BUILD_NUMBER"
+      - name: Signing
+        script: xcode-project use-profiles
+      - name: Build ipa
         script: |
           cd "$CM_BUILD_DIR"
-          xcodegen generate
-      - name: Номер сборки (уникальный для App Store)
-        script: |
-          cd "$CM_BUILD_DIR"
-          agvtool new-version -all "$BUILD_NUMBER"
-      - name: Подготовить профили подписи
-        script: |
-          xcode-project use-profiles
-      - name: Собрать .ipa
-        script: |
-          cd "$CM_BUILD_DIR"
-          xcode-project build-ipa \
-            --project "YumurtaPremium.xcodeproj" \
-            --scheme "YumurtaPremium"
+          xcode-project build-ipa --project "YumurtaPremium.xcodeproj" --scheme "YumurtaPremium"
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
     publishing:
       app_store_connect:
         auth: integration
-        submit_to_testflight: true             # автозагрузка в TestFlight
-        submit_to_app_store: false             # true — когда готов отправить в App Store на ревью
+        submit_to_testflight: true
+        submit_to_app_store: false
