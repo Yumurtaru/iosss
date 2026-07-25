@@ -6,9 +6,6 @@ workflows:
     integrations:
       app_store_connect: yumurta_asc
     environment:
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: ru.marketplace.client.premium
       xcode: latest
       vars:
         BUNDLE_ID: "ru.marketplace.client.premium"
