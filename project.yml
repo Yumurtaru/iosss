@@ -26,7 +26,6 @@ targets:
       path: Generated/YumurtaPremium.entitlements
       properties:
         aps-environment: production
-        com.apple.developer.associated-domains: [applinks:yumurta.ru]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ru.marketplace.client.premium
