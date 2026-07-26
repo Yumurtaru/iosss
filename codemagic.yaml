@@ -1,10 +1,3 @@
-# Codemagic — сборка Yumurta iOS и автозагрузка в TestFlight.
-# Подпись — ЯВНО в скриптах через app-store-connect fetch-signing-files --create
-# (без блока ios_signing, чтобы встроенная автоподпись не падала раньше времени).
-# Bundle id: ru.marketplace.client.premium
-#
-# В Codemagic должен быть подключён ключ App Store Connect с именем  yumurta_asc.
-
 workflows:
   ios-release:
     name: Yumurta iOS (TestFlight)
@@ -14,8 +7,9 @@ workflows:
       app_store_connect: yumurta_asc
     environment:
       xcode: latest
-      vars:
-        BUNDLE_ID: "ru.marketplace.client.premium"
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: ru.marketplace.client.premium
     scripts:
       - name: XcodeGen
         script: |
@@ -24,20 +18,13 @@ workflows:
       - name: Номер сборки
         script: |
           cd "$CM_BUILD_DIR" && agvtool new-version -all "$BUILD_NUMBER"
-      - name: Создать сертификат и профиль, применить
+      - name: Применить профиль
         script: |
-          keychain initialize
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE \
-            --create
-          keychain add-certificates
-          xcode-project use-profiles
+          xcode-project use-profiles --project "$CM_BUILD_DIR/YumurtaPremium.xcodeproj"
       - name: Сборка .ipa
         script: |
           cd "$CM_BUILD_DIR"
-          xcode-project build-ipa \
-            --project "YumurtaPremium.xcodeproj" \
-            --scheme "YumurtaPremium"
+          xcode-project build-ipa --project "YumurtaPremium.xcodeproj" --scheme "YumurtaPremium"
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
