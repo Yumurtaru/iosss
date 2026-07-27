@@ -8,8 +8,10 @@ workflows:
     environment:
       xcode: latest
       ios_signing:
-        distribution_type: app_store
-        bundle_identifier: ru.marketplace.client.premium
+        provisioning_profiles:
+          - yumurta_appstore
+        certificates:
+          - yumurta_dist
     scripts:
       - name: XcodeGen
         script: |
