@@ -117,11 +117,15 @@ struct HomeView: View {
     @State private var favPopular: Set<String> = []
     @State private var appeared = false
 
-    // Навигация внутри собственного стека таба (флоу как в Discover/Listing).
-    @State private var pushedShop: Shop?
-    @State private var pushedProduct: Int?
-    // Раздел «Магазины»/«Услуги»/«Рестораны» листингом (там ряд категорий для store/service).
-    @State private var pushedListing: (orgType: String, title: String)?
+    // Единый маршрут навигации таба. ВАЖНО: несколько .navigationDestination(isPresented:)
+    // в одном NavigationStack конфликтуют в SwiftUI (срабатывает только первый) — поэтому
+    // держим ОДИН destination на enum-маршрут.
+    private enum HomeRoute {
+        case shop(Shop)
+        case product(Int)
+        case listing(orgType: String, title: String)
+    }
+    @State private var route: HomeRoute?
 
     // Смена города с шапки Главной.
     @State private var showCitySheet = false
@@ -148,8 +152,8 @@ struct HomeView: View {
                         // листинга с сеткой категорий (как в старом клиенте), а не грузим
                         // плоский орг-список инлайн (для магазинов он приходит пустым).
                         switch k {
-                        case .shops:    pushedListing = (orgType: "store",   title: "Магазины")
-                        case .services: pushedListing = (orgType: "service", title: "Услуги")
+                        case .shops:    route = .listing(orgType: "store",   title: "Магазины")
+                        case .services: route = .listing(orgType: "service", title: "Услуги")
                         default:        Task { await vm.changeKind(k, session: session) }
                         }
                     }
@@ -180,18 +184,15 @@ struct HomeView: View {
                 Task { await vm.load(session: session) }
             }
             // Переходы из карточек: организация → OrgView, популярный товар → ProductView.
+            // ОДИН destination на все переходы таба (организация / товар / листинг категорий).
             .navigationDestination(isPresented: Binding(
-                get: { pushedShop != nil }, set: { if !$0 { pushedShop = nil } }
-            )) { if let s = pushedShop { OrgView(shop: s) } }
-            .navigationDestination(isPresented: Binding(
-                get: { pushedProduct != nil }, set: { if !$0 { pushedProduct = nil } }
-            )) { if let id = pushedProduct { ProductView(id: id) } }
-            // Раздел «Магазины»/«Услуги»/«Рестораны» листингом (ряд категорий для store/service).
-            .navigationDestination(isPresented: Binding(
-                get: { pushedListing != nil }, set: { if !$0 { pushedListing = nil } }
+                get: { route != nil }, set: { if !$0 { route = nil } }
             )) {
-                if let l = pushedListing {
-                    ListingView(orgType: l.orgType, title: l.title, cityId: session.cityId)
+                switch route {
+                case .shop(let s):                   OrgView(shop: s)
+                case .product(let id):               ProductView(id: id)
+                case .listing(let type, let title):  ListingView(orgType: type, title: title, cityId: session.cityId)
+                case .none:                          EmptyView()
                 }
             }
             // Смена города с шапки: выбор → Session (id/name) + перезагрузка данных.
@@ -285,7 +286,7 @@ struct HomeView: View {
                                 tone: idx,
                                 isFav: favBinding(popular: item.uid)
                             ) {
-                                pushedProduct = item.id   // → карточка товара
+                                route = .product(item.id)   // → карточка товара
                             }
                         }
                     }
@@ -309,7 +310,7 @@ struct HomeView: View {
                                 tone: idx,
                                 isFav: favBinding(popular: item.uid)
                             ) {
-                                pushedProduct = item.id   // → карточка товара
+                                route = .product(item.id)   // → карточка товара
                             }
                         }
                     }
@@ -323,7 +324,7 @@ struct HomeView: View {
                 SectionHeader(title: sectionTitle, actionTitle: "Все") {
                     // «Все» → раздел листингом; для «Все» (kind=.all) уводим на Поиск, как раньше.
                     if let type = sectionOrgType {
-                        pushedListing = (orgType: type, title: sectionTitle)
+                        route = .listing(orgType: type, title: sectionTitle)
                     } else {
                         router.requestedTab = 1
                     }
@@ -332,7 +333,7 @@ struct HomeView: View {
                 LazyVStack(spacing: YMSpace.lg) {
                     ForEach(Array(vm.shops.enumerated()), id: \.element.id) { idx, shop in
                         OrgCard(shop: shop, tone: idx, isFav: favBinding(shop: shop.id)) {
-                            pushedShop = shop   // → карточка организации
+                            route = .shop(shop)   // → карточка организации
                         }
                         .opacity(appeared || reduceMotion ? 1 : 0)
                         .offset(y: appeared || reduceMotion ? 0 : 12)
