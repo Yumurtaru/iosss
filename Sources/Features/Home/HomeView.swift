@@ -144,7 +144,14 @@ struct HomeView: View {
                         .padding(.top, 6)
 
                     ChipRow(selected: $vm.kind) { k in
-                        Task { await vm.changeKind(k, session: session) }
+                        // «Магазины»/«Услуги» организованы по категориям — открываем экран
+                        // листинга с сеткой категорий (как в старом клиенте), а не грузим
+                        // плоский орг-список инлайн (для магазинов он приходит пустым).
+                        switch k {
+                        case .shops:    pushedListing = (orgType: "store",   title: "Магазины")
+                        case .services: pushedListing = (orgType: "service", title: "Услуги")
+                        default:        Task { await vm.changeKind(k, session: session) }
+                        }
                     }
                     .padding(.top, 12)
 
