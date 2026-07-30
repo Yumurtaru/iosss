@@ -148,14 +148,8 @@ struct HomeView: View {
                         .padding(.top, 6)
 
                     ChipRow(selected: $vm.kind) { k in
-                        // «Магазины»/«Услуги» организованы по категориям — открываем экран
-                        // листинга с сеткой категорий (как в старом клиенте), а не грузим
-                        // плоский орг-список инлайн (для магазинов он приходит пустым).
-                        switch k {
-                        case .shops:    route = .listing(orgType: "store",   title: "Магазины")
-                        case .services: route = .listing(orgType: "service", title: "Услуги")
-                        default:        Task { await vm.changeKind(k, session: session) }
-                        }
+                        // Все чипы (Все/Рестораны/Магазины/Услуги) — одинаково: инлайн-загрузка.
+                        Task { await vm.changeKind(k, session: session) }
                     }
                     .padding(.top, 12)
 
