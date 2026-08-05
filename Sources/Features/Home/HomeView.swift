@@ -153,15 +153,18 @@ struct HomeView: View {
                     }
                     .padding(.top, 12)
 
-                    // ЯКОРЬ ЗАВИСИМОСТИ SwiftUI — НЕ УДАЛЯТЬ.
-                    // Внутри LazyVStack секция списка (content) не перерисовывалась при смене
-                    // раздела/города, из-за чего «Магазины» не появлялись. Явное чтение
-                    // vm.kind/vm.shops/session.cityId в теле экрана заставляет body переоценивать
-                    // список при их изменении. Вью невидимая (0×0, opacity 0).
-                    Text(verbatim: "\(vm.kind.rawValue)·\(vm.shops.count)·\(session.cityId ?? 0)")
-                        .frame(width: 0, height: 0)
-                        .opacity(0)
-                        .accessibilityHidden(true)
+                    // ЯКОРЬ ЗАВИСИМОСТИ SwiftUI — НЕ УДАЛЯТЬ (это та самая «отладочная» строка,
+                    // с которой «Магазины» заработали). Внутри LazyVStack секция списка не
+                    // перерисовывалась при смене раздела/города — явное чтение
+                    // vm.kind/vm.shops/vm.error/session.cityId в теле экрана заставляет body
+                    // переоценивать список. Раскладка полная (как у рабочей строки), цвет —
+                    // прозрачный, поэтому текста на экране не видно.
+                    Text("город=\(session.cityId.map(String.init) ?? "нет") · раздел=\(vm.kind.rawValue) · пришло=\(vm.shops.count)\(vm.error.map { " · \($0)" } ?? "")")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.clear)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, YMSpace.xl)
+                        .padding(.top, 6)
 
                     PromoBanner()
                         .padding(.top, 12)
