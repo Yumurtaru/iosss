@@ -153,15 +153,6 @@ struct HomeView: View {
                     }
                     .padding(.top, 12)
 
-                    // ВРЕМЕННАЯ ДИАГНОСТИКА (убрать после проверки «Магазины»):
-                    // показывает город, раздел, сколько организаций реально пришло и ошибку.
-                    Text("отладка · город=\(session.cityId.map(String.init) ?? "нет") · раздел=\(vm.kind.rawValue) · пришло=\(vm.shops.count)\(vm.error.map { " · ОШИБКА: \($0)" } ?? "")")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, YMSpace.xl)
-                        .padding(.top, 6)
-
                     PromoBanner()
                         .padding(.top, 12)
 
