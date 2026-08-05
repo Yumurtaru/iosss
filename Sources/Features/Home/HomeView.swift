@@ -153,6 +153,16 @@ struct HomeView: View {
                     }
                     .padding(.top, 12)
 
+                    // ЯКОРЬ ЗАВИСИМОСТИ SwiftUI — НЕ УДАЛЯТЬ.
+                    // Внутри LazyVStack секция списка (content) не перерисовывалась при смене
+                    // раздела/города, из-за чего «Магазины» не появлялись. Явное чтение
+                    // vm.kind/vm.shops/session.cityId в теле экрана заставляет body переоценивать
+                    // список при их изменении. Вью невидимая (0×0, opacity 0).
+                    Text(verbatim: "\(vm.kind.rawValue)·\(vm.shops.count)·\(session.cityId ?? 0)")
+                        .frame(width: 0, height: 0)
+                        .opacity(0)
+                        .accessibilityHidden(true)
+
                     PromoBanner()
                         .padding(.top, 12)
 
