@@ -124,6 +124,7 @@ struct HomeView: View {
         case shop(Shop)
         case product(Int)
         case listing(orgType: String, title: String)
+        case becomeSeller
     }
     @State private var route: HomeRoute?
 
@@ -199,6 +200,7 @@ struct HomeView: View {
                 case .shop(let s):                   OrgView(shop: s)
                 case .product(let id):               ProductView(id: id)
                 case .listing(let type, let title):  ListingView(orgType: type, title: title, cityId: session.cityId)
+                case .becomeSeller:                  BecomeSellerView()
                 case .none:                          EmptyView()
                 }
             }
@@ -339,16 +341,22 @@ struct HomeView: View {
                 .padding(.top, 18)
                 LazyVStack(spacing: YMSpace.lg) {
                     ForEach(Array(vm.shops.enumerated()), id: \.element.id) { idx, shop in
-                        OrgCard(shop: shop, tone: idx, isFav: favBinding(shop: shop.id)) {
-                            route = .shop(shop)   // → карточка организации
+                        VStack(spacing: YMSpace.lg) {
+                            OrgCard(shop: shop, tone: idx, isFav: favBinding(shop: shop.id)) {
+                                route = .shop(shop)   // → карточка организации
+                            }
+                            .opacity(appeared || reduceMotion ? 1 : 0)
+                            .offset(y: appeared || reduceMotion ? 0 : 12)
+                            .animation(
+                                YMMotion.adaptive(YMMotion.spring.delay(Double(idx) * 0.04),
+                                                  reduceMotion: reduceMotion),
+                                value: appeared
+                            )
+                            // Промо-карточка «Стать продавцом» после каждых 3 заведений.
+                            if (idx + 1) % 3 == 0 {
+                                BecomeSellerPromoCard { route = .becomeSeller }
+                            }
                         }
-                        .opacity(appeared || reduceMotion ? 1 : 0)
-                        .offset(y: appeared || reduceMotion ? 0 : 12)
-                        .animation(
-                            YMMotion.adaptive(YMMotion.spring.delay(Double(idx) * 0.04),
-                                              reduceMotion: reduceMotion),
-                            value: appeared
-                        )
                     }
                 }
                 .padding(.horizontal, YMSpace.xl)

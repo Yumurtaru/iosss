@@ -163,6 +163,7 @@ struct ListingView: View {
     @State private var showSort = false
     @State private var pushedShop: Shop?
     @State private var pushedProduct: Int?
+    @State private var showBecomeSeller = false
 
     init(orgType: String, title: String, cityId: Int?) {
         _vm = StateObject(wrappedValue: ListingViewModel(orgType: orgType, title: title, cityId: cityId))
@@ -196,6 +197,9 @@ struct ListingView: View {
             SortSheet(selection: $vm.sort)
                 .presentationDetents([.height(360)])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showBecomeSeller) {
+            NavigationStack { BecomeSellerView() }
         }
         .navigationDestination(isPresented: Binding(
             get: { pushedShop != nil }, set: { if !$0 { pushedShop = nil } }
@@ -318,10 +322,14 @@ struct ListingView: View {
         if vm.screen == .category {
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    ForEach(vm.sortedOrgs) { shop in
+                    ForEach(Array(vm.sortedOrgs.enumerated()), id: \.element.id) { idx, shop in
                         OrgListRow(shop: shop) {
                             Haptics.light()
                             pushedShop = shop
+                        }
+                        // Промо-карточка «Стать продавцом» после каждых 3 заведений.
+                        if (idx + 1) % 3 == 0 {
+                            BecomeSellerPromoCard { showBecomeSeller = true }
                         }
                     }
                     if vm.sortedOrgs.isEmpty { emptyState }
