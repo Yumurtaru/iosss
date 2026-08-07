@@ -197,6 +197,32 @@ final class API {
         return try await send(req, as: T.self)
     }
     func postFormVoid(_ path: String, form: [String: String]) async throws { _ = try await postForm(path, form: form) as EmptyResp }
+
+    /// Multipart-загрузка фото в чат заказа: POST api/v1/orders/{id}/chat/photo (field "photo").
+    /// Возвращает относительный путь вложения. Проходит через send() (конверт/401/ретрай).
+    func uploadChatPhoto(orderId: Int, jpeg: Data, caption: String = "") async throws -> String? {
+        struct PhotoResp: Decodable { let attachment: String? }
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var req = URLRequest(url: URL(string: API.base + "/api/v1/orders/\(orderId)/chat/photo")!)
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        if let token = UserDefaults.standard.string(forKey: "token") { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        var body = Data()
+        func field(_ name: String, _ value: String) {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(value)\r\n".data(using: .utf8)!)
+        }
+        if !caption.isEmpty { field("caption", caption) }
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(jpeg)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        req.httpBody = body
+        let r: PhotoResp = try await send(req, as: PhotoResp.self)
+        return r.attachment
+    }
     func deleteVoid(_ path: String) async throws { _ = try await send(try makeRequest("DELETE", path), as: EmptyResp.self) }
     func putVoid(_ path: String, body: Encodable? = nil) async throws { _ = try await send(try makeRequest("PUT", path, body: body), as: EmptyResp.self) }
 }

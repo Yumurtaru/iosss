@@ -181,7 +181,28 @@ struct TrackData: Codable {
 }
 struct ChatMessage: Codable, Identifiable {
     @LenientInt var id: Int?; let message: String?; let sender: String?; let createdAt: String?
+    @LenientBool var mine: Bool?        // сервер отдаёт mine — источник правды «моё сообщение»
+    let attachment: String?             // относительный webp-путь фото (nil = текст)
+    @LenientBool var read: Bool?        // прочитано контрагентом (для моих сообщений → ✓✓)
+    let senderName: String?
     var stableId: String { "\(id ?? 0)-\(createdAt ?? "")" }
+    // Локальные (ещё не отправленные / ошибка) сообщения — для оптимистичного UI.
+    var localState: String? = nil       // nil=с сервера, "sending", "failed"
+    var localImage: Data? = nil         // локальное фото до загрузки (превью)
+}
+
+// Диалог в списке чатов: GET /api/v1/chats.
+struct ChatDialog: Codable, Identifiable {
+    @LenientInt var orderId: Int?
+    @LenientInt var dailyNumber: Int?
+    let status: String?
+    let shopName: String?
+    let shopLogo: String?
+    let lastMessage: String?
+    let lastAttachment: String?
+    let lastAt: String?
+    @LenientInt var unreadCount: Int?
+    var id: Int { orderId ?? 0 }
 }
 struct BonusInfo: Codable { @LenientDouble var balance: Double?; let history: [BonusRow]? }
 struct BonusRow: Codable, Identifiable { @LenientInt var id: Int?; @LenientDouble var amount: Double?; let reason: String?; let createdAt: String?

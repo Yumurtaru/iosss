@@ -45,23 +45,16 @@ struct ChatView: View {
 
 @MainActor
 private final class ChatListViewModel: ObservableObject {
-    @Published var orders: [Order] = []
+    @Published var dialogs: [ChatDialog] = []
     @Published var loading = true
     private var didLoad = false
 
     func firstLoad() async { guard !didLoad else { return }; didLoad = true; await load() }
     func load() async {
         loading = true
-        // TODO(API): отдельного эндпоинта «список диалогов» нет. Диалоги = чаты по заказам,
-        // поэтому источник — GET api/v1/orders (те же данные, что в списке заказов).
-        orders = (try? await API.shared.list("api/v1/orders")) ?? []
+        // Реальный список диалогов: заказы с перепиской + последнее сообщение + непрочитанные.
+        dialogs = (try? await API.shared.list("api/v1/chats")) ?? []
         loading = false
-    }
-    /// Активные — вверху (с ними идёт живая переписка), затем недавняя история.
-    var sorted: [Order] {
-        orders.sorted { a, b in
-            OrderFlow.isActive(a.status) && !OrderFlow.isActive(b.status)
-        }
     }
 }
 
@@ -70,11 +63,10 @@ private struct ChatListScreen: View {
     @StateObject private var vm = ChatListViewModel()
     @State private var query = ""
 
-    private var filtered: [Order] {
-        let base = vm.sorted
-        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return base }
+    private var filtered: [ChatDialog] {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return vm.dialogs }
         let q = query.lowercased()
-        return base.filter { ($0.shopName ?? "").lowercased().contains(q) }
+        return vm.dialogs.filter { ($0.shopName ?? "").lowercased().contains(q) }
     }
 
     var body: some View {
@@ -103,7 +95,7 @@ private struct ChatListScreen: View {
             emptyState(icon: "person.crop.circle.badge.questionmark",
                        title: "Войдите в аккаунт",
                        hint: "Чтобы переписываться с заведениями по заказам.")
-        } else if vm.loading && vm.orders.isEmpty {
+        } else if vm.loading && vm.dialogs.isEmpty {
             VStack(spacing: YMSpace.sm) {
                 ForEach(0..<4, id: \.self) { _ in SkeletonBox().frame(height: 72) }
             }
@@ -116,12 +108,12 @@ private struct ChatListScreen: View {
                             : "Попробуйте другой запрос.")
         } else {
             VStack(spacing: 0) {
-                ForEach(filtered) { order in
-                    NavigationLink(value: order.id) {
-                        ChatListRow(order: order)
+                ForEach(filtered) { dialog in
+                    NavigationLink(value: dialog.orderId ?? 0) {
+                        ChatListRow(dialog: dialog)
                     }
                     .buttonStyle(.plain)
-                    if order.id != filtered.last?.id {
+                    if dialog.id != filtered.last?.id {
                         Divider().overlay(YMColor.hairline).padding(.leading, 82)
                     }
                 }
@@ -148,45 +140,43 @@ private struct ChatListScreen: View {
     }
 }
 
-/// Строка чата: лого 52, название, время, превью последнего сообщения, золотой бейдж непрочитанных.
+/// Строка чата: лого 52, название, время последнего сообщения, превью, золотой бейдж непрочитанных.
 private struct ChatListRow: View {
-    let order: Order
+    let dialog: ChatDialog
 
-    private var active: Bool { OrderFlow.isActive(order.status) }
-
-    /// Превью: серверного «последнего сообщения» в списке заказов нет — показываем текущий статус.
-    /// TODO(API): при появлении last_message/unread_count в списке диалогов — подставить сюда.
-    private var preview: String { OrderStatus.label(order.status) }
+    private var unread: Int { dialog.unreadCount ?? 0 }
+    /// Превью: последнее сообщение, либо «📷 Фото» для вложения, либо заглушка.
+    private var preview: String {
+        if let m = dialog.lastMessage, !m.isEmpty { return m }
+        if !((dialog.lastAttachment ?? "").isEmpty) { return "📷 Фото" }
+        return "Нет сообщений"
+    }
 
     var body: some View {
         HStack(spacing: YMSpace.md) {
-            LogoBadge(url: API.imageURL(order.shopLogo),
-                      letter: (order.shopName ?? "?").prefix(1).uppercased(),
+            LogoBadge(url: API.imageURL(dialog.shopLogo),
+                      letter: (dialog.shopName ?? "?").prefix(1).uppercased(),
                       size: 52)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(order.shopName ?? "Заведение")
+                    Text(dialog.shopName ?? "Заведение")
                         .font(.system(size: 15.5, weight: .bold)).foregroundStyle(YMColor.text)
                         .lineLimit(1)
                     Spacer(minLength: 6)
-                    Text(DateFmt.time(order.createdAt))
-                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    Text(DateFmt.time(dialog.lastAt))
+                        .font(YMFont.caption).foregroundStyle(unread > 0 ? YMColor.accent : YMColor.muted)
                 }
                 HStack(spacing: YMSpace.sm) {
-                    if active { StatusDot(color: OrderFlow.color(order.status),
-                                          pulsing: OrderFlow.isEnRoute(order.status), size: 6) }
                     Text(preview)
-                        .font(.system(size: 13))
-                        .foregroundStyle(active ? YMColor.text : YMColor.muted)
+                        .font(.system(size: 13, weight: unread > 0 ? .semibold : .regular))
+                        .foregroundStyle(unread > 0 ? YMColor.text : YMColor.muted)
                         .lineLimit(1)
                     Spacer(minLength: 6)
-                    // Золотой бейдж «непрочитанных»: сервер не отдаёт счётчик в списке —
-                    // как индикатор новизны используем «есть активная переписка».
-                    // TODO(API): заменить на реальный unread_count, когда появится.
-                    if active {
-                        Text("●")
-                            .font(.system(size: 12, weight: .black))
-                            .foregroundStyle(YMColor.accent)
+                    if unread > 0 {
+                        Text("\(unread)")
+                            .font(.system(size: 11, weight: .heavy)).foregroundStyle(YMColor.onAccent)
+                            .frame(minWidth: 20, minHeight: 20).padding(.horizontal, 5)
+                            .background(YMColor.accent, in: Capsule())
                     }
                 }
             }
@@ -247,6 +237,25 @@ private final class ChatThreadViewModel: ObservableObject {
         sending = true; defer { sending = false }
         try? await API.shared.postVoid("api/v1/orders/\(orderId)/chat", body: ["message": trimmed])
         await fetchNew()
+    }
+
+    /// Отправка фото с оптимистичным превью (localImage) + статусом «отправляется/ошибка».
+    func sendPhoto(_ data: Data) async {
+        let tempStamp = "local-\(UUID().uuidString)"
+        let temp = ChatMessage(id: nil, message: nil, sender: "client", createdAt: tempStamp,
+                               mine: true, attachment: nil, read: false, senderName: nil,
+                               localState: "sending", localImage: data)
+        messages.append(temp)
+        sending = true; defer { sending = false }
+        do {
+            _ = try await API.shared.uploadChatPhoto(orderId: orderId, jpeg: data)
+            messages.removeAll { $0.stableId == temp.stableId }
+            await fetchNew()
+        } catch {
+            if let i = messages.firstIndex(where: { $0.stableId == temp.stableId }) {
+                messages[i].localState = "failed"
+            }
+        }
     }
 }
 
@@ -328,7 +337,8 @@ private struct ChatThreadScreen: View {
                             .font(YMFont.callout).foregroundStyle(YMColor.muted)
                             .padding(.top, 48)
                     } else {
-                        ForEach(vm.messages) { m in
+                        ForEach(Array(vm.messages.enumerated()), id: \.element.stableId) { idx, m in
+                            if let sep = daySeparator(before: idx) { dateChip(sep) }
                             ChatBubble(message: m).id(m.stableId)
                         }
                     }
@@ -383,10 +393,53 @@ private struct ChatThreadScreen: View {
         .padding(.vertical, YMSpace.sm)
         .background(.ultraThinMaterial)
         .onChange(of: photoItems) { _ in
-            // TODO(API): загрузка вложений в чат заказа сервером пока не поддержана
-            // (POST chat принимает только {message}). UI-хук готов, отправку добавим аддитивно.
-            photoItems = []
+            guard let item = photoItems.first else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    await vm.sendPhoto(data)
+                }
+                photoItems = []
+            }
         }
+    }
+
+    // MARK: Разделители дат
+
+    /// Метка-разделитель перед сообщением idx, если день отличается от предыдущего.
+    private func daySeparator(before idx: Int) -> String? {
+        guard idx < vm.messages.count, let d = chatDate(vm.messages[idx].createdAt) else { return nil }
+        if idx == 0 { return dayLabel(d) }
+        guard let prev = chatDate(vm.messages[idx - 1].createdAt) else { return dayLabel(d) }
+        return Calendar.current.isDate(d, inSameDayAs: prev) ? nil : dayLabel(d)
+    }
+
+    private func dateChip(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold)).foregroundStyle(YMColor.muted)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .background(YMColor.surface2, in: Capsule())
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+    }
+
+    /// Парсинг серверного времени: MySQL datetime "yyyy-MM-dd HH:mm:ss" или ISO8601.
+    private func chatDate(_ s: String?) -> Date? {
+        guard let s, !s.isEmpty, !s.hasPrefix("local-") else { return nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Europe/Moscow")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+    }
+
+    private func dayLabel(_ date: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Сегодня" }
+        if cal.isDateInYesterday(date) { return "Вчера" }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ru_RU")
+        f.dateFormat = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year) ? "d MMMM" : "d MMMM yyyy"
+        return f.string(from: date)
     }
 }
 
@@ -400,11 +453,14 @@ private struct ChatBubble: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appeared = false
 
-    /// Мои сообщения — от клиента (как в старом ChatBubble: sender == "client").
+    /// «Моё» сообщение — из серверного поля mine (fallback на строку sender для совместимости).
     private var mine: Bool {
+        if let m = message.mine { return m }
         let s = (message.sender ?? "").lowercased()
         return s == "client" || s == "customer" || s == "me" || s == "user"
     }
+    private var hasText: Bool { !((message.message ?? "").isEmpty) }
+    private var hasImage: Bool { message.localImage != nil || !((message.attachment ?? "").isEmpty) }
 
     // Асимметричные углы: мои 16/16/4/16, их 16/16/16/4.
     private var corners: RoundedCorner {
@@ -416,20 +472,33 @@ private struct ChatBubble: View {
         HStack {
             if mine { Spacer(minLength: 40) }
             VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
-                Text(message.message ?? "")
-                    .font(YMFont.body)
-                    .foregroundStyle(mine ? YMColor.onAccent : YMColor.text)
-                    .padding(.horizontal, 13).padding(.vertical, 9)
-                    .background(mine ? YMColor.accent : YMColor.surface)
-                    .clipShape(corners)
-                    .overlay(mine ? nil : corners.strokeBorder(YMColor.hairline, lineWidth: 1))
-                HStack(spacing: 3) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if hasImage { bubbleImage }
+                    if hasText {
+                        Text(message.message ?? "")
+                            .font(YMFont.body)
+                            .foregroundStyle(mine ? YMColor.onAccent : YMColor.text)
+                    }
+                }
+                .padding(hasImage ? 4 : 9)
+                .padding(.horizontal, hasImage ? 0 : 4)
+                .background(mine ? YMColor.accent : YMColor.surface)
+                .clipShape(corners)
+                .overlay(mine ? nil : corners.strokeBorder(YMColor.hairline, lineWidth: 1))
+
+                HStack(spacing: 4) {
+                    if mine, message.localState == "failed" {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 10)).foregroundStyle(YMColor.statusCancel)
+                    }
                     Text(DateFmt.time(message.createdAt))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(mine ? YMColor.onAccent.opacity(0.55) : YMColor.muted)
-                    if mine {
-                        Text("✓✓").font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(YMColor.onAccent.opacity(0.55))
+                        .font(.system(size: 10.5)).foregroundStyle(YMColor.muted)
+                    if mine, message.localState == "sending" {
+                        Image(systemName: "clock").font(.system(size: 9)).foregroundStyle(YMColor.muted)
+                    } else if mine, message.localState == nil {
+                        Text(message.read == true ? "✓✓" : "✓")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(message.read == true ? YMColor.accent : YMColor.muted)
                     }
                 }
             }
@@ -441,6 +510,26 @@ private struct ChatBubble: View {
             guard !reduceMotion else { appeared = true; return }
             withAnimation(.easeOut(duration: 0.28)) { appeared = true }
         }
+    }
+
+    /// Фото в пузыре: локальное превью (при отправке) или загрузка по URL.
+    @ViewBuilder private var bubbleImage: some View {
+        Group {
+            if let data = message.localImage, let ui = UIImage(data: data) {
+                Image(uiImage: ui).resizable().scaledToFill()
+            } else if let url = API.imageURL(message.attachment) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let img): img.resizable().scaledToFill()
+                    case .failure:          ZStack { Color(.secondarySystemBackground); Image(systemName: "photo").foregroundStyle(YMColor.muted) }
+                    default:                ZStack { Color(.secondarySystemBackground); ProgressView() }
+                    }
+                }
+            }
+        }
+        .frame(width: 220, height: 220)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
     }
 }
 
