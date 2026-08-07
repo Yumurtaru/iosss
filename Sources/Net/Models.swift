@@ -53,6 +53,20 @@ struct OrgCategory: Codable, Identifiable, Hashable {
     @LenientInt var count: Int?
     @LenientBool var requiresLicense: Bool?
 }
+
+// Заявка на регистрацию организации из приложения («стать продавцом»).
+// Тело кодируется .convertToSnakeCase: orgName→org_name, fullName→full_name, cityId→city_id.
+struct OrgApplyBody: Encodable {
+    let orgName: String
+    let fullName: String
+    let phone: String
+    let type: String            // store | restaurant | service (канон API)
+    let cityId: Int?
+}
+struct OrgApplyResult: Decodable {
+    @LenientInt var registrationId: Int?
+    let status: String?          // "pending"
+}
 struct ShopDetail: Codable, Identifiable {
     let id: Int; let slug: String?; let name: String?; let logo: String?; let cover: String?; let banner: String?
     // Режим организации: "service" = запись на услуги, иначе магазин/меню (аддитивно, как на Android).
