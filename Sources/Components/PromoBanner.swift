@@ -3,9 +3,9 @@ import SwiftUI
 /// Промо-баннер (118pt, r22, золотое свечение в углу). Вариант Premium из макета:
 /// тёмная плашка, золотой kicker, кнопка «Забрать промокод».
 struct PromoBanner: View {
-    var kicker: String = "Только сегодня"
-    var title: String = "−20% на первый заказ"
-    var cta: String = "Забрать промокод"
+    var kicker: String = "Маркетплейс вашего города"
+    var title: String = "Магазины, рестораны и услуги"
+    var cta: String = "О Yumurta"
     var action: () -> Void = {}
 
     var body: some View {
