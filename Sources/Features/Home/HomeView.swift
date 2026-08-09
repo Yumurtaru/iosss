@@ -125,6 +125,7 @@ struct HomeView: View {
         case product(Int)
         case listing(orgType: String, title: String)
         case becomeSeller
+        case about
     }
     @State private var route: HomeRoute?
 
@@ -167,7 +168,7 @@ struct HomeView: View {
                         .padding(.horizontal, YMSpace.xl)
                         .padding(.top, 6)
 
-                    PromoBanner()
+                    PromoBanner(action: { route = .about })
                         .padding(.top, 12)
 
                     if vm.loading {
@@ -201,6 +202,7 @@ struct HomeView: View {
                 case .product(let id):               ProductView(id: id)
                 case .listing(let type, let title):  ListingView(orgType: type, title: title, cityId: session.cityId)
                 case .becomeSeller:                  BecomeSellerView()
+                case .about:                         AboutView()
                 case .none:                          EmptyView()
                 }
             }
