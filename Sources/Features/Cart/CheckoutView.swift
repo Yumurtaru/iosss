@@ -584,8 +584,11 @@ private struct AddAddressSheet: View {
     // Подсказки адреса (Dadata через сервер). Дебаунс 300 мс. Только выбранный город.
     private func scheduleSuggest(_ text: String) {
         suggestTask?.cancel()
-        lat = nil; lng = nil   // новый ввод улицы — координаты недействительны, пока не выбрана подсказка
+        // ВАЖНО: сначала проверяем suppressSuggest. pick() меняет street → сюда прилетает onChange;
+        // если сбросить lat/lng ДО этой проверки — обнулим только что выбранные координаты (баг
+        // «Выберите адрес из подсказок» после выбора). Обнуляем ТОЛЬКО при ручном вводе.
         if suppressSuggest { suppressSuggest = false; suggestions = []; return }
+        lat = nil; lng = nil   // ручной ввод улицы — координаты недействительны, пока не выбрана подсказка
         let q = text.trimmingCharacters(in: .whitespaces)
         guard q.count >= 3 else { suggestions = []; return }
         // Запрос строим как «<Город>, <ввод>» — Dadata приоритезирует этот город.
@@ -615,7 +618,8 @@ private struct AddAddressSheet: View {
 
     private func save() {
         if street.trimmingCharacters(in: .whitespaces).isEmpty { error = "Укажите улицу"; return }
-        if lat == nil || lng == nil { error = "Выберите адрес из подсказок"; return }
+        if house.trimmingCharacters(in: .whitespaces).isEmpty { error = "Укажите номер дома"; return }
+        // Координаты могут отсутствовать (подсказка без geo) — сервер догеокодирует адрес при сохранении.
         saving = true; error = nil
         let body = NewAddressBody(
             label: label.trimmingCharacters(in: .whitespaces).isEmpty ? "Адрес" : label,
@@ -639,7 +643,10 @@ private struct AddAddressSheet: View {
         Task {
             do {
                 try await API.shared.postVoid("api/v1/profile/addresses", body: body)
-                await MainActor.run { Haptics.success(); onSaved(optimistic); dismiss() }
+                // Перечитываем список — сервер догеокодировал координаты; берём созданный адрес (макс. id).
+                let list: [Address] = (try? await API.shared.list("api/v1/profile/addresses")) ?? []
+                let created = list.max(by: { $0.id < $1.id }) ?? optimistic
+                await MainActor.run { Haptics.success(); onSaved(created); dismiss() }
             } catch {
                 await MainActor.run { Haptics.error(); self.error = error.localizedDescription; saving = false }
             }

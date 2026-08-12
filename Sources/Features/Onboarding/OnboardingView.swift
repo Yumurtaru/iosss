@@ -135,22 +135,17 @@ private struct CityStep: View {
 
     @EnvironmentObject private var session: Session
 
-    // Популярные города по макету. id проставляется по факту загрузки /api/v1/cities.
-    private let popularNames = ["Москва", "Санкт-Петербург", "Казань",
-                                "Екатеринбург", "Новосибирск", "Сочи"]
-
-    @State private var cities: [City] = []          // реальные города с сервера
+    @State private var cities: [City] = []          // города С ОРГАНИЗАЦИЯМИ (с сервера)
     @State private var query = ""
-    @State private var selectedName: String = "Москва"
+    @State private var selectedName: String = ""
     @State private var selectedId: Int? = nil
 
-    // Отфильтрованный список для отображения (популярные + поиск по всем городам).
+    // Список для отображения: только города, где есть заведения (+ поиск по ним).
     private var shownNames: [String] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        if q.isEmpty { return popularNames }
         let all = cities.compactMap { $0.name }
-        let base = all.isEmpty ? popularNames : all
-        return base.filter { $0.lowercased().contains(q) }
+        if q.isEmpty { return all }
+        return all.filter { $0.lowercased().contains(q) }
     }
 
     var body: some View {
@@ -212,7 +207,7 @@ private struct CityStep: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                        Text("ПОПУЛЯРНЫЕ")
+                        Text("ГОРОДА С ЗАВЕДЕНИЯМИ")
                             .font(.system(size: 12, weight: .heavy))
                             .tracking(0.6)
                             .foregroundStyle(YMColor.muted)
@@ -232,11 +227,12 @@ private struct CityStep: View {
         .background(YMColor.bg.ignoresSafeArea())
         .safeAreaInset(edge: .bottom) {
             // Нижняя закреплённая кнопка «Продолжить · <город>».
-            Button("Продолжить · \(selectedName)") {
+            Button(selectedName.isEmpty ? "Продолжить" : "Продолжить · \(selectedName)") {
                 commitSelection()
                 onContinue()
             }
             .buttonStyle(YMPrimaryButtonStyle())
+            .disabled(selectedName.isEmpty)
             .padding(.horizontal, YMSpace.xxl)
             .padding(.top, 14)
             .padding(.bottom, 30)
@@ -276,10 +272,16 @@ private struct CityStep: View {
     }
 
     private func loadCities() async {
-        if let list: [City] = try? await API.shared.list("api/v1/cities") {
+        // Только города, где есть активные организации.
+        if let list: [City] = try? await API.shared.list("api/v1/cities", query: ["with_orgs": "1"]) {
             cities = list
-            // Проставим id для уже выбранного «Москва», если он есть на сервере.
-            selectedId = list.first { $0.name == selectedName }?.id
+            // Если текущий выбор пуст/не среди доступных — выбираем первый доступный город.
+            if let match = list.first(where: { $0.name == selectedName }) {
+                selectedId = match.id
+            } else if let first = list.first {
+                selectedName = first.name ?? ""
+                selectedId = first.id
+            }
         }
     }
 

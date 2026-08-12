@@ -38,7 +38,7 @@ final class HomeViewModel: ObservableObject {
         loading = true; error = nil
         // Города: если город ещё не выбран (нет id) — берём первый как в старом клиенте.
         if session.cityId == nil,
-           let cities: [City] = try? await API.shared.list("api/v1/cities"),
+           let cities: [City] = try? await API.shared.list("api/v1/cities", query: ["with_orgs": "1"]),
            let first = cities.first {
             session.cityId = first.id
             session.cityName = session.cityName ?? first.name
@@ -576,7 +576,7 @@ private struct CityPickerSheet: View {
     }
 
     private func loadCities() async {
-        let list: [City] = (try? await API.shared.list("api/v1/cities")) ?? []
+        let list: [City] = (try? await API.shared.list("api/v1/cities", query: ["with_orgs": "1"])) ?? []
         cities = list
         loading = false
     }
