@@ -16,11 +16,27 @@
 import SwiftUI
 
 /// Тело обновления профиля (PUT api/v1/profile). camelCase → snake_case автоматически.
-/// email опционален: пустая строка не отправляется (nil), совпадает со старым клиентом.
+/// email/phone/password опциональны: nil-поля сервер пропускает (isset() == false для null).
 private struct EditProfileBody: Encodable {
     let name: String
     let email: String?
+    let phone: String?
+    let password: String?
 }
+
+/// Подтверждаемая смена данных. changes — только изменённые поля; method: "call" | "email".
+private struct ChangeRequestBody: Encodable {
+    let changes: [String: String]
+    let method: String
+}
+/// Ответ на запрос подтверждения (data-нагрузка). debug_code → debugCode (convertFromSnakeCase).
+private struct ChangeRequestResult: Decodable {
+    let method: String?
+    let ttl: Int?
+    let target: String?
+    let debugCode: String?
+}
+private struct ChangeConfirmBody: Encodable { let code: String }
 
 struct EditProfileView: View {
     @Environment(\.dismiss) private var dismiss
@@ -28,10 +44,23 @@ struct EditProfileView: View {
     @State private var name = ""
     @State private var email = ""
     @State private var phone = ""
+    @State private var password = ""
     @State private var loading = true
     @State private var loadError: String?
     @State private var saving = false
     @State private var saveError: String?
+
+    // Исходные значения — чтобы понять, что реально изменилось.
+    @State private var origName = ""
+    @State private var origEmail = ""
+    @State private var origPhone = ""
+    // Поток подтверждения.
+    @State private var showMethodDialog = false
+    @State private var showCodeSheet = false
+    @State private var showSupportSheet = false
+    @State private var pendingChanges: [String: String] = [:]
+    @State private var confirmTarget: String?
+    @State private var code = ""
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
     private var emailValid: Bool {
@@ -39,7 +68,9 @@ struct EditProfileView: View {
         if e.isEmpty { return true }  // email опционален
         return e.contains("@") && e.contains(".") && !e.hasSuffix("@")
     }
-    private var canSave: Bool { !trimmedName.isEmpty && emailValid && !saving }
+    private var phoneValid: Bool { (10...11).contains(phone.filter(\.isNumber).count) }
+    private var passwordValid: Bool { password.isEmpty || password.count >= 6 }  // пустой = не меняем
+    private var canSave: Bool { !trimmedName.isEmpty && emailValid && phoneValid && passwordValid && !saving }
 
     var body: some View {
         ScrollView {
@@ -60,7 +91,15 @@ struct EditProfileView: View {
                             .padding(.top, -8).padding(.leading, 4)
                     }
 
-                    phoneField
+                    field(title: "Телефон", placeholder: "+7 900 000-00-00", text: $phone,
+                          contentType: .telephoneNumber, keyboard: .phonePad, autocap: .never)
+                    if !phoneValid {
+                        Text("Проверьте номер телефона")
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                            .padding(.top, -8).padding(.leading, 4)
+                    }
+
+                    passwordField
 
                     if let saveError {
                         Text(saveError)
@@ -86,6 +125,16 @@ struct EditProfileView: View {
         .navigationTitle("Редактировать профиль")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
+        .confirmationDialog("Подтвердите изменение", isPresented: $showMethodDialog, titleVisibility: .visible) {
+            Button("Звонок на телефон") { requestConfirm("call") }
+            Button("Код на почту") { requestConfirm("email") }
+            Button("Написать в поддержку") { showSupportSheet = true }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Как подтвердить смену учётных данных?")
+        }
+        .sheet(isPresented: $showCodeSheet) { codeSheet }
+        .sheet(isPresented: $showSupportSheet) { supportSheet }
     }
 
     // ── Поле ввода ──
@@ -107,24 +156,69 @@ struct EditProfileView: View {
         }
     }
 
-    // ── Телефон (только чтение) ──
-    private var phoneField: some View {
+    // ── Новый пароль (опционально) ──
+    private var passwordField: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Телефон")
+            Text("Новый пароль")
                 .font(.system(size: 13, weight: .heavy)).foregroundStyle(YMColor.muted)
-            HStack {
-                Text(phone.isEmpty ? "—" : phone)
-                    .font(.system(size: 15)).foregroundStyle(YMColor.muted)
-                Spacer()
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 12)).foregroundStyle(YMColor.muted)
+            SecureField("Оставьте пустым, чтобы не менять", text: $password)
+                .textContentType(.newPassword)
+                .font(.system(size: 15))
+                .foregroundStyle(YMColor.text)
+                .padding(.horizontal, 14).padding(.vertical, 14)
+                .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
+            if !passwordValid {
+                Text("Пароль минимум 6 символов")
+                    .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+            } else {
+                Text("Смена телефона, почты или пароля требует подтверждения (звонок или код на почту).")
+                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
             }
-            .padding(.horizontal, 14).padding(.vertical, 14)
-            .background(YMColor.surface, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
-            Text("Телефон — это логин, изменить его здесь нельзя.")
-                .font(YMFont.caption).foregroundStyle(YMColor.muted)
         }
+    }
+
+    // ── Лист ввода кода подтверждения ──
+    private var codeSheet: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: YMSpace.lg) {
+                Text(confirmTarget != nil ? "Мы отправили подтверждение на \(confirmTarget!)" : "Введите код подтверждения")
+                    .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                TextField("Код", text: $code)
+                    .keyboardType(.numberPad)
+                    .font(.system(size: 22, weight: .bold))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14).padding(.vertical, 14)
+                    .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
+                    .onChange(of: code) { new in code = String(new.filter(\.isNumber).prefix(6)) }
+                if let saveError {
+                    Text(saveError).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                }
+                Button(action: confirmCode) {
+                    if saving { ProgressView().tint(YMColor.onAccent) } else { Text("Подтвердить") }
+                }
+                .buttonStyle(YMPrimaryButtonStyle())
+                .disabled(code.isEmpty || saving)
+                .opacity((code.isEmpty || saving) ? 0.5 : 1)
+                Spacer()
+            }
+            .padding(YMSpace.xl)
+            .background(YMColor.bg.ignoresSafeArea())
+            .navigationTitle("Подтверждение")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") { showCodeSheet = false; code = "" }
+                }
+            }
+        }
+    }
+
+    // ── Лист «Написать в поддержку» ──
+    private var supportSheet: some View {
+        SupportComposeSheet(
+            onCancel: { showSupportSheet = false },
+            onSent: { showSupportSheet = false; saveError = nil }
+        )
     }
 
     // ── Data ──
@@ -135,6 +229,7 @@ struct EditProfileView: View {
             let p: Profile = try await API.shared.get("api/v1/profile")
             await MainActor.run {
                 name = p.name ?? ""; email = p.email ?? ""; phone = p.phone ?? ""
+                origName = name; origEmail = email; origPhone = phone
                 loading = false
             }
         } catch is CancellationError {
@@ -146,24 +241,93 @@ struct EditProfileView: View {
         }
     }
 
+    // Что реально изменилось относительно загруженного профиля.
+    private func buildChanges() -> [String: String] {
+        var m: [String: String] = [:]
+        let n = trimmedName
+        if !n.isEmpty && n != origName { m["name"] = n }
+        let e = email.trimmingCharacters(in: .whitespaces)
+        if e != origEmail { m["email"] = e }
+        let p = phone.trimmingCharacters(in: .whitespaces)
+        if !p.isEmpty && p != origPhone { m["phone"] = p }
+        if !password.isEmpty { m["password"] = password }
+        return m
+    }
+
     private func save() {
         guard canSave else { return }
-        saving = true; saveError = nil
-        let e = email.trimmingCharacters(in: .whitespaces)
-        Task {
-            do {
-                try await API.shared.putVoid("api/v1/profile",
-                    body: EditProfileBody(name: trimmedName, email: e.isEmpty ? nil : e))
-                await MainActor.run { Haptics.success(); saving = false; dismiss() }
-            } catch {
-                await MainActor.run {
-                    Haptics.error()
-                    saveError = (error as? APIError)?.errorDescription ?? "Не удалось сохранить изменения"
-                    saving = false
+        saveError = nil
+        let m = buildChanges()
+        if m.isEmpty { saveError = "Нет изменений"; return }
+        let sensitive = m["email"] != nil || m["phone"] != nil || m["password"] != nil
+        if sensitive {
+            pendingChanges = m
+            showMethodDialog = true         // → выбор способа подтверждения
+        } else {
+            // Только имя — сохраняем сразу, без подтверждения.
+            saving = true
+            Task {
+                do {
+                    try await API.shared.putVoid("api/v1/profile",
+                        body: EditProfileBody(name: trimmedName, email: nil, phone: nil, password: nil))
+                    await MainActor.run { Haptics.success(); saving = false; dismiss() }
+                } catch {
+                    await MainActor.run {
+                        Haptics.error()
+                        saveError = (error as? APIError)?.errorDescription ?? "Не удалось сохранить изменения"
+                        saving = false
+                    }
                 }
             }
         }
     }
+
+    // Запросить подтверждение выбранным способом (call | email).
+    private func requestConfirm(_ method: String) {
+        saving = true; saveError = nil
+        Task {
+            do {
+                let r: ChangeRequestResult = try await API.shared.post(
+                    "api/v1/profile/change/request",
+                    body: ChangeRequestBody(changes: pendingChanges, method: method))
+                await MainActor.run {
+                    saving = false
+                    confirmTarget = r.target
+                    code = r.debugCode ?? ""
+                    showCodeSheet = true
+                }
+            } catch {
+                await MainActor.run {
+                    Haptics.error()
+                    saving = false
+                    saveError = (error as? APIError)?.errorDescription ?? "Не удалось отправить код"
+                }
+            }
+        }
+    }
+
+    // Подтвердить код → сервер применяет изменения.
+    private func confirmCode() {
+        let c = code.trimmingCharacters(in: .whitespaces)
+        guard !c.isEmpty, !saving else { return }
+        saving = true; saveError = nil
+        Task {
+            do {
+                try await API.shared.postVoid("api/v1/profile/change/confirm", body: ChangeConfirmBody(code: c))
+                await MainActor.run {
+                    Haptics.success(); saving = false
+                    showCodeSheet = false; password = ""; code = ""
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    Haptics.error(); saving = false
+                    saveError = (error as? APIError)?.errorDescription ?? "Неверный код"
+                }
+            }
+        }
+    }
+
 }
 
 private struct EditProfileErrorState: View {
@@ -181,5 +345,76 @@ private struct EditProfileErrorState: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 60)
+    }
+}
+
+/// Лист «Написать в поддержку» — создаёт тикет через POST api/v1/support.
+/// Самодостаточный: свой стейт, свой сетевой вызов. onSent вызывается при успехе.
+private struct SupportComposeSheet: View {
+    let onCancel: () -> Void
+    let onSent: () -> Void
+
+    @State private var message = ""
+    @State private var sending = false
+    @State private var error: String?
+
+    private struct Body: Encodable { let subject: String?; let message: String }
+
+    private var canSend: Bool { message.trimmingCharacters(in: .whitespaces).count >= 5 && !sending }
+
+    var body: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: YMSpace.lg) {
+                Text("Опишите проблему — мы ответим прямо в приложении.")
+                    .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                ZStack(alignment: .topLeading) {
+                    if message.isEmpty {
+                        Text("Ваше сообщение…")
+                            .font(.system(size: 15)).foregroundStyle(YMColor.muted)
+                            .padding(.horizontal, 14).padding(.vertical, 16)
+                    }
+                    TextEditor(text: $message)
+                        .frame(minHeight: 140)
+                        .padding(6)
+                        .scrollContentBackground(.hidden)
+                        .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
+                }
+                if let error {
+                    Text(error).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                }
+                Button(action: send) {
+                    if sending { ProgressView().tint(YMColor.onAccent) } else { Text("Отправить") }
+                }
+                .buttonStyle(YMPrimaryButtonStyle())
+                .disabled(!canSend)
+                .opacity(canSend ? 1 : 0.5)
+                Spacer()
+            }
+            .padding(YMSpace.xl)
+            .background(YMColor.bg.ignoresSafeArea())
+            .navigationTitle("Поддержка")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена", action: onCancel) }
+            }
+        }
+    }
+
+    private func send() {
+        let msg = message.trimmingCharacters(in: .whitespaces)
+        guard msg.count >= 5, !sending else { return }
+        sending = true; error = nil
+        Task {
+            do {
+                try await API.shared.postVoid("api/v1/support",
+                    body: Body(subject: "Не могу подтвердить смену данных", message: msg))
+                await MainActor.run { sending = false; Haptics.success(); onSent() }
+            } catch {
+                await MainActor.run {
+                    sending = false; Haptics.error()
+                    self.error = (error as? APIError)?.errorDescription ?? "Не удалось отправить обращение"
+                }
+            }
+        }
     }
 }

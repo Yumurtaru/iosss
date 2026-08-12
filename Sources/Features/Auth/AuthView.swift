@@ -53,7 +53,7 @@ struct AuthView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Шаги как в Android: ввод телефона → код из звонка; отдельно — вход по паролю.
-    private enum Step { case phone, code, password }
+    private enum Step { case phone, code, password, register }
     @State private var step: Step = .phone
 
     @State private var phone = ""
@@ -61,6 +61,7 @@ struct AuthView: View {
     @State private var loginField = ""
     @State private var password = ""
     @State private var name = ""
+    @State private var regEmail = ""
 
     @State private var busy = false
     @State private var error: String?
@@ -86,6 +87,9 @@ struct AuthView: View {
     private var phoneValid: Bool { (10...11).contains(phone.filter(\.isNumber).count) }
     private var codeValid: Bool  { code.filter(\.isNumber).count == 4 }
     private var passwordValid: Bool { !loginField.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty }
+    private var registerValid: Bool {
+        name.trimmingCharacters(in: .whitespaces).count >= 2 && phoneValid && password.count >= 6
+    }
 
     private var actionEnabled: Bool {
         guard !busy else { return false }
@@ -93,12 +97,17 @@ struct AuthView: View {
         case .phone:    return phoneValid
         case .code:     return codeValid
         case .password: return passwordValid
+        case .register: return registerValid
         }
     }
 
     private var actionTitle: String {
         if busy { return "Подождите…" }
-        return step == .phone ? "Позвонить мне" : "Войти"
+        switch step {
+        case .phone:    return "Позвонить мне"
+        case .register: return "Зарегистрироваться"
+        default:        return "Войти"
+        }
     }
 
     // MARK: Body
@@ -203,6 +212,7 @@ struct AuthView: View {
         case .phone:    return "Вход по номеру"
         case .code:     return "Код из звонка"
         case .password: return "Вход по паролю"
+        case .register: return "Регистрация"
         }
     }
 
@@ -211,6 +221,7 @@ struct AuthView: View {
         case .phone:    return "Вам позвонит робот — подтверждение по звонку"
         case .code:     return "Введите последние 4 цифры номера, с которого поступил звонок на \(normalizedPhone())"
         case .password: return "Введите телефон/email и пароль"
+        case .register: return "Создайте аккаунт — вход сразу после регистрации"
         }
     }
 
@@ -255,6 +266,25 @@ struct AuthView: View {
                     .textContentType(.password)
                     .focused($focused, equals: .password)
             }
+
+        case .register:
+            VStack(alignment: .leading, spacing: YMSpace.md) {
+                AuthField(placeholder: "Ваше имя", text: $name)
+                    .textContentType(.name)
+                    .textInputAutocapitalization(.words)
+                    .focused($focused, equals: .login)
+                    .onAppear { focused = .login }
+                AuthField(placeholder: "+7 900 000-00-00", text: $phone)
+                    .keyboardType(.phonePad)
+                    .textContentType(.telephoneNumber)
+                AuthField(placeholder: "Email (необязательно)", text: $regEmail)
+                    .keyboardType(.emailAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textContentType(.emailAddress)
+                AuthField(placeholder: "Пароль (минимум 6 символов)", text: $password, secure: true)
+                    .textContentType(.newPassword)
+            }
         }
     }
 
@@ -268,6 +298,11 @@ struct AuthView: View {
         if step == .phone || step == .password {
             linkButton(step == .phone ? "Войти по паролю" : "Войти по звонку") {
                 back(to: step == .phone ? .password : .phone)
+            }
+        }
+        if step == .phone || step == .password || step == .register {
+            linkButton(step == .register ? "Уже есть аккаунт? Войти" : "Регистрация") {
+                back(to: step == .register ? .phone : .register)
             }
         }
     }
@@ -298,6 +333,7 @@ struct AuthView: View {
         case .phone:    requestCall()
         case .code:     verify()
         case .password: loginByPassword()
+        case .register: registerUser()
         }
     }
 
@@ -353,6 +389,28 @@ struct AuthView: View {
                 finish(t)
             } catch {
                 fail(error, fallback: "Неверный логин или пароль")
+            }
+        }
+    }
+
+    /// Регистрация без подтверждения: имя+телефон+пароль (email опц.) → сразу токены.
+    private func registerUser() {
+        guard registerValid, !busy else { return }
+        busy = true; error = nil
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        let email = regEmail.trimmingCharacters(in: .whitespaces)
+        Task {
+            do {
+                var body: [String: String] = [
+                    "phone": normalizedPhone(),
+                    "name": trimmedName,
+                    "password": password,
+                ]
+                if !email.isEmpty { body["email"] = email }
+                let t: AuthTokens = try await API.shared.post("api/v1/auth/register", body: body)
+                finish(t)
+            } catch {
+                fail(error, fallback: "Не удалось зарегистрироваться")
             }
         }
     }
