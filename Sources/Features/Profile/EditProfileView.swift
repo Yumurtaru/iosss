@@ -358,7 +358,7 @@ private struct SupportComposeSheet: View {
     @State private var sending = false
     @State private var error: String?
 
-    private struct Body: Encodable { let subject: String?; let message: String }
+    private struct Payload: Encodable { let subject: String?; let message: String }
 
     private var canSend: Bool { message.trimmingCharacters(in: .whitespaces).count >= 5 && !sending }
 
@@ -407,7 +407,7 @@ private struct SupportComposeSheet: View {
         Task {
             do {
                 try await API.shared.postVoid("api/v1/support",
-                    body: Body(subject: "Не могу подтвердить смену данных", message: msg))
+                    body: Payload(subject: "Не могу подтвердить смену данных", message: msg))
                 await MainActor.run { sending = false; Haptics.success(); onSent() }
             } catch {
                 await MainActor.run {
