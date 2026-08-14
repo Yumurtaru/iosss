@@ -2,39 +2,35 @@
 //  AuthView.swift
 //  Yumurta — маркетплейс (iOS, SwiftUI)
 //
-//  Экран входа премиум-клиента. Два способа (без соцсетей, паритет с Android AuthScreen):
+//  Экран входа/регистрации премиум-клиента (flash call убран — дорого).
 //
-//   1) Вход по ЗВОНКУ (Plusofon flashcall):
-//        POST api/v1/auth/otp-request  {phone, channel:"call"}   → {sent, ttl, method, debug_code}
-//        затем ввод последних 4 цифр номера, с которого позвонил робот →
-//        POST api/v1/auth/otp-verify   {phone, code, name?}       → {user, token, refresh, redirect}
+//   Вход:  POST api/v1/auth/login  {login, password}  → {user, token, refresh, redirect}
+//          login — email ИЛИ телефон.
+//   Регистрация (2 шага, подтверждение почты):
+//     1) POST api/v1/auth/register/request {name, phone, email, password} → {sent, ttl, email, debug_code}
+//        (сервер шлёт 6-значный код на почту)
+//     2) POST api/v1/auth/register/confirm {email, code} → {user, token, refresh, redirect}
 //
-//   2) Вход по логину/паролю:
-//        POST api/v1/auth/login        {login, password}          → {user, token, refresh, redirect}
+//  Токены сохраняются через Session.signIn(token, refresh:): access → "token"
+//  (Authorization: Bearer), refresh → "refresh_token". isLoggedIn флипается реактивно.
 //
-//  Токены сохраняются через Session.signIn(token, refresh:) — как в старом iOS AuthView:
-//  access кладётся в UserDefaults "token" (→ Authorization: Bearer подставляется в API),
-//  refresh — в "refresh_token" (тихое продление при 401). isLoggedIn = (token != nil)
-//  флипается реактивно, так что весь UI (Профиль/Заказы/Чат) сам обновляется.
-//
-//  Контракт API: server возвращает эти поля ВНУТРИ конверта {success,data,error}.
-//  API.post<T> декодирует уже env.data, поэтому DTO ниже описывают именно data-полезную
-//  нагрузку. Ключи snake_case (debug_code) маппятся авто-конвертером .convertFromSnakeCase.
+//  API.post<T> декодирует уже env.data. Ключи snake_case (debug_code) маппятся
+//  авто-конвертером .convertFromSnakeCase.
 //
 
 import SwiftUI
 
 // MARK: - DTO (полезная нагрузка `data` конверта v1)
 
-/// Ответ otp-request: подтверждение отправки + метод/ttl + dev-код (если бэкенд его отдал).
-private struct OtpRequestPayload: Decodable {
+/// Ответ register/request: подтверждение отправки + замаскированный email + dev-код.
+private struct RegRequestResult: Decodable {
     let sent: Bool?
     let ttl: Int?
-    let method: String?     // "call" — flashcall (Plusofon), либо "sms"
-    let debugCode: String?  // dev-режим: сервер может подставить код (debug_code → debugCode)
+    let email: String?      // замаскированный адрес для UI
+    let debugCode: String?  // dev-режим (debug_code → debugCode)
 }
 
-/// Ответ login / otp-verify: токены доступа и продления.
+/// Ответ login / register/confirm: токены доступа и продления.
 private struct AuthTokens: Decodable {
     let token: String?
     let refresh: String?
@@ -42,9 +38,6 @@ private struct AuthTokens: Decodable {
 
 // MARK: - AuthView
 
-/// Экран входа. Драйвит Session напрямую (isLoggedIn флипается сам), плюс опциональный
-/// колбэк onAuthed — вызывается ПОСЛЕ успешного сохранения токенов (для навигации/закрытия
-/// шита главным процессом). Готов и к вызову как `AuthView(onAuthed: { … })`, и как `AuthView()`.
 struct AuthView: View {
     var onAuthed: (() -> Void)? = nil
 
@@ -52,26 +45,29 @@ struct AuthView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// Шаги как в Android: ввод телефона → код из звонка; отдельно — вход по паролю.
-    private enum Step { case phone, code, password, register }
-    @State private var step: Step = .phone
+    /// Вход по паролю; регистрация — форма → код с почты.
+    private enum Step { case password, register, registerCode }
+    @State private var step: Step = .password
 
-    @State private var phone = ""
-    @State private var code = ""
+    // Вход
     @State private var loginField = ""
     @State private var password = ""
+    // Регистрация
     @State private var name = ""
+    @State private var phone = ""
     @State private var regEmail = ""
+    // Подтверждение почты
+    @State private var code = ""
+    @State private var sentMask: String?
 
     @State private var busy = false
     @State private var error: String?
 
     @FocusState private var focused: Field?
-    private enum Field { case phone, code, login, password }
+    private enum Field { case login, password, name, code }
 
     // MARK: Нормализация / валидация
 
-    /// Нормализует ввод в +7XXXXXXXXXX (толерантно: 8XXXXXXXXXX, 7XXXXXXXXXX, 10 цифр).
     private func normalizedPhone() -> String {
         let digits = phone.filter(\.isNumber)
         let d: String
@@ -85,28 +81,31 @@ struct AuthView: View {
     }
 
     private var phoneValid: Bool { (10...11).contains(phone.filter(\.isNumber).count) }
-    private var codeValid: Bool  { code.filter(\.isNumber).count == 4 }
+    private var emailValid: Bool {
+        let e = regEmail.trimmingCharacters(in: .whitespaces)
+        return e.contains("@") && (e.split(separator: "@").last?.contains(".") ?? false) && !e.hasSuffix("@")
+    }
     private var passwordValid: Bool { !loginField.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty }
     private var registerValid: Bool {
-        name.trimmingCharacters(in: .whitespaces).count >= 2 && phoneValid && password.count >= 6
+        name.trimmingCharacters(in: .whitespaces).count >= 2 && phoneValid && emailValid && password.count >= 6
     }
+    private var codeValid: Bool { code.filter(\.isNumber).count == 6 }
 
     private var actionEnabled: Bool {
         guard !busy else { return false }
         switch step {
-        case .phone:    return phoneValid
-        case .code:     return codeValid
-        case .password: return passwordValid
-        case .register: return registerValid
+        case .password:     return passwordValid
+        case .register:     return registerValid
+        case .registerCode: return codeValid
         }
     }
 
     private var actionTitle: String {
         if busy { return "Подождите…" }
         switch step {
-        case .phone:    return "Позвонить мне"
-        case .register: return "Зарегистрироваться"
-        default:        return "Войти"
+        case .password:     return "Войти"
+        case .register:     return "Получить код"
+        case .registerCode: return "Подтвердить"
         }
     }
 
@@ -119,12 +118,9 @@ struct AuthView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     topBar
-                    logo
-                        .padding(.top, YMSpace.xxl)
-                    heading
-                        .padding(.top, YMSpace.lg)
-                    fields
-                        .padding(.top, YMSpace.xxl)
+                    logo.padding(.top, YMSpace.xxl)
+                    heading.padding(.top, YMSpace.lg)
+                    fields.padding(.top, YMSpace.xxl)
 
                     if let error, !error.isEmpty {
                         Text(error)
@@ -144,8 +140,7 @@ struct AuthView: View {
                     .opacity(actionEnabled ? 1 : 0.55)
                     .padding(.top, YMSpace.xl)
 
-                    footerLinks
-                        .padding(.top, YMSpace.md)
+                    footerLinks.padding(.top, YMSpace.md)
                 }
                 .padding(.horizontal, YMSpace.xl)
                 .padding(.bottom, YMSpace.xxxl)
@@ -160,7 +155,7 @@ struct AuthView: View {
         HStack {
             Button {
                 Haptics.light()
-                if step != .phone { back(to: .phone) } else { dismiss() }
+                back()
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 17, weight: .bold))
@@ -209,19 +204,17 @@ struct AuthView: View {
 
     private var titleText: String {
         switch step {
-        case .phone:    return "Вход по номеру"
-        case .code:     return "Код из звонка"
-        case .password: return "Вход по паролю"
-        case .register: return "Регистрация"
+        case .password:     return "Вход"
+        case .register:     return "Регистрация"
+        case .registerCode: return "Подтвердите почту"
         }
     }
 
     private var subtitleText: String {
         switch step {
-        case .phone:    return "Вам позвонит робот — подтверждение по звонку"
-        case .code:     return "Введите последние 4 цифры номера, с которого поступил звонок на \(normalizedPhone())"
-        case .password: return "Введите телефон/email и пароль"
-        case .register: return "Создайте аккаунт — вход сразу после регистрации"
+        case .password:     return "Введите email или телефон и пароль"
+        case .register:     return "Заполните данные — на почту придёт код подтверждения"
+        case .registerCode: return "Мы отправили 6-значный код на \(sentMask ?? regEmail.trimmingCharacters(in: .whitespaces))"
         }
     }
 
@@ -230,29 +223,6 @@ struct AuthView: View {
     @ViewBuilder
     private var fields: some View {
         switch step {
-        case .phone:
-            AuthField(placeholder: "+7 900 000-00-00", text: $phone)
-                .keyboardType(.phonePad)
-                .textContentType(.telephoneNumber)
-                .focused($focused, equals: .phone)
-                .onAppear { focused = .phone }
-
-        case .code:
-            VStack(alignment: .leading, spacing: YMSpace.md) {
-                AuthField(placeholder: "Последние 4 цифры звонка", text: $code)
-                    .keyboardType(.numberPad)
-                    .textContentType(.oneTimeCode)
-                    .font(YMFont.title2)
-                    .multilineTextAlignment(.center)
-                    .focused($focused, equals: .code)
-                    .onAppear { focused = .code }
-                    .onChange(of: code) { new in
-                        code = String(new.filter(\.isNumber).prefix(4))
-                    }
-                AuthField(placeholder: "Ваше имя (если впервые)", text: $name)
-                    .textContentType(.name)
-            }
-
         case .password:
             VStack(alignment: .leading, spacing: YMSpace.md) {
                 AuthField(placeholder: "Телефон или email", text: $loginField)
@@ -272,12 +242,12 @@ struct AuthView: View {
                 AuthField(placeholder: "Ваше имя", text: $name)
                     .textContentType(.name)
                     .textInputAutocapitalization(.words)
-                    .focused($focused, equals: .login)
-                    .onAppear { focused = .login }
+                    .focused($focused, equals: .name)
+                    .onAppear { focused = .name }
                 AuthField(placeholder: "+7 900 000-00-00", text: $phone)
                     .keyboardType(.phonePad)
                     .textContentType(.telephoneNumber)
-                AuthField(placeholder: "Email (необязательно)", text: $regEmail)
+                AuthField(placeholder: "Email", text: $regEmail)
                     .keyboardType(.emailAddress)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -285,24 +255,31 @@ struct AuthView: View {
                 AuthField(placeholder: "Пароль (минимум 6 символов)", text: $password, secure: true)
                     .textContentType(.newPassword)
             }
+
+        case .registerCode:
+            AuthField(placeholder: "Код из письма", text: $code)
+                .keyboardType(.numberPad)
+                .textContentType(.oneTimeCode)
+                .font(YMFont.title2)
+                .multilineTextAlignment(.center)
+                .focused($focused, equals: .code)
+                .onAppear { focused = .code }
+                .onChange(of: code) { new in
+                    code = String(new.filter(\.isNumber).prefix(6))
+                }
         }
     }
 
-    // MARK: Нижние ссылки (повтор звонка / переключатель способа)
+    // MARK: Нижние ссылки
 
     @ViewBuilder
     private var footerLinks: some View {
-        if step == .code {
-            linkButton("Позвонить повторно") { requestCall() }
+        if step == .registerCode {
+            linkButton("Отправить код повторно") { registerRequest() }
         }
-        if step == .phone || step == .password {
-            linkButton(step == .phone ? "Войти по паролю" : "Войти по звонку") {
-                back(to: step == .phone ? .password : .phone)
-            }
-        }
-        if step == .phone || step == .password || step == .register {
+        if step == .password || step == .register {
             linkButton(step == .register ? "Уже есть аккаунт? Войти" : "Регистрация") {
-                back(to: step == .register ? .phone : .register)
+                back(to: step == .register ? .password : .register)
             }
         }
     }
@@ -319,64 +296,33 @@ struct AuthView: View {
         .disabled(busy)
     }
 
-    // MARK: Переходы между шагами
+    // MARK: Переходы
 
     private func back(to step: Step) {
         self.step = step
         error = nil
     }
 
+    /// Кнопка «назад» в шапке: registerCode → register → password → закрыть.
+    private func back() {
+        switch step {
+        case .password:     dismiss()
+        case .register:     back(to: .password)
+        case .registerCode: code = ""; back(to: .register)
+        }
+    }
+
     // MARK: Действия
 
     private func act() {
         switch step {
-        case .phone:    requestCall()
-        case .code:     verify()
-        case .password: loginByPassword()
-        case .register: registerUser()
+        case .password:     loginByPassword()
+        case .register:     registerRequest()
+        case .registerCode: registerConfirm()
         }
     }
 
-    /// Шаг 1: запросить звонок (Plusofon flashcall). channel:"call".
-    private func requestCall() {
-        guard phoneValid, !busy else { return }
-        busy = true; error = nil
-        Task {
-            do {
-                let r: OtpRequestPayload = try await API.shared.post(
-                    "api/v1/auth/otp-request",
-                    body: ["phone": normalizedPhone(), "channel": "call"]
-                )
-                await MainActor.run {
-                    if let dc = r.debugCode, !dc.isEmpty { code = dc } // dev-режим: автоподстановка
-                    busy = false
-                    Haptics.success()
-                    back(to: .code)
-                }
-            } catch {
-                fail(error, fallback: "Не удалось позвонить")
-            }
-        }
-    }
-
-    /// Шаг 2: подтвердить код из звонка → токены.
-    private func verify() {
-        guard codeValid, !busy else { return }
-        busy = true; error = nil
-        let trimmedName = name.trimmingCharacters(in: .whitespaces)
-        Task {
-            do {
-                var body: [String: String] = ["phone": normalizedPhone(), "code": code.trimmingCharacters(in: .whitespaces)]
-                if !trimmedName.isEmpty { body["name"] = trimmedName }
-                let t: AuthTokens = try await API.shared.post("api/v1/auth/otp-verify", body: body)
-                finish(t)
-            } catch {
-                fail(error, fallback: "Неверный код")
-            }
-        }
-    }
-
-    /// Альтернатива: вход логин + пароль → токены.
+    /// Вход логин(email/телефон) + пароль → токены.
     private func loginByPassword() {
         guard passwordValid, !busy else { return }
         busy = true; error = nil
@@ -393,30 +339,51 @@ struct AuthView: View {
         }
     }
 
-    /// Регистрация без подтверждения: имя+телефон+пароль (email опц.) → сразу токены.
-    private func registerUser() {
+    /// Шаг 1 регистрации: отправить код на почту.
+    private func registerRequest() {
         guard registerValid, !busy else { return }
         busy = true; error = nil
-        let trimmedName = name.trimmingCharacters(in: .whitespaces)
-        let email = regEmail.trimmingCharacters(in: .whitespaces)
+        let body: [String: String] = [
+            "name": name.trimmingCharacters(in: .whitespaces),
+            "phone": normalizedPhone(),
+            "email": regEmail.trimmingCharacters(in: .whitespaces),
+            "password": password,
+        ]
         Task {
             do {
-                var body: [String: String] = [
-                    "phone": normalizedPhone(),
-                    "name": trimmedName,
-                    "password": password,
-                ]
-                if !email.isEmpty { body["email"] = email }
-                let t: AuthTokens = try await API.shared.post("api/v1/auth/register", body: body)
-                finish(t)
+                let r: RegRequestResult = try await API.shared.post("api/v1/auth/register/request", body: body)
+                await MainActor.run {
+                    busy = false
+                    sentMask = r.email
+                    if let dc = r.debugCode, !dc.isEmpty { code = dc } // dev-режим
+                    Haptics.success()
+                    back(to: .registerCode)
+                }
             } catch {
-                fail(error, fallback: "Не удалось зарегистрироваться")
+                fail(error, fallback: "Не удалось отправить код")
             }
         }
     }
 
-    /// Сохранение токенов + колбэк. Session.signIn кладёт access в "token",
-    /// refresh — в "refresh_token"; isLoggedIn становится true реактивно.
+    /// Шаг 2 регистрации: подтвердить код → аккаунт создан, входим.
+    private func registerConfirm() {
+        guard codeValid, !busy else { return }
+        busy = true; error = nil
+        let email = regEmail.trimmingCharacters(in: .whitespaces).lowercased()
+        Task {
+            do {
+                let t: AuthTokens = try await API.shared.post(
+                    "api/v1/auth/register/confirm",
+                    body: ["email": email, "code": code.trimmingCharacters(in: .whitespaces)]
+                )
+                finish(t)
+            } catch {
+                fail(error, fallback: "Неверный код")
+            }
+        }
+    }
+
+    /// Сохранение токенов + колбэк.
     @MainActor
     private func finish(_ tokens: AuthTokens) {
         busy = false
@@ -442,8 +409,7 @@ struct AuthView: View {
 
 // MARK: - AuthField (стилизованное поле под премиум-токены)
 
-/// Поле ввода в surface-боксе с hairline (паритет с Android AuthField).
-/// secure=true → SecureField (маскированный пароль).
+/// Поле ввода в surface-боксе с hairline. secure=true → SecureField.
 private struct AuthField: View {
     let placeholder: String
     @Binding var text: String

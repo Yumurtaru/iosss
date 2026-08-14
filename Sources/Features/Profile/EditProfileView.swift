@@ -55,7 +55,6 @@ struct EditProfileView: View {
     @State private var origEmail = ""
     @State private var origPhone = ""
     // Поток подтверждения.
-    @State private var showMethodDialog = false
     @State private var showCodeSheet = false
     @State private var showSupportSheet = false
     @State private var pendingChanges: [String: String] = [:]
@@ -125,14 +124,6 @@ struct EditProfileView: View {
         .navigationTitle("Редактировать профиль")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
-        .confirmationDialog("Подтвердите изменение", isPresented: $showMethodDialog, titleVisibility: .visible) {
-            Button("Звонок на телефон") { requestConfirm("call") }
-            Button("Код на почту") { requestConfirm("email") }
-            Button("Написать в поддержку") { showSupportSheet = true }
-            Button("Отмена", role: .cancel) {}
-        } message: {
-            Text("Как подтвердить смену учётных данных?")
-        }
         .sheet(isPresented: $showCodeSheet) { codeSheet }
         .sheet(isPresented: $showSupportSheet) { supportSheet }
     }
@@ -181,7 +172,7 @@ struct EditProfileView: View {
     private var codeSheet: some View {
         NavigationView {
             VStack(alignment: .leading, spacing: YMSpace.lg) {
-                Text(confirmTarget != nil ? "Мы отправили подтверждение на \(confirmTarget!)" : "Введите код подтверждения")
+                Text(confirmTarget != nil ? "Мы отправили код на \(confirmTarget!)" : "Введите код подтверждения из письма")
                     .font(YMFont.callout).foregroundStyle(YMColor.muted)
                 TextField("Код", text: $code)
                     .keyboardType(.numberPad)
@@ -199,6 +190,15 @@ struct EditProfileView: View {
                 .buttonStyle(YMPrimaryButtonStyle())
                 .disabled(code.isEmpty || saving)
                 .opacity((code.isEmpty || saving) ? 0.5 : 1)
+
+                Button("Код не приходит? Написать в поддержку") {
+                    showCodeSheet = false; code = ""
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showSupportSheet = true }
+                }
+                .font(YMFont.subhead).foregroundStyle(YMColor.accent)
+                .frame(maxWidth: .infinity)
+                .disabled(saving)
+
                 Spacer()
             }
             .padding(YMSpace.xl)
@@ -262,7 +262,7 @@ struct EditProfileView: View {
         let sensitive = m["email"] != nil || m["phone"] != nil || m["password"] != nil
         if sensitive {
             pendingChanges = m
-            showMethodDialog = true         // → выбор способа подтверждения
+            requestConfirm("email")         // → код на почту
         } else {
             // Только имя — сохраняем сразу, без подтверждения.
             saving = true
