@@ -12,6 +12,15 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: Yumurta
+        # ВАЖНО. XcodeGen при генерации Info.plist подставляет СВОИ значения
+        # по умолчанию — CFBundleShortVersionString = "1.0" литералом, — и
+        # настройку MARKETING_VERSION ниже он для этого НЕ использует
+        # (см. generateDefaultInfoPlist в исходниках XcodeGen).
+        # Поэтому версия оставалась 1.0 в любой сборке, сколько её ни правь
+        # в settings, и публикация падала с 90062/90186.
+        # Ключ обязан быть здесь: значения из info.properties перекрывают
+        # умолчания XcodeGen.
+        CFBundleShortVersionString: "1.1"
         NSLocationWhenInUseUsageDescription: "Нужно, чтобы определить ваш город и показать курьера на карте во время доставки"
         UILaunchScreen:
           UIColorName: LaunchBG
@@ -29,13 +38,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ru.marketplace.client.premium
-        # Версия для App Store (CFBundleShortVersionString).
-        # 1.0 уже одобрена Apple, поэтому её нельзя отправить повторно:
-        # сборка падала с 90062 «must contain a higher version» и 90186
-        # «train version '1.0' is closed for new build submissions».
-        # Значение можно не править руками: если в Codemagic задать
-        # переменную APP_VERSION, шаг «Версия приложения» подставит её сюда.
-        MARKETING_VERSION: "1.0.1"
+        # Держим в том же значении, что CFBundleShortVersionString выше —
+        # для локальной сборки в Xcode. На публикацию влияет именно ключ
+        # в info.properties, а не эта настройка.
+        MARKETING_VERSION: "1.1"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: 1
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

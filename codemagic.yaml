@@ -13,35 +13,50 @@ workflows:
         certificates:
           - yumurta_dist
     scripts:
-      # Версия приложения задаётся ДО XcodeGen: он генерирует Info.plist,
-      # в котором CFBundleShortVersionString = $(MARKETING_VERSION).
-      #
-      # Шаг «Номер сборки» ниже поднимает только CFBundleVersion (номер
-      # сборки), а НЕ версию. Из-за этого версия оставалась 1.0 навсегда,
-      # и публикация падала: Apple не принимает сборку с версией, которая
-      # уже одобрена, и закрывает TestFlight-ветку 1.0 для новых сборок.
-      #
-      # Чтобы выпустить следующую версию, достаточно задать переменную
-      # APP_VERSION в настройках workflow (например 1.0.2 или 1.1) —
-      # файлы править не нужно. Если переменной нет, берётся значение
-      # из project.yml.
-      - name: Версия приложения
-        script: |
-          cd "$CM_BUILD_DIR"
-          if [ -n "$APP_VERSION" ]; then
-            sed -i '' "s/MARKETING_VERSION: \".*\"/MARKETING_VERSION: \"$APP_VERSION\"/" project.yml
-          fi
-          echo "Версия для публикации:"
-          grep 'MARKETING_VERSION' project.yml
       - name: XcodeGen
         script: |
           which xcodegen || brew install xcodegen
           cd "$CM_BUILD_DIR" && xcodegen generate
-      - name: Номер сборки
+
+      # Версию пишем ПОСЛЕ XcodeGen и прямо в готовый Info.plist.
+      #
+      # Почему не через настройки проекта: XcodeGen при генерации Info.plist
+      # подставляет собственное умолчание CFBundleShortVersionString = "1.0"
+      # литералом и MARKETING_VERSION для этого не использует. Из-за этого
+      # версия оставалась 1.0 в каждой сборке, а Apple отклоняла публикацию:
+      #   90062 — версия должна быть выше уже одобренной 1.0
+      #   90186 — ветка TestFlight 1.0 закрыта для новых сборок
+      # PlistBuddy правит собранный файл — это не зависит ни от XcodeGen,
+      # ни от порядка применения настроек.
+      #
+      # Версию можно задать переменной APP_VERSION в настройках workflow;
+      # без неё берётся значение из project.yml.
+      - name: Версия и номер сборки
         script: |
-          # Только CFBundleVersion. Версия задаётся шагом «Версия приложения».
-          cd "$CM_BUILD_DIR" && agvtool new-version -all "$BUILD_NUMBER"
-          echo "Итого: версия $(grep -m1 MARKETING_VERSION project.yml | tr -d ' ') , сборка $BUILD_NUMBER"
+          cd "$CM_BUILD_DIR"
+          PLIST="Generated/Info.plist"
+          VERSION="${APP_VERSION:-$(grep -m1 'CFBundleShortVersionString:' project.yml | sed 's/.*: *"\(.*\)"/\1/')}"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$PLIST"
+          agvtool new-version -all "$BUILD_NUMBER"
+
+          FINAL_V=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          FINAL_B=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
+          echo "─────────────────────────────────────────"
+          echo "  Уйдёт в App Store: версия $FINAL_V, сборка $FINAL_B"
+          echo "─────────────────────────────────────────"
+
+          # Ранняя проверка: лучше упасть здесь за секунду, чем собирать
+          # четыре минуты и получить отказ на публикации.
+          if [ -z "$FINAL_V" ] || [ "$FINAL_V" = "1.0" ]; then
+            echo "ОШИБКА: версия '$FINAL_V' не годится. Apple не примет 1.0 —"
+            echo "эта ветка уже одобрена и закрыта для новых сборок."
+            echo "Поправьте CFBundleShortVersionString в project.yml"
+            echo "или задайте переменную APP_VERSION в настройках workflow."
+            exit 1
+          fi
+
       - name: Применить профиль
         script: |
           xcode-project use-profiles --project "$CM_BUILD_DIR/YumurtaPremium.xcodeproj"
