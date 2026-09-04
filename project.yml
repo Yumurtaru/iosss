@@ -29,7 +29,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ru.marketplace.client.premium
-        MARKETING_VERSION: "1.0"
+        # Версия для App Store (CFBundleShortVersionString).
+        # 1.0 уже одобрена Apple, поэтому её нельзя отправить повторно:
+        # сборка падала с 90062 «must contain a higher version» и 90186
+        # «train version '1.0' is closed for new build submissions».
+        # Значение можно не править руками: если в Codemagic задать
+        # переменную APP_VERSION, шаг «Версия приложения» подставит её сюда.
+        MARKETING_VERSION: "1.0.1"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: 1
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

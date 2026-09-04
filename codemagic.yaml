@@ -13,13 +13,35 @@ workflows:
         certificates:
           - yumurta_dist
     scripts:
+      # Версия приложения задаётся ДО XcodeGen: он генерирует Info.plist,
+      # в котором CFBundleShortVersionString = $(MARKETING_VERSION).
+      #
+      # Шаг «Номер сборки» ниже поднимает только CFBundleVersion (номер
+      # сборки), а НЕ версию. Из-за этого версия оставалась 1.0 навсегда,
+      # и публикация падала: Apple не принимает сборку с версией, которая
+      # уже одобрена, и закрывает TestFlight-ветку 1.0 для новых сборок.
+      #
+      # Чтобы выпустить следующую версию, достаточно задать переменную
+      # APP_VERSION в настройках workflow (например 1.0.2 или 1.1) —
+      # файлы править не нужно. Если переменной нет, берётся значение
+      # из project.yml.
+      - name: Версия приложения
+        script: |
+          cd "$CM_BUILD_DIR"
+          if [ -n "$APP_VERSION" ]; then
+            sed -i '' "s/MARKETING_VERSION: \".*\"/MARKETING_VERSION: \"$APP_VERSION\"/" project.yml
+          fi
+          echo "Версия для публикации:"
+          grep 'MARKETING_VERSION' project.yml
       - name: XcodeGen
         script: |
           which xcodegen || brew install xcodegen
           cd "$CM_BUILD_DIR" && xcodegen generate
       - name: Номер сборки
         script: |
+          # Только CFBundleVersion. Версия задаётся шагом «Версия приложения».
           cd "$CM_BUILD_DIR" && agvtool new-version -all "$BUILD_NUMBER"
+          echo "Итого: версия $(grep -m1 MARKETING_VERSION project.yml | tr -d ' ') , сборка $BUILD_NUMBER"
       - name: Применить профиль
         script: |
           xcode-project use-profiles --project "$CM_BUILD_DIR/YumurtaPremium.xcodeproj"
