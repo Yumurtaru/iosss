@@ -160,6 +160,46 @@ struct Address: Codable, Identifiable {
 struct Order: Codable, Identifiable {
     let id: Int; @LenientInt var dailyNumber: Int?; let status: String?; @LenientDouble var total: Double?
     let createdAt: String?; let shopName: String?; let shopLogo: String?
+    /// Запись на услугу. На сервере запись хранится как заказ, поэтому она приходила
+    /// и сюда, и должна была прийти в «Мои записи». Признак is_appointment позволяет
+    /// показать её ровно в одном разделе — в «Моих записях» (см. OrdersViewModel.load).
+    /// Поле аддитивное: у старого ответа без него значение nil → заказ обычный.
+    @LenientBool var isAppointment: Bool?
+}
+
+/// Запись клиента на услугу — GET api/v1/appointments (экран «Мои записи»).
+///
+/// Раньше этого эндпоинта не существовало (был только POST на создание), поэтому
+/// BookingsView стоял пустой заглушкой. Форма ответа повторяет продавцовый
+/// GET /api/seller/bookings: те же date / time_start / time_end / service / master / status.
+///
+/// `id` — это id ОКНА (service_slots.id), а `orderId` — id заказа, которым запись
+/// хранится на сервере: он нужен для отмены (POST api/v1/orders/{id}/cancel).
+struct Appointment: Codable, Identifiable {
+    let id: Int
+    @LenientInt var orderId: Int?
+    let date: String?           // "2026-09-06"
+    let timeStart: String?      // "15:00:00"
+    let timeEnd: String?
+    @LenientInt var serviceId: Int?
+    let service: String?
+    @LenientDouble var price: Double?
+    @LenientInt var durationMin: Int?
+    let master: String?
+    let masterPhoto: String?
+    let status: String?         // new | accepted | done | cancelled
+    @LenientDouble var total: Double?
+    @LenientInt var shopId: Int?
+    let shop: String?
+    let shopSlug: String?
+    let shopLogo: String?
+    let shopAddress: String?
+    let shopPhone: String?
+    @LenientDouble var shopLat: Double?
+    @LenientDouble var shopLng: Double?
+    /// Считает сервер — чтобы табы «Предстоящие / Прошедшие» одинаково делились
+    /// на всех платформах и не зависели от часового пояса телефона.
+    @LenientBool var isPast: Bool?
 }
 struct OrderItem: Codable, Identifiable {
     var id: Int { (productId ?? 0) &* 100000 &+ Int((qty ?? 0).rounded()) }

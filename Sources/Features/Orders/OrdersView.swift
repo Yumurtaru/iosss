@@ -7,7 +7,8 @@ import SwiftUI
 //    onOpen(orderId) — открыть деталь заказа (навигацию решает вызывающая сторона).
 //
 //  Данные 1:1 со старым клиентом (3 IOS-client OrdersView):
-//    GET api/v1/orders → [Order]  (id, dailyNumber, status, total:Double?, createdAt, shopName, shopLogo).
+//    GET api/v1/orders → [Order]  (id, dailyNumber, status, total:Double?, createdAt, shopName, shopLogo,
+//                                  is_appointment — записи на услугу отфильтровываются в «Мои записи»).
 //  Деньги — Double? в модели → Money.format(Money.parse(x)) (Decimal, канон нового клиента).
 //
 //  Signature-элемент: «золотая живая лента статуса» — GoldStatusRibbon (прогресс + мягкий пульс),
@@ -192,7 +193,12 @@ final class OrdersViewModel: ObservableObject {
     func load() async {
         loading = true; loadFailed = false
         do {
-            orders = try await API.shared.list("api/v1/orders")
+            // Записи на услугу сервер хранит как заказы и отдаёт в этом же списке.
+            // Их место — раздел «Мои записи» (BookingsView, GET api/v1/appointments),
+            // поэтому здесь они отфильтровываются по аддитивному признаку is_appointment.
+            // Старый сервер этого поля не присылает → nil ≠ true → список как раньше.
+            let all: [Order] = try await API.shared.list("api/v1/orders")
+            orders = all.filter { $0.isAppointment != true }
         } catch {
             loadFailed = true
         }

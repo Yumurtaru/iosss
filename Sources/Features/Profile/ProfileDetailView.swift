@@ -7,14 +7,16 @@
 //  ТОЧКИ ВХОДА (для навигации):
 //    • AddressesView()   — карточки Дом/Работа/…, основной адрес (золотая рамка + бейдж),
 //                          «＋ Добавить адрес» (пунктир), CRUD через реальные методы.
-//    • BookingsView()    — табы Предстоящие/Прошедшие, карточки записи, действия Перенести/Маршрут.
+//    • BookingsView()    — табы Предстоящие/Прошедшие, карточки записи, действия Отменить/Маршрут.
 //
 //  ПРИВЯЗКА К API (как в старом AddressesView):
 //    • GET    api/v1/profile/addresses          → [Address]
 //    • POST   api/v1/profile/addresses          ← AddressBody (создание)
 //    • DELETE api/v1/profile/addresses/{id}     (удаление)
 //    • GET    api/address/suggest?q=            → [AddrSuggest] (Dadata-прокси)
-//  Записи (bookings): GET-эндпоинта списка нет (только POST api/v1/appointments) → graceful + TODO(API).
+//  Записи (bookings):
+//    • GET  api/v1/appointments             → [Appointment] (список записей клиента)
+//    • POST api/v1/orders/{orderId}/cancel  (отмена записи; сервер возвращает окно в продажу)
 //
 
 import SwiftUI
@@ -283,15 +285,51 @@ private struct AddAddressView: View {
 // MARK: - МОИ ЗАПИСИ (bookings)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Локальная модель записи (для карточки). Сервер GET-списка записей пока не отдаёт —
-/// маппится из будущего эндпоинта; поля 1:1 с макетом ProfileDetail (bookings).
+/// Модель карточки записи. Маппится из Appointment (GET api/v1/appointments);
+/// поля 1:1 с макетом ProfileDetail (bookings) плюс то, что нужно кнопкам:
+/// orderId — для отмены, address/coords — для маршрута.
 struct BookingItem: Identifiable {
     let id: Int
+    let orderId: Int?
     let service: String
     let org: String
     let date: Date?
     let time: String
     let status: BookingStatus
+    let address: String?
+    let lat: Double?
+    let lng: Double?
+    /// Отменять можно только предстоящую и ещё не начатую запись — те же статусы,
+    /// что принимает сервер в POST api/v1/orders/{id}/cancel.
+    var canCancel: Bool { orderId != nil && (status == .confirmed || status == .pending) }
+
+    init(from a: Appointment) {
+        id = a.id
+        orderId = a.orderId
+        service = a.service ?? "Услуга"
+        org = a.shop ?? ""
+        date = BookingItem.parse(a.date)
+        time = String((a.timeStart ?? "").prefix(5))
+        switch (a.status ?? "").lowercased() {
+        case "cancelled":           status = .cancelled
+        case "accepted", "done":    status = .confirmed
+        default:                    status = .pending
+        }
+        address = (a.shopAddress?.isEmpty == false) ? a.shopAddress : nil
+        lat = a.shopLat
+        lng = a.shopLng
+    }
+
+    /// Дата визита приходит как "2026-09-06" — разбираем фиксированной локалью,
+    /// иначе на телефоне с другим календарём получится nil и плашка будет пустой.
+    private static func parse(_ s: String?) -> Date? {
+        guard let s, !s.isEmpty else { return nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        f.dateFormat = "yyyy-MM-dd"
+        return f.date(from: s)
+    }
 }
 enum BookingStatus { case confirmed, pending, cancelled
     var title: String { self == .confirmed ? "Подтверждена" : self == .pending ? "Ожидает" : "Отменена" }
@@ -326,7 +364,9 @@ struct BookingsView: View {
                     emptyState
                 } else {
                     VStack(spacing: YMSpace.lg) {
-                        ForEach(current) { b in BookingCard(booking: b) }
+                        ForEach(current) { b in
+                            BookingCard(booking: b, onCancel: { await cancel(b) })
+                        }
                     }
                     .padding(.horizontal, YMSpace.xl)
                 }
@@ -354,17 +394,32 @@ struct BookingsView: View {
 
     private func load() async {
         loading = true
-        // TODO(API): GET-эндпоинта списка записей нет (только POST api/v1/appointments).
-        // Как появится api/v1/appointments (GET) → декодировать в BookingItem и разложить
-        // по upcoming/past относительно текущей даты. Пока — пусто (graceful).
-        upcoming = []; past = []
+        let list: [Appointment] = (try? await API.shared.list("api/v1/appointments")) ?? []
+        // Делим по серверному признаку is_past: он уже учитывает и время окончания
+        // визита, и статусы done/cancelled. Если поля нет (старый сервер) — запись
+        // считается предстоящей, чтобы не пропасть из виду.
+        upcoming = list.filter { $0.isPast != true }.map(BookingItem.init(from:))
+        past     = list.filter { $0.isPast == true }.map(BookingItem.init(from:))
         loading = false
+    }
+
+    /// Отмена записи. Сервер тем же вызовом возвращает окно в продажу
+    /// (POST api/v1/orders/{id}/cancel → releaseServiceSlotForOrder).
+    private func cancel(_ b: BookingItem) async {
+        guard let oid = b.orderId else { return }
+        try? await API.shared.postVoid("api/v1/orders/\(oid)/cancel")
+        await load()
     }
 }
 
-/// Карточка записи: дата-плашка, услуга, организация, время, статус, действия Перенести/Маршрут.
+/// Карточка записи: дата-плашка, услуга, организация, время, статус, действия Отменить/Маршрут.
 private struct BookingCard: View {
     let booking: BookingItem
+    /// Отмена записи — выполняет владелец экрана (BookingsView), он же перезагружает список.
+    var onCancel: () async -> Void = {}
+    @Environment(\.openURL) private var openURL
+    @State private var confirmCancel = false
+    @State private var working = false
 
     private var monthText: String {
         guard let d = booking.date else { return "" }
@@ -382,6 +437,22 @@ private struct BookingCard: View {
         case .pending:   return YMColor.accent
         case .cancelled: return YMColor.statusCancel
         }
+    }
+
+    /// Маршрут строим по координатам организации, а если их нет — по адресу.
+    private var hasRoute: Bool {
+        (booking.lat != nil && booking.lng != nil) || (booking.address?.isEmpty == false)
+    }
+
+    private func openRoute() {
+        var url: URL?
+        if let lat = booking.lat, let lng = booking.lng {
+            url = URL(string: "http://maps.apple.com/?daddr=\(lat),\(lng)&dirflg=d")
+        } else if let addr = booking.address,
+                  let q = addr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            url = URL(string: "http://maps.apple.com/?daddr=\(q)&dirflg=d")
+        }
+        if let url { openURL(url) }
     }
 
     var body: some View {
@@ -418,20 +489,39 @@ private struct BookingCard: View {
             Divider().overlay(YMColor.hairline)
 
             HStack(spacing: 0) {
-                Button { Haptics.light() /* TODO(API): перенос слота записи */ } label: {
-                    Text("Перенести")
-                        .font(.system(size: 13.5, weight: .bold))
-                        .foregroundStyle(YMColor.muted)
-                        .frame(maxWidth: .infinity).padding(.vertical, 12)
-                }.buttonStyle(.plain)
-                Rectangle().fill(YMColor.hairline).frame(width: 1, height: 44)
-                Button { Haptics.light() /* TODO(nav): открыть маршрут в картах по адресу организации */ } label: {
+                if booking.canCancel {
+                    Button {
+                        Haptics.light(); confirmCancel = true
+                    } label: {
+                        Text(working ? "Отменяем…" : "Отменить")
+                            .font(.system(size: 13.5, weight: .bold))
+                            .foregroundStyle(YMColor.muted)
+                            .frame(maxWidth: .infinity).padding(.vertical, 12)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(working)
+                    Rectangle().fill(YMColor.hairline).frame(width: 1, height: 44)
+                }
+                Button {
+                    Haptics.light(); openRoute()
+                } label: {
                     Text("Маршрут")
                         .font(.system(size: 13.5, weight: .heavy))
                         .foregroundStyle(YMColor.accent)
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
-                }.buttonStyle(.plain)
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasRoute)
+                .opacity(hasRoute ? 1 : 0.4)
             }
+        }
+        .confirmationDialog("Отменить запись? Время освободится и станет доступно другим клиентам.",
+                            isPresented: $confirmCancel, titleVisibility: .visible) {
+            Button("Отменить запись", role: .destructive) {
+                working = true
+                Task { await onCancel(); working = false }
+            }
+            Button("Оставить", role: .cancel) {}
         }
         .ymCard(radius: 20)
         .accessibilityElement(children: .combine)

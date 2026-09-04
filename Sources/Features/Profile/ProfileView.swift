@@ -2,7 +2,8 @@
 //  ProfileView.swift — Профиль (premium-клиент)
 //
 //  Макет ProfilePhone: аватар 72 (золотой градиент), имя, телефон, 📍 город;
-//  быстрые статы (заказы/избранное/записи); переключатель темы (Система/Светлая/Тёмная);
+//  быстрые статы (заказы/избранное/записи; записи считаются по GET api/v1/appointments);
+//  переключатель темы (Система/Светлая/Тёмная);
 //  меню: Адреса, Уведомления (бейдж), Оплата, Мои записи, Поддержка, Выйти (красный),
 //  удаление аккаунта. Токены, light+dark, Dynamic Type, Reduce Motion.
 //
@@ -360,13 +361,14 @@ struct ProfileView: View {
         var q: [String: String] = [:]
         if let cid = session.cityId { q["city_id"] = String(cid) }
         let orders: [Order] = (try? await API.shared.list("api/v1/orders", query: q)) ?? []
-        ordersCount = orders.count
+        // Записи на услугу приходят в этом же списке (на сервере запись — это заказ),
+        // но считаются отдельно, в счётчике «записи». Иначе один визит удваивал бы статистику.
+        ordersCount = orders.filter { $0.isAppointment != true }.count
         let favShops: [Shop] = (try? await API.shared.list("api/v1/favorites")) ?? []
         let favProducts: [Product] = (try? await API.shared.list("api/v1/product-favorites")) ?? []
         favCount = favShops.count + favProducts.count
-        // TODO(API): счётчик «записи» (appointments) не имеет GET-эндпоинта списка (только POST).
-        // Пока показываем 0; появится api/v1/appointments (GET) — подставить .count.
-        bookingsCount = 0
+        let appts: [Appointment] = (try? await API.shared.list("api/v1/appointments")) ?? []
+        bookingsCount = appts.count
         let notifs: [AppNotification] = (try? await API.shared.list("api/v1/notifications")) ?? []
         unreadNotifs = notifs.filter { !$0.read }.count
     }
