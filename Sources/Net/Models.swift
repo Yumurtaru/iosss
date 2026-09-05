@@ -194,6 +194,9 @@ struct Appointment: Codable, Identifiable {
     let shopSlug: String?
     let shopLogo: String?
     let shopAddress: String?
+    /// Адрес визита для выездной услуги («сантехник на дом»). У услуги
+    /// в заведении сервер отдаёт пустую строку — форма ответа одинаковая.
+    let address: String?
     let shopPhone: String?
     @LenientDouble var shopLat: Double?
     @LenientDouble var shopLng: Double?
@@ -296,6 +299,14 @@ struct Master: Codable, Identifiable { let id: Int; let name: String?; let photo
 struct ServiceItem: Codable, Identifiable {
     let id: Int; @LenientInt var masterId: Int?; let name: String?; let description: String?
     @LenientInt var durationMin: Int?; @LenientDouble var price: Double?
+    /// Где оказывается услуга: "at_business" — клиент приходит сам,
+    /// "at_client" — мастер выезжает по адресу клиента (сантехник, уборка).
+    /// Поле аддитивное: у старого сервера его нет → nil → считаем «в заведении».
+    let locationType: String?
+    /// Стоимость выезда мастера, прибавляется к цене услуги.
+    @LenientDouble var travelFee: Double?
+
+    var isAtClient: Bool { (locationType ?? "at_business") == "at_client" }
 }
 struct ServicesResponse: Codable { let masters: [Master]?; let services: [ServiceItem]? }
 struct CatalogItem: Codable, Hashable {
@@ -331,7 +342,33 @@ struct Review: Codable, Identifiable {
 // ---- Тела запросов (camelCase -> snake_case автоматически) ----
 struct NotifReadBody: Encodable { let ids: [Int] }
 struct ReturnCreateBody: Encodable { let orderId: Int; let type: String; let reasonCode: String; let reasonText: String? }
-struct AppointmentBody: Encodable { let slotId: Int }
+/// Адрес визита для выездной услуги. Форма 1:1 с тем, что принимает сервер
+/// (routes/api_v1.php → normalizeVisitAddress) и что уже пишет оформление
+/// заказа: тогда адрес виден везде, где он показывается сейчас.
+struct VisitAddress: Encodable {
+    var value: String = ""        // город/населённый пункт
+    var street: String = ""
+    var house: String = ""
+    var apartment: String = ""
+    var entrance: String = ""
+    var floor: String = ""
+    var comment: String = ""
+    var lat: Double?
+    var lng: Double?
+
+    /// Сервер отклонит запись без улицы и дома (422) — проверяем это заранее,
+    /// чтобы не терять выбранное окно.
+    var isComplete: Bool {
+        !street.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !house.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+}
+
+struct AppointmentBody: Encodable {
+    let slotId: Int
+    /// Только для выездной услуги; у услуги в заведении не отправляется.
+    var address: VisitAddress? = nil
+}
 struct SocialBody: Encodable { let provider: String; let code: String }
 struct NpsBody: Encodable { let score: Int; let comment: String? }
 struct ReferralInfo: Decodable {

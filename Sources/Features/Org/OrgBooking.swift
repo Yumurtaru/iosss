@@ -58,6 +58,13 @@ struct OrgBookingSection: View {
     }
     @State private var sheet: BookingSheet?
     @State private var confirming = false
+    /// Адрес визита — только для выездной услуги (сантехник, уборка на дом).
+    /// Заполняется в окне подтверждения: у записи, в отличие от доставки,
+    /// другого места спросить адрес нет.
+    @State private var visitAddress = VisitAddress()
+    /// Сохранённые адреса клиента — чтобы не набирать заново то, что уже есть
+    /// в профиле. Грузим только если среди услуг есть выездные.
+    @State private var savedAddresses: [Address] = []
     @State private var actionMessage: String?
 
     var body: some View {
@@ -154,14 +161,22 @@ struct OrgBookingSection: View {
     // MARK: Подтверждение
 
     private func confirmSheet(slot: Slot) -> some View {
+        let atClient = selected?.isAtClient ?? false
         let price = Money.dec(selected?.price)
-        let fee = clientFee(price)
-        let total = price + fee
+        let travel = atClient ? Money.dec(selected?.travelFee) : 0
+        // Сервисный сбор считается от полной суммы, включая выезд, — ровно так
+        // же, как на сервере. Иначе итог на экране разойдётся с чеком.
+        let fee = clientFee(price + travel)
+        let total = price + travel + fee
         return ConfirmBookingSheet(
             dateLabel: fmtDateHuman(selectedDate),
             timeLabel: String((slot.timeStart ?? "").prefix(5)),
             serviceName: selected?.name ?? "",
-            price: price, fee: fee, total: total,
+            price: price, travel: travel, fee: fee, total: total,
+            atClient: atClient,
+            address: $visitAddress,
+            saved: savedAddresses,
+            onPickSaved: { applyAddress($0) },
             confirming: confirming,
             onConfirm: { book(slot: slot) },
             onDismiss: { if !confirming { sheet = nil } }
@@ -180,6 +195,32 @@ struct OrgBookingSection: View {
             self.error = error.localizedDescription
         }
         loading = false
+        if services.contains(where: { $0.isAtClient }) { await loadAddresses() }
+    }
+
+    /// Адреса из профиля: подставляем адрес по умолчанию в форму выезда.
+    /// Ошибку глотаем — адрес всегда можно ввести руками.
+    private func loadAddresses() async {
+        // Город известен всегда (выбран в приложении) — он идёт в value.
+        if visitAddress.value.isEmpty { visitAddress.value = Session.shared.cityName ?? "" }
+        guard Session.shared.isLoggedIn else { return }
+        let list: [Address] = (try? await API.shared.list("api/v1/profile/addresses")) ?? []
+        savedAddresses = list
+        if visitAddress.isComplete { return }
+        if let a = list.first(where: { $0.isDefaultBool }) ?? list.first { applyAddress(a) }
+    }
+
+    private func applyAddress(_ a: Address) {
+        visitAddress.street    = a.street ?? ""
+        visitAddress.house     = a.house ?? ""
+        visitAddress.apartment = a.apartment ?? ""
+        visitAddress.entrance  = a.entrance ?? ""
+        visitAddress.floor     = a.floor ?? ""
+        // value — ТОЛЬКО город: сервер склеивает адрес как «value, улица, д. N».
+        // Если положить сюда a.display, город и улица задвоятся в «Мои записи».
+        visitAddress.value     = a.city ?? Session.shared.cityName ?? ""
+        visitAddress.lat       = a.lat
+        visitAddress.lng       = a.lng
     }
 
     private func loadSlots() async {
@@ -198,8 +239,11 @@ struct OrgBookingSection: View {
         confirming = true
         Task {
             do {
+                let atClient = selected?.isAtClient ?? false
                 let r: OrderCreateResult = try await API.shared.post(
-                    "api/v1/appointments", body: AppointmentBody(slotId: slot.id))
+                    "api/v1/appointments",
+                    body: AppointmentBody(slotId: slot.id,
+                                          address: atClient ? visitAddress : nil))
                 await MainActor.run {
                     confirming = false
                     slots.removeAll { $0.id == slot.id }
@@ -265,10 +309,19 @@ private struct ServiceRow: View {
             VStack(spacing: 0) {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(service.name ?? "—")
-                            .font(.system(size: 15.5, weight: .bold))
-                            .foregroundStyle(YMColor.text)
-                            .lineLimit(2)
+                        HStack(spacing: 6) {
+                            Text(service.name ?? "—")
+                                .font(.system(size: 15.5, weight: .bold))
+                                .foregroundStyle(YMColor.text)
+                                .lineLimit(2)
+                            if service.isAtClient {
+                                Text("Выезд к вам")
+                                    .font(.system(size: 10.5, weight: .heavy))
+                                    .foregroundStyle(YMColor.accent)
+                                    .padding(.horizontal, 7).padding(.vertical, 3)
+                                    .background(YMColor.accent.opacity(0.14), in: Capsule())
+                            }
+                        }
                         if let d = service.description, !d.isEmpty {
                             Text(d)
                                 .font(.system(size: 12))
@@ -282,9 +335,18 @@ private struct ServiceRow: View {
                         }
                     }
                     Spacer(minLength: 8)
-                    Text(Money.format(Money.dec(service.price)))
-                        .font(.system(size: 15.5, weight: .heavy))
-                        .foregroundStyle(YMColor.text)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(Money.format(Money.dec(service.price)))
+                            .font(.system(size: 15.5, weight: .heavy))
+                            .foregroundStyle(YMColor.text)
+                        // Стоимость выезда показываем отдельной строкой: гость
+                        // должен видеть её до выбора времени, а не в чеке.
+                        if service.isAtClient, Money.dec(service.travelFee) > 0 {
+                            Text("+ \(Money.format(Money.dec(service.travelFee))) выезд")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(YMColor.accent)
+                        }
+                    }
                 }
                 if selected && fee > 0 {
                     HStack {
@@ -390,56 +452,147 @@ private struct ConfirmBookingSheet: View {
     let timeLabel: String
     let serviceName: String
     let price: Decimal
+    /// Выезд мастера. Только для услуги с location_type == "at_client".
+    let travel: Decimal
     let fee: Decimal
     let total: Decimal
+    /// Услуга выездная — просим адрес и не даём подтвердить без улицы и дома.
+    let atClient: Bool
+    @Binding var address: VisitAddress
+    /// Адреса из профиля — подставить в один тап.
+    var saved: [Address] = []
+    var onPickSaved: (Address) -> Void = { _ in }
     let confirming: Bool
     var onConfirm: () -> Void = {}
     var onDismiss: () -> Void = {}
 
+    /// Кнопку блокируем, пока выездной адрес неполный: сервер всё равно вернёт
+    /// 422 «нужен адрес», и лучше показать это до нажатия, а не после.
+    private var canConfirm: Bool { !confirming && (!atClient || address.isComplete) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Подтверждение записи")
-                .font(.system(size: 20, weight: .heavy))
-                .foregroundStyle(YMColor.text)
-            if !serviceName.isEmpty {
-                Text(serviceName)
-                    .font(.system(size: 15))
-                    .foregroundStyle(YMColor.muted)
-                    .padding(.top, 4)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Подтверждение записи")
+                    .font(.system(size: 20, weight: .heavy))
+                    .foregroundStyle(YMColor.text)
+                if !serviceName.isEmpty {
+                    Text(serviceName)
+                        .font(.system(size: 15))
+                        .foregroundStyle(YMColor.muted)
+                        .padding(.top, 4)
+                }
+
+                HStack {
+                    Text("Дата и время")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(YMColor.muted)
+                    Spacer()
+                    Text("\(dateLabel) · \(timeLabel)")
+                        .font(.system(size: 13, weight: .heavy)).foregroundStyle(YMColor.text)
+                }
+                .padding(14)
+                .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.top, 12)
+
+                if atClient { addressBlock.padding(.top, 12) }
+
+                priceRow(atClient ? "Стоимость услуги" : "Стоимость", price, bold: false).padding(.top, 12)
+                if travel > 0 { priceRow("Выезд мастера", travel, bold: false) }
+                if fee > 0 { priceRow("Сервисный сбор", fee, bold: false) }
+                priceRow("Итого", total, bold: true).padding(.top, 4)
+
+                Button(action: onConfirm) {
+                    Text(confirming ? "Записываем…" : "Подтвердить запись")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(YMPrimaryButtonStyle())
+                .disabled(!canConfirm)
+                .opacity(canConfirm ? 1 : 0.5)
+                .padding(.top, 18)
+
+                if atClient && !address.isComplete {
+                    Text("Укажите улицу и номер дома — мастер приедет по этому адресу")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(YMColor.muted)
+                        .padding(.top, 8)
+                }
+
+                Button("Отмена", action: onDismiss)
+                    .buttonStyle(YMSecondaryButtonStyle())
+                    .disabled(confirming)
+                    .padding(.top, 10)
             }
-
-            HStack {
-                Text("Дата и время")
-                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(YMColor.muted)
-                Spacer()
-                Text("\(dateLabel) · \(timeLabel)")
-                    .font(.system(size: 13, weight: .heavy)).foregroundStyle(YMColor.text)
-            }
-            .padding(14)
-            .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .padding(.top, 12)
-
-            priceRow("Стоимость", price, bold: false).padding(.top, 12)
-            if fee > 0 { priceRow("Сервисный сбор", fee, bold: false) }
-            priceRow("Итого", total, bold: true).padding(.top, 4)
-
-            Button(action: onConfirm) {
-                Text(confirming ? "Записываем…" : "Подтвердить запись")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(YMPrimaryButtonStyle())
-            .disabled(confirming)
-            .padding(.top, 18)
-
-            Button("Отмена", action: onDismiss)
-                .buttonStyle(YMSecondaryButtonStyle())
-                .disabled(confirming)
-                .padding(.top, 10)
+            .padding(.horizontal, YMSpace.xl)
+            .padding(.top, 24)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, YMSpace.xl)
-        .padding(.top, 24)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .presentationDetents([.medium])
+        .scrollDismissesKeyboard(.interactively)
+        .presentationDetents(atClient ? [.large] : [.medium])
+    }
+
+    // MARK: Куда приехать
+
+    @ViewBuilder
+    private var addressBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "location.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(YMColor.accent)
+                Text("Куда приехать")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(YMColor.text)
+            }
+
+            if !saved.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(saved) { a in
+                            Button {
+                                Haptics.selection()
+                                onPickSaved(a)
+                            } label: {
+                                Text(a.label?.isEmpty == false ? (a.label ?? "") : a.display)
+                                    .font(.system(size: 12.5, weight: .bold))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .background(YMColor.surface, in: Capsule())
+                                    .foregroundStyle(YMColor.text)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 1)
+                }
+            }
+
+            addrField("Улица", text: $address.street)
+            HStack(spacing: 8) {
+                addrField("Дом", text: $address.house)
+                addrField("Кв.", text: $address.apartment, numeric: true)
+            }
+            HStack(spacing: 8) {
+                addrField("Подъезд", text: $address.entrance, numeric: true)
+                addrField("Этаж", text: $address.floor, numeric: true)
+            }
+            addrField("Комментарий для мастера", text: $address.comment)
+        }
+        .padding(14)
+        .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func addrField(_ placeholder: String, text: Binding<String>,
+                           numeric: Bool = false) -> some View {
+        TextField(placeholder, text: text)
+            .keyboardType(numeric ? .numbersAndPunctuation : .default)
+            .font(.system(size: 14.5))
+            .foregroundStyle(YMColor.text)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .disabled(confirming)
     }
 
     private func priceRow(_ label: String, _ value: Decimal, bold: Bool) -> some View {

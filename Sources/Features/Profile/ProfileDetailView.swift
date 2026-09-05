@@ -299,6 +299,9 @@ struct BookingItem: Identifiable {
     let address: String?
     let lat: Double?
     let lng: Double?
+    /// Адрес выездной услуги — куда приедет мастер. У услуги в заведении пусто:
+    /// туда, наоборот, едет клиент, и работает кнопка «Маршрут».
+    let visitAddress: String?
     /// Отменять можно только предстоящую и ещё не начатую запись — те же статусы,
     /// что принимает сервер в POST api/v1/orders/{id}/cancel.
     var canCancel: Bool { orderId != nil && (status == .confirmed || status == .pending) }
@@ -318,6 +321,7 @@ struct BookingItem: Identifiable {
         address = (a.shopAddress?.isEmpty == false) ? a.shopAddress : nil
         lat = a.shopLat
         lng = a.shopLng
+        visitAddress = (a.address?.isEmpty == false) ? a.address : nil
     }
 
     /// Дата визита приходит как "2026-09-06" — разбираем фиксированной локалью,
@@ -441,7 +445,9 @@ private struct BookingCard: View {
 
     /// Маршрут строим по координатам организации, а если их нет — по адресу.
     private var hasRoute: Bool {
-        (booking.lat != nil && booking.lng != nil) || (booking.address?.isEmpty == false)
+        // Выездная услуга: едет мастер, клиенту маршрут до собственного дома не нужен.
+        guard booking.visitAddress == nil else { return false }
+        return (booking.lat != nil && booking.lng != nil) || (booking.address?.isEmpty == false)
     }
 
     private func openRoute() {
@@ -481,12 +487,21 @@ private struct BookingCard: View {
                             .background(statusColor.opacity(0.16), in: Capsule())
                     }
                     .padding(.top, 5)
+
+                    if let visit = booking.visitAddress {
+                        Label("Мастер приедет: \(visit)", systemImage: "location.fill")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(YMColor.muted)
+                            .labelStyle(.titleAndIcon)
+                            .lineLimit(2)
+                            .padding(.top, 4)
+                    }
                 }
                 Spacer(minLength: 0)
             }
             .padding(15)
 
-            Divider().overlay(YMColor.hairline)
+            if booking.canCancel || hasRoute { Divider().overlay(YMColor.hairline) }
 
             HStack(spacing: 0) {
                 if booking.canCancel {
@@ -500,19 +515,19 @@ private struct BookingCard: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(working)
-                    Rectangle().fill(YMColor.hairline).frame(width: 1, height: 44)
+                    if hasRoute { Rectangle().fill(YMColor.hairline).frame(width: 1, height: 44) }
                 }
-                Button {
-                    Haptics.light(); openRoute()
-                } label: {
-                    Text("Маршрут")
-                        .font(.system(size: 13.5, weight: .heavy))
-                        .foregroundStyle(YMColor.accent)
-                        .frame(maxWidth: .infinity).padding(.vertical, 12)
+                if hasRoute {
+                    Button {
+                        Haptics.light(); openRoute()
+                    } label: {
+                        Text("Маршрут")
+                            .font(.system(size: 13.5, weight: .heavy))
+                            .foregroundStyle(YMColor.accent)
+                            .frame(maxWidth: .infinity).padding(.vertical, 12)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-                .disabled(!hasRoute)
-                .opacity(hasRoute ? 1 : 0.4)
             }
         }
         .confirmationDialog("Отменить запись? Время освободится и станет доступно другим клиентам.",
