@@ -32,6 +32,15 @@ struct PhotoPlaceholder: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        // КРИТИЧНО. Картинка внутри — .scaledToFill(), то есть её РЕАЛЬНЫЙ размер
+        // заметно больше рамки: квадратное фото товара в полосе 120pt по высоте
+        // вылезает больше чем на сотню точек вверх и вниз. clipShape и clipped()
+        // обрезают только РИСОВАНИЕ — область нажатия остаётся по полному размеру
+        // картинки. Из-за этого карточка «ловила» тапы далеко за своими границами:
+        // нажатие на сегмент «Организации» над списком попадало в первую карточку
+        // товара и открывало её вместо переключения вкладки.
+        // contentShape задаёт область нажатия ровно по видимому прямоугольнику.
+        .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
 
     private var gradient: LinearGradient {

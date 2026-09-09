@@ -794,6 +794,8 @@ private struct FavOrgCard: View {
                 .padding(.horizontal, 15).padding(.top, 12).padding(.bottom, 14)
                 .opacity(isOpen ? 1 : 0.55)   // текст закрытой организации тоже тусклый
             }
+            // Область нажатия — ровно карточка, ни точкой больше.
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(CardPressStyle())
         .accessibilityElement(children: .combine)
@@ -837,6 +839,8 @@ private struct FavProductCard: View {
                 }
                 .padding(.horizontal, 15).padding(.top, 12).padding(.bottom, 14)
             }
+            // Область нажатия — ровно карточка, ни точкой больше.
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(CardPressStyle())
         .accessibilityElement(children: .combine)

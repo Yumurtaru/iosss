@@ -441,6 +441,10 @@ struct LogoBadge: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        // .scaledToFill() делает картинку больше рамки, а clipShape обрезает
+        // только рисование — без contentShape аватар ловил бы нажатия далеко
+        // за своим кругом, воруя тапы у соседних строк списка.
+        .contentShape(Circle())
         .overlay(Circle().strokeBorder(YMColor.hairline, lineWidth: 1))
     }
 }

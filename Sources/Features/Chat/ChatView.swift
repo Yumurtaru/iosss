@@ -530,6 +530,9 @@ private struct ChatBubble: View {
         .frame(width: 220, height: 220)
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        // Та же причина, что и в PhotoPlaceholder: обрезка не сужает область
+        // нажатия, её задаёт только contentShape.
+        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
     }
 }
 
