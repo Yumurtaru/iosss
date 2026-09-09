@@ -33,6 +33,12 @@ final class ProductViewModel: ObservableObject {
     /// Похожие товары: GET api/v1/products/{id}/recommended -> [Product].
     /// Пусто/ошибка — секция просто не рисуется, карточку не ломает.
     @Published var recommended: [Product] = []
+    /// Адрес визита для выездной услуги (location_type = at_client).
+    /// Берём адрес по умолчанию из профиля: сервер отклоняет запись без адреса
+    /// (422), а формы ввода на карточке услуги нет — запись с этого экрана
+    /// раньше всегда падала. Если адреса в профиле нет, остаётся nil и сервер
+    /// вернёт понятное сообщение «укажите улицу и дом».
+    @Published var visitAddress: VisitAddress?
 
     let mode: Mode
     let productId: Int?
@@ -66,14 +72,38 @@ final class ProductViewModel: ObservableObject {
             guard let s = service else { error = "Нет данных услуги"; loading = false; return }
             // Слоты записи. Отсутствие слотов — не ошибка (услуга без онлайн-записи).
             slots = (try? await API.shared.list("api/v1/services/\(s.id)/slots")) ?? []
+            // Только для выезда: лишний запрос обычной услуге не нужен.
+            if s.isAtClient { visitAddress = await defaultVisitAddress() }
         }
         loading = false
+    }
+
+    /// Адрес по умолчанию из профиля -> форма адреса визита.
+    /// Ошибку глотаем: без адреса запись просто не пройдёт, но экран не ломается.
+    private func defaultVisitAddress() async -> VisitAddress? {
+        guard Session.shared.isLoggedIn else { return nil }
+        let list: [Address] = (try? await API.shared.list("api/v1/profile/addresses")) ?? []
+        guard let a = list.first(where: { $0.isDefaultBool }) ?? list.first else { return nil }
+        var v = VisitAddress()
+        // value — ТОЛЬКО город: сервер сам склеивает «город, улица, д. N».
+        v.value     = a.city ?? Session.shared.cityName ?? ""
+        v.street    = a.street ?? ""
+        v.house     = a.house ?? ""
+        v.apartment = a.apartment ?? ""
+        v.entrance  = a.entrance ?? ""
+        v.floor     = a.floor ?? ""
+        v.lat       = a.lat
+        v.lng       = a.lng
+        return v.isComplete ? v : nil
     }
 
     /// Запись на выбранный слот.
     func book(slot: Slot) async -> Bool {
         do {
-            try await API.shared.postVoid("api/v1/appointments", body: AppointmentBody(slotId: slot.id))
+            let atClient = service?.isAtClient ?? false
+            try await API.shared.postVoid("api/v1/appointments",
+                                          body: AppointmentBody(slotId: slot.id,
+                                                                address: atClient ? visitAddress : nil))
             booked = true
             return true
         } catch {

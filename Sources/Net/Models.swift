@@ -350,7 +350,44 @@ struct Review: Codable, Identifiable {
 // ---- Тела запросов (camelCase -> snake_case автоматически) ----
 struct NotifReadBody: Encodable { let ids: [Int] }
 struct ReturnCreateBody: Encodable { let orderId: Int; let type: String; let reasonCode: String; let reasonText: String? }
-struct AppointmentBody: Encodable { let slotId: Int }
+/// Адрес визита для выездной услуги — тело POST api/v1/appointments.
+///
+/// Форма ровно та, которую ждёт сервер (core/helpers.php: normalizeVisitAddress):
+/// value — это ГОРОД, а не готовая строка адреса; сервер сам склеивает
+/// «value, улица, д. N, кв. M» в formatVisitAddress(). Если положить в value
+/// полный адрес, город и улица задвоятся в «Моих записях».
+///
+/// Сервер отклоняет запись (422), если нет дома либо нет ни улицы, ни города,
+/// поэтому isComplete повторяет ту же проверку до отправки — чтобы кнопка
+/// «Подтвердить запись» не приводила к ошибке от сервера.
+struct VisitAddress: Codable, Equatable {
+    /// Город. Название поля историческое: у адресов доставки на сервере
+    /// оно тоже называется value.
+    var value = ""
+    var street = ""
+    var house = ""
+    var apartment = ""
+    var entrance = ""
+    var floor = ""
+    /// Комментарий для мастера («домофон не работает», «второй подъезд»).
+    var comment = ""
+    /// Координаты нужны, чтобы мастер открыл маршрут одним нажатием.
+    /// nil — сервер просто не сохранит их (поля необязательные).
+    var lat: Double?
+    var lng: Double?
+
+    /// Достаточно ли адреса, чтобы мастер доехал.
+    var isComplete: Bool {
+        !street.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !house.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// address — только для выездной услуги (location_type = at_client);
+/// для услуги в заведении поле не отправляется вовсе (nil не кодируется).
+// address по умолчанию nil: карточка товара (ProductView) записывает на слот
+// без адреса, и её вызов AppointmentBody(slotId:) остаётся валидным.
+struct AppointmentBody: Encodable { let slotId: Int; var address: VisitAddress? = nil }
 struct SocialBody: Encodable { let provider: String; let code: String }
 struct NpsBody: Encodable { let score: Int; let comment: String? }
 struct ReferralInfo: Decodable {
