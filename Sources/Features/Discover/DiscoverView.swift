@@ -117,12 +117,19 @@ private struct SearchSection: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
+            // ОДИН navigationDestination на экран. Раньше их было два подряд —
+            // SwiftUI оставляет в силе только один, а у второго перестаёт
+            // срабатывать закрытие: его @State так и остаётся заполненным.
+            // Дальше любая перерисовка экрана (переключение сегмента, обновление
+            // списка) снова видела «есть куда переходить» и повторно толкала
+            // прошлый экран. Сеттер ниже гасит ОБА состояния, хвостов не остаётся.
             .navigationDestination(isPresented: Binding(
-                get: { pushedShop != nil }, set: { if !$0 { pushedShop = nil } }
-            )) { if let s = pushedShop { OrgView(shop: s) } }
-            .navigationDestination(isPresented: Binding(
-                get: { pushedProduct != nil }, set: { if !$0 { pushedProduct = nil } }
-            )) { if let id = pushedProduct { ProductView(id: id) } }
+                get: { pushedShop != nil || pushedProduct != nil },
+                set: { if !$0 { pushedShop = nil; pushedProduct = nil } }
+            )) {
+                if let s = pushedShop { OrgView(shop: s) }
+                else if let id = pushedProduct { ProductView(id: id) }
+            }
         }
         .task { await loadFavIds() }
         .onChange(of: q) { _ in scheduleSearch() }
@@ -644,12 +651,19 @@ private struct FavoritesSection: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
+            // ОДИН navigationDestination на экран. Раньше их было два подряд —
+            // SwiftUI оставляет в силе только один, а у второго перестаёт
+            // срабатывать закрытие: его @State так и остаётся заполненным.
+            // Дальше любая перерисовка экрана (переключение сегмента, обновление
+            // списка) снова видела «есть куда переходить» и повторно толкала
+            // прошлый экран. Сеттер ниже гасит ОБА состояния, хвостов не остаётся.
             .navigationDestination(isPresented: Binding(
-                get: { pushedShop != nil }, set: { if !$0 { pushedShop = nil } }
-            )) { if let s = pushedShop { OrgView(shop: s) } }
-            .navigationDestination(isPresented: Binding(
-                get: { pushedProduct != nil }, set: { if !$0 { pushedProduct = nil } }
-            )) { if let id = pushedProduct { ProductView(id: id) } }
+                get: { pushedShop != nil || pushedProduct != nil },
+                set: { if !$0 { pushedShop = nil; pushedProduct = nil } }
+            )) {
+                if let s = pushedShop { OrgView(shop: s) }
+                else if let id = pushedProduct { ProductView(id: id) }
+            }
         }
         .task { await load() }
     }

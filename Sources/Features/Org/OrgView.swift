@@ -177,14 +177,20 @@ struct OrgView: View {
         .navigationBarHidden(true)
         .task { if vm.detail == nil { await vm.load() } }
         // Внутренние переходы флоу (организация → товар / услуга).
+        // ОДИН navigationDestination на экран. Раньше их было два подряд —
+        // SwiftUI оставляет в силе только один, а второй перестаёт закрываться
+        // при возврате: его @State так и остаётся заполненным. Дальше любая
+        // перерисовка экрана (например, переключение сегмента) снова видела
+        // «есть куда переходить» и толкала предыдущий экран. Отсюда и брался
+        // переход в первую организацию при нажатии на «Товары».
+        // Сеттер гасит ОБА состояния — после возврата не остаётся хвостов.
         .navigationDestination(isPresented: Binding(
-            get: { pushedProduct != nil },
-            set: { if !$0 { pushedProduct = nil } }
-        )) { if let id = pushedProduct { ProductView(id: id) } }
-        .navigationDestination(isPresented: Binding(
-            get: { pushedService != nil },
-            set: { if !$0 { pushedService = nil } }
-        )) { if let s = pushedService { ProductView(service: s, shopName: vm.detail?.name) } }
+            get: { pushedProduct != nil || pushedService != nil },
+            set: { if !$0 { pushedProduct = nil; pushedService = nil } }
+        )) {
+            if let id = pushedProduct { ProductView(id: id) }
+            else if let s = pushedService { ProductView(service: s, shopName: vm.detail?.name) }
+        }
         // Вход для гостя при попытке записи на услугу (self-contained шит).
         .sheet(isPresented: $showAuth) {
             AuthView { showAuth = false }

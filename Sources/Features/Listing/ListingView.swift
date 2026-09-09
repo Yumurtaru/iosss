@@ -201,12 +201,20 @@ struct ListingView: View {
         .sheet(isPresented: $showBecomeSeller) {
             NavigationStack { BecomeSellerView() }
         }
+        // ОДИН navigationDestination на экран. Раньше их было два подряд —
+        // SwiftUI оставляет в силе только один, а второй перестаёт закрываться
+        // при возврате: его @State так и остаётся заполненным. Дальше любая
+        // перерисовка экрана (например, переключение сегмента) снова видела
+        // «есть куда переходить» и толкала предыдущий экран. Отсюда и брался
+        // переход в первую организацию при нажатии на «Товары».
+        // Сеттер гасит ОБА состояния — после возврата не остаётся хвостов.
         .navigationDestination(isPresented: Binding(
-            get: { pushedShop != nil }, set: { if !$0 { pushedShop = nil } }
-        )) { if let s = pushedShop { OrgView(shop: s) } }
-        .navigationDestination(isPresented: Binding(
-            get: { pushedProduct != nil }, set: { if !$0 { pushedProduct = nil } }
-        )) { if let id = pushedProduct { ProductView(id: id) } }
+            get: { pushedShop != nil || pushedProduct != nil },
+            set: { if !$0 { pushedShop = nil; pushedProduct = nil } }
+        )) {
+            if let s = pushedShop { OrgView(shop: s) }
+            else if let id = pushedProduct { ProductView(id: id) }
+        }
     }
 
     private var isEmpty: Bool {
