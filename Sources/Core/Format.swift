@@ -27,14 +27,30 @@ enum DateFmt {
 }
 
 enum OrderStatus {
-    static func label(_ s: String?) -> String {
+    /// Подпись состояния. `shopType` — shop | cafe | service: коды состояний
+    /// одинаковые у всех, а слова разные. Кафе готовит, магазин собирает,
+    /// салон работает; «Готовится» для записи в барбершоп читается как ошибка.
+    /// Параметр со значением по умолчанию — старые вызовы продолжают работать.
+    static func label(_ s: String?, shopType: String? = nil) -> String {
         switch s {
         case "new", "pending": return "Новый"
         case "accepted": return "Принят"
-        case "preparing", "cooking": return "Готовится"
-        case "ready", "cooked": return "Готов"
+        case "preparing", "cooking":
+            switch shopType {
+            case "cafe":    return "Готовится"
+            case "service": return "В работе"
+            case "shop":    return "Собирается"
+            default:        return "Готовится"
+            }
+        case "ready", "cooked":
+            switch shopType {
+            case "service": return "Выполнена"
+            case "shop":    return "Собран"
+            default:        return "Готов"
+            }
         case "delivering": return "Доставляется"
-        case "done", "delivered", "completed": return "Выполнен"
+        case "done", "delivered", "completed":
+            return shopType == "service" ? "Завершена" : "Выполнен"
         case "cancelled", "canceled": return "Отменён"
         default: return s ?? "—"
         }

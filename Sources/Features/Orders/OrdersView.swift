@@ -22,16 +22,31 @@ enum OrderFlow {
     /// Упорядоченные шаги «нормального» пути (без cancelled).
     static let steps: [String] = ["new", "accepted", "preparing", "ready", "in_delivery", "done"]
 
-    /// Заголовки шагов для таймлайна.
-    static func stepTitle(_ key: String) -> String {
+    /// Заголовки шагов для таймлайна. `shopType` — shop | cafe | service:
+    /// шаги одни и те же, слова разные (кафе готовит, магазин собирает,
+    /// салон работает). Параметр необязательный — старые вызовы не ломаются.
+    static func stepTitle(_ key: String, shopType: String? = nil) -> String {
         switch key {
-        case "new":         return "Заказ оформлен"
+        case "new":
+            return shopType == "service" ? "Запись создана" : "Заказ оформлен"
         case "accepted":    return "Заведение приняло заказ"
-        case "preparing":   return "Готовится"
-        case "ready":       return "Готов к выдаче"
+        case "preparing":
+            switch shopType {
+            case "cafe":    return "Готовится"
+            case "service": return "В работе"
+            case "shop":    return "Собирается"
+            default:        return "Готовится"
+            }
+        case "ready":
+            switch shopType {
+            case "service": return "Услуга выполнена"
+            case "shop":    return "Собран, ждёт выдачи"
+            default:        return "Готов к выдаче"
+            }
         case "in_delivery": return "Курьер в пути"
-        case "done":        return "Доставлен"
-        default:            return OrderStatus.label(key)
+        case "done":
+            return shopType == "service" ? "Завершена" : "Доставлен"
+        default:            return OrderStatus.label(key, shopType: shopType)
         }
     }
 
@@ -380,7 +395,7 @@ private struct OrderCard: View {
                 // ── Строка статуса: точка (пульс у «В пути») + текст + ETA ──
                 HStack(spacing: YMSpace.sm) {
                     StatusDot(color: OrderFlow.color(order.status), pulsing: enRoute)
-                    Text(OrderStatus.label(order.status))
+                    Text(OrderStatus.label(order.status, shopType: order.shopType))
                         .font(YMFont.subhead)
                         .foregroundStyle(OrderFlow.color(order.status))
                         .lineLimit(1)
@@ -398,7 +413,7 @@ private struct OrderCard: View {
         .buttonStyle(CardPressStyle())
         .ymCard(radius: YMRadius.card)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(order.shopName ?? "Заказ") \(number), \(OrderStatus.label(order.status)), \(money)")
+        .accessibilityLabel("\(order.shopName ?? "Заказ") \(number), \(OrderStatus.label(order.status, shopType: order.shopType)), \(money)")
     }
 }
 

@@ -367,7 +367,7 @@ struct OrderDetailView: View {
 
     private var etaLine: String {
         let mins = vm.track?.etaMinutes
-        let base = OrderStatus.label(vm.track?.status ?? vm.order?.status)
+        let base = OrderStatus.label(vm.track?.status ?? vm.order?.status, shopType: vm.order?.shopType)
         if let m = mins, m > 0 { return "\(base) · \(m) мин до вас" }
         return base
     }
@@ -395,7 +395,7 @@ struct OrderDetailView: View {
                 let current = OrderFlow.stepIndex(o.status)
                 ForEach(Array(OrderFlow.steps.enumerated()), id: \.offset) { idx, key in
                     TimelineRow(
-                        title: OrderFlow.stepTitle(key),
+                        title: OrderFlow.stepTitle(key, shopType: vm.order?.shopType),
                         time: stepTime(idx: idx, current: current, o: o),
                         state: idx < current ? .done : (idx == current ? .active : .todo),
                         isLast: idx == OrderFlow.steps.count - 1)

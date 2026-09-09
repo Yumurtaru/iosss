@@ -312,7 +312,7 @@ struct ReturnCreateView: View {
                             ForEach(eligibleOrders) { o in
                                 SelectableRow(
                                     title: "Заказ №\(o.dailyNumber ?? o.id)" + (o.shopName.map { " · \($0)" } ?? ""),
-                                    subtitle: "\(Money.format(Money.parse(o.total))) · \(OrderStatus.label(o.status))",
+                                    subtitle: "\(Money.format(Money.parse(o.total))) · \(OrderStatus.label(o.status, shopType: o.shopType))",
                                     selected: selectedOrderId == o.id
                                 ) { Haptics.light(); selectedOrderId = o.id }
                             }

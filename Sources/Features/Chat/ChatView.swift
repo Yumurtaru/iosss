@@ -311,7 +311,7 @@ private struct ChatThreadScreen: View {
             StatusDot(color: OrderFlow.color(vm.order?.status),
                       pulsing: OrderFlow.isEnRoute(vm.order?.status), size: 6)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Заказ №\(vm.order?.dailyNumber ?? orderId) · \(OrderStatus.label(vm.order?.status))")
+                Text("Заказ №\(vm.order?.dailyNumber ?? orderId) · \(OrderStatus.label(vm.order?.status, shopType: vm.order?.shopType))")
                     .font(.system(size: 13, weight: .bold)).foregroundStyle(YMColor.text)
                 if let o = vm.order {
                     Text("\(o.items?.count ?? 0) поз. · \(Money.format(Money.parse(o.total)))")
