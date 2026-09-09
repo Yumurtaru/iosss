@@ -666,11 +666,16 @@ private struct FavoritesSection: View {
             // Дальше любая перерисовка экрана (переключение сегмента, обновление
             // списка) снова видела «есть куда переходить» и повторно толкала
             // прошлый экран. Сеттер ниже гасит ОБА состояния, хвостов не остаётся.
+            //
+            // Плюс страховка от порядка событий: переход разрешён, только если
+            // он СООТВЕТСТВУЕТ открытой вкладке. Даже если гашение выше почему-то
+            // не успеет отработать до перерисовки, тап по «Товары» физически
+            // не сможет открыть организацию — getter вернёт false.
             .navigationDestination(isPresented: Binding(
-                get: { pushedShop != nil || pushedProduct != nil },
+                get: { tab == .orgs ? pushedShop != nil : pushedProduct != nil },
                 set: { if !$0 { pushedShop = nil; pushedProduct = nil } }
             )) {
-                if let s = pushedShop { OrgView(shop: s) }
+                if tab == .orgs, let s = pushedShop { OrgView(shop: s) }
                 else if let id = pushedProduct { ProductView(id: id) }
             }
         }
