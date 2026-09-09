@@ -155,14 +155,24 @@ final class ListingViewModel: ObservableObject {
 
 // MARK: - ListingView
 
+/// Куда уводит экран листинга: карточка организации или карточка товара.
+/// Один enum вместо двух @State — см. комментарий у route ниже.
+private enum ListingRoute {
+    case shop(Shop)
+    case product(Int)
+}
+
 struct ListingView: View {
     @StateObject private var vm: ListingViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var showSort = false
-    @State private var pushedShop: Shop?
-    @State private var pushedProduct: Int?
+    // ОДНО состояние перехода на экран. Пока их было два (организация и товар),
+    // закрытие гасило только одно: второе оставалось заполненным после «назад»,
+    // и следующая же перерисовка (смена режима списка, сортировка, обновление)
+    // снова открывала прошлый экран — причём не тот, на который нажали.
+    @State private var route: ListingRoute?
     @State private var showBecomeSeller = false
 
     init(orgType: String, title: String, cityId: Int?) {
@@ -201,19 +211,18 @@ struct ListingView: View {
         .sheet(isPresented: $showBecomeSeller) {
             NavigationStack { BecomeSellerView() }
         }
-        // ОДИН navigationDestination на экран. Раньше их было два подряд —
-        // SwiftUI оставляет в силе только один, а второй перестаёт закрываться
-        // при возврате: его @State так и остаётся заполненным. Дальше любая
-        // перерисовка экрана (например, переключение сегмента) снова видела
-        // «есть куда переходить» и толкала предыдущий экран. Отсюда и брался
-        // переход в первую организацию при нажатии на «Товары».
-        // Сеттер гасит ОБА состояния — после возврата не остаётся хвостов.
+        // ОДИН destination на одно состояние route: гасить нечего, кроме него,
+        // поэтому «хвоста» от прошлого перехода не остаётся.
+        // (Свой NavigationStack этот экран не создаёт — он сам открыт внутри
+        // стека вкладки, поэтому здесь isPresented, а не path.)
         .navigationDestination(isPresented: Binding(
-            get: { pushedShop != nil || pushedProduct != nil },
-            set: { if !$0 { pushedShop = nil; pushedProduct = nil } }
+            get: { route != nil }, set: { if !$0 { route = nil } }
         )) {
-            if let s = pushedShop { OrgView(shop: s) }
-            else if let id = pushedProduct { ProductView(id: id) }
+            switch route {
+            case .shop(let s):     OrgView(shop: s)
+            case .product(let id): ProductView(id: id)
+            case .none:            EmptyView()
+            }
         }
     }
 
@@ -333,7 +342,7 @@ struct ListingView: View {
                     ForEach(Array(vm.sortedOrgs.enumerated()), id: \.element.id) { idx, shop in
                         OrgListRow(shop: shop) {
                             Haptics.light()
-                            pushedShop = shop
+                            route = .shop(shop)
                         }
                         // Промо-карточка «Стать продавцом» после каждых 3 заведений.
                         if (idx + 1) % 3 == 0 {
@@ -353,9 +362,9 @@ struct ListingView: View {
                     ForEach(vm.filteredProducts) { p in
                         ProductGridCard(product: p) {
                             Haptics.light()
-                            pushedProduct = p.id
+                            route = .product(p.id)
                         } onAdd: {
-                            pushedProduct = p.id
+                            route = .product(p.id)
                         }
                     }
                 }

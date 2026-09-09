@@ -65,10 +65,12 @@ private struct SearchSmartResult: Decodable { let shops: [Shop]?; let products: 
 /// видела «есть куда переходить» и повторно открывала прошлый экран: тап по
 /// «Товары» открывал организацию, тап по «Организации» — товар.
 ///
-/// С одним состоянием и одним destination такой хвост невозможен в принципе:
-/// гасить нечего, кроме единственного `route`. Так же сделано на Главной
-/// (HomeView.HomeRoute) — это рабочий образец.
-private enum DiscoverRoute {
+/// РЕШЕНИЕ: навигация по `path` у NavigationStack, а не по флагу isPresented.
+/// При возврате назад SwiftUI САМ убирает элемент из path — гасить состояние
+/// вручную не нужно, «забытого» перехода не остаётся в принципе. У isPresented
+/// закрытие идёт через сеттер Binding, и именно он мог не сработать.
+/// Так же сделано в профиле (ProfileView.path + ProfileRoute) — рабочий образец.
+private enum DiscoverRoute: Hashable {
     case shop(Shop)
     case product(Int)
     case listing(orgType: String, title: String)
@@ -91,8 +93,8 @@ private struct SearchSection: View {
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
 
-    // Навигация внутри своего NavigationStack (флоу как в OrgView/ListingView).
-    @State private var route: DiscoverRoute?
+    // Навигация внутри своего NavigationStack: стек экранов, а не флаг.
+    @State private var path: [DiscoverRoute] = []
 
     private var trimmed: String { q.trimmingCharacters(in: .whitespaces) }
     private var showResults: Bool { !shops.isEmpty || !products.isEmpty }
@@ -114,7 +116,7 @@ private struct SearchSection: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 searchBar
                 ScrollView {
@@ -136,11 +138,9 @@ private struct SearchSection: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
-            // ОДИН destination на одно состояние route (см. DiscoverRoute).
-            .navigationDestination(isPresented: Binding(
-                get: { route != nil }, set: { if !$0 { route = nil } }
-            )) {
-                switch route {
+            // ОДИН destination на тип маршрута (см. DiscoverRoute).
+            .navigationDestination(for: DiscoverRoute.self) { r in
+                switch r {
                 case .shop(let s):     OrgView(shop: s)
                 case .product(let id): ProductView(id: id)
                 default:               EmptyView()
@@ -243,7 +243,7 @@ private struct SearchSection: View {
             if !recent.isEmpty {
                 sectionKicker("Недавно смотрели")
                 ForEach(recent) { r in
-                    Button { route = .product(r.id) } label: {
+                    Button { path.append(.product(r.id)) } label: {
                         HStack(spacing: YMSpace.md) {
                             PhotoPlaceholder(url: API.imageURL(r.photo), label: "ФОТО", radius: 12, tone: r.id)
                                 .frame(width: 44, height: 44)
@@ -288,7 +288,7 @@ private struct SearchSection: View {
     }
 
     private func productResultCard(_ p: Product, tone: Int) -> some View {
-        Button { route = .product(p.id) } label: {
+        Button { path.append(.product(p.id)) } label: {
             VStack(alignment: .leading, spacing: 7) {
                 PhotoPlaceholder(url: API.imageURL(p.photo), label: "ФОТО", radius: 16, tone: tone)
                     .frame(width: 150, height: 96)
@@ -308,7 +308,7 @@ private struct SearchSection: View {
     }
 
     private func orgResultRow(_ s: Shop, tone: Int) -> some View {
-        Button { route = .shop(s) } label: {
+        Button { path.append(.shop(s)) } label: {
             HStack(spacing: YMSpace.md) {
                 PhotoPlaceholder(url: API.imageURL(s.logo ?? s.cover), label: "ЛОГО", radius: 12, tone: tone)
                     .frame(width: 44, height: 44)
@@ -478,10 +478,10 @@ private struct CategoriesSection: View {
     @State private var cats: [OrgCategory] = []
     @State private var loading = true
     // Листинг организаций выбранной категории (orgType + заголовок).
-    @State private var route: DiscoverRoute?
+    @State private var path: [DiscoverRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Категории")
@@ -505,8 +505,8 @@ private struct CategoriesSection: View {
                             ForEach(Array(cats.enumerated()), id: \.element.id) { idx, cat in
                                 CategoryTile(category: cat, tone: idx) {
                                     Haptics.selection()
-                                    route = .listing(orgType: tab.apiType,
-                                                     title: cat.name ?? tab.title)
+                                    path.append(.listing(orgType: tab.apiType,
+                                                         title: cat.name ?? tab.title))
                                 }
                             }
                         }
@@ -517,10 +517,8 @@ private struct CategoriesSection: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
-            .navigationDestination(isPresented: Binding(
-                get: { route != nil }, set: { if !$0 { route = nil } }
-            )) {
-                switch route {
+            .navigationDestination(for: DiscoverRoute.self) { r in
+                switch r {
                 case .listing(let type, let title):
                     ListingView(orgType: type, title: title, cityId: session.cityId)
                 default:
@@ -621,10 +619,10 @@ private struct FavoritesSection: View {
     @State private var loading = true
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
-    @State private var route: DiscoverRoute?
+    @State private var path: [DiscoverRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Избранное")
@@ -647,7 +645,7 @@ private struct FavoritesSection: View {
                         else {
                             VStack(spacing: YMSpace.lg) {
                                 ForEach(Array(shops.enumerated()), id: \.element.id) { idx, s in
-                                    FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { route = .shop(s) }
+                                    FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { path.append(.shop(s)) }
                                 }
                             }
                             .padding(.horizontal, YMSpace.xl)
@@ -657,7 +655,7 @@ private struct FavoritesSection: View {
                         else {
                             VStack(spacing: YMSpace.lg) {
                                 ForEach(Array(products.enumerated()), id: \.element.id) { idx, p in
-                                    FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { route = .product(p.id) }
+                                    FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { path.append(.product(p.id)) }
                                 }
                             }
                             .padding(.horizontal, YMSpace.xl)
@@ -673,35 +671,20 @@ private struct FavoritesSection: View {
             // остался с прошлого раза, нажатие на сегмент не должно открывать
             // прошлый экран — именно так и выглядел баг: тап по «Товары»
             // открывал первую организацию.
-            .onChange(of: tab) { _ in route = nil }
-            // ОДИН destination на одно состояние route (см. DiscoverRoute).
-            // Плюс страховка от порядка событий: переход разрешён, только если
-            // он СООТВЕТСТВУЕТ открытой вкладке. Даже если гашение выше почему-то
-            // не успеет отработать до перерисовки, тап по «Товары» физически
-            // не сможет открыть организацию, а тап по «Организации» — товар.
-            .navigationDestination(isPresented: Binding(
-                get: { routeMatchesTab }, set: { if !$0 { route = nil } }
-            )) {
-                if routeMatchesTab {
-                    switch route {
-                    case .shop(let s):     OrgView(shop: s)
-                    case .product(let id): ProductView(id: id)
-                    default:               EmptyView()
-                    }
+            // Переключение вкладки — это смена списка, а не переход. Стек
+            // экранов при этом всегда пуст: сюда мы попадаем, только когда
+            // пользователь стоит на самом экране «Избранное».
+            .onChange(of: tab) { _ in path.removeAll() }
+            // ОДИН destination на тип маршрута (см. DiscoverRoute).
+            .navigationDestination(for: DiscoverRoute.self) { r in
+                switch r {
+                case .shop(let s):     OrgView(shop: s)
+                case .product(let id): ProductView(id: id)
+                default:               EmptyView()
                 }
             }
         }
         .task { await load() }
-    }
-
-    /// Переход соответствует открытой вкладке: организация — только на
-    /// «Организациях», товар — только на «Товарах».
-    private var routeMatchesTab: Bool {
-        switch route {
-        case .shop:    return tab == .orgs
-        case .product: return tab == .products
-        default:       return false
-        }
     }
 
     private func empty(_ title: String) -> some View {
