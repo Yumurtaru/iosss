@@ -202,6 +202,10 @@ struct Appointment: Codable, Identifiable {
     let shopPhone: String?
     @LenientDouble var shopLat: Double?
     @LenientDouble var shopLng: Double?
+    /// Адрес визита строкой — у выездной услуги клиенту нужно видеть, куда
+    /// приедет мастер. У услуги в заведении сервер шлёт пустую строку
+    /// (api_v1.php: formatVisitAddress), поэтому проверяем на пустоту.
+    let address: String?
     /// Считает сервер — чтобы табы «Предстоящие / Прошедшие» одинаково делились
     /// на всех платформах и не зависели от часового пояса телефона.
     @LenientBool var isPast: Bool?
@@ -303,6 +307,14 @@ struct Master: Codable, Identifiable { let id: Int; let name: String?; let photo
 struct ServiceItem: Codable, Identifiable {
     let id: Int; @LenientInt var masterId: Int?; let name: String?; let description: String?
     @LenientInt var durationMin: Int?; @LenientDouble var price: Double?
+    /// Где оказывается услуга: at_business (в заведении) | at_client (выезд).
+    /// Сервер отдаёт location_type всегда, со значением по умолчанию
+    /// at_business — форма ответа одинакова даже без миграции (api_v1.php).
+    let locationType: String?
+    /// Доплата за выезд. Приходит строкой ("0.00"), поэтому @LenientDouble.
+    @LenientDouble var travelFee: Double?
+    /// Услуга с выездом к клиенту — тогда при записи нужен адрес.
+    var isAtClient: Bool { locationType == "at_client" }
 }
 struct ServicesResponse: Codable { let masters: [Master]?; let services: [ServiceItem]? }
 struct CatalogItem: Codable, Hashable {
