@@ -65,11 +65,16 @@ private struct SearchSmartResult: Decodable { let shops: [Shop]?; let products: 
 /// видела «есть куда переходить» и повторно открывала прошлый экран: тап по
 /// «Товары» открывал организацию, тап по «Организации» — товар.
 ///
-/// РЕШЕНИЕ: навигация по `path` у NavigationStack, а не по флагу isPresented.
-/// При возврате назад SwiftUI САМ убирает элемент из path — гасить состояние
-/// вручную не нужно, «забытого» перехода не остаётся в принципе. У isPresented
-/// закрытие идёт через сеттер Binding, и именно он мог не сработать.
-/// Так же сделано в профиле (ProfileView.path + ProfileRoute) — рабочий образец.
+/// РЕШЕНИЕ: ОДНО состояние `route` и ОДИН `navigationDestination` на экран —
+/// ровно так, как на Главной (HomeView.HomeRoute), которая работает.
+///
+/// Почему НЕ `NavigationStack(path:)`: экраны, которые открываются отсюда
+/// (OrgView, ProductView, ListingView), толкают дальше своими средствами —
+/// `navigationDestination(isPresented:)` и обычным NavigationLink. Эти переходы
+/// физически не попадают в типизированный path, поэтому path перестаёт
+/// соответствовать реальной глубине стека: после «назад» в нём остаётся запись,
+/// и следующая перерисовка открывает прошлый экран заново. Пока ВСЕ экраны
+/// приложения не переведены на один общий маршрут, один флаг честнее path.
 private enum DiscoverRoute: Hashable {
     case shop(Shop)
     case product(Int)
@@ -93,8 +98,8 @@ private struct SearchSection: View {
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
 
-    // Навигация внутри своего NavigationStack: стек экранов, а не флаг.
-    @State private var path: [DiscoverRoute] = []
+    // Навигация внутри своего NavigationStack: одно состояние на переход.
+    @State private var route: DiscoverRoute?
 
     private var trimmed: String { q.trimmingCharacters(in: .whitespaces) }
     private var showResults: Bool { !shops.isEmpty || !products.isEmpty }
@@ -116,7 +121,7 @@ private struct SearchSection: View {
     }
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             VStack(spacing: 0) {
                 searchBar
                 ScrollView {
@@ -138,9 +143,11 @@ private struct SearchSection: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
-            // ОДИН destination на тип маршрута (см. DiscoverRoute).
-            .navigationDestination(for: DiscoverRoute.self) { r in
-                switch r {
+            // ОДИН destination на экран (см. DiscoverRoute).
+            .navigationDestination(isPresented: Binding(
+                get: { route != nil }, set: { if !$0 { route = nil } }
+            )) {
+                switch route {
                 case .shop(let s):     OrgView(shop: s)
                 case .product(let id): ProductView(id: id)
                 default:               EmptyView()
@@ -243,7 +250,7 @@ private struct SearchSection: View {
             if !recent.isEmpty {
                 sectionKicker("Недавно смотрели")
                 ForEach(recent) { r in
-                    Button { path.append(.product(r.id)) } label: {
+                    Button { route = .product(r.id) } label: {
                         HStack(spacing: YMSpace.md) {
                             PhotoPlaceholder(url: API.imageURL(r.photo), label: "ФОТО", radius: 12, tone: r.id)
                                 .frame(width: 44, height: 44)
@@ -288,7 +295,7 @@ private struct SearchSection: View {
     }
 
     private func productResultCard(_ p: Product, tone: Int) -> some View {
-        Button { path.append(.product(p.id)) } label: {
+        Button { route = .product(p.id) } label: {
             VStack(alignment: .leading, spacing: 7) {
                 PhotoPlaceholder(url: API.imageURL(p.photo), label: "ФОТО", radius: 16, tone: tone)
                     .frame(width: 150, height: 96)
@@ -308,7 +315,7 @@ private struct SearchSection: View {
     }
 
     private func orgResultRow(_ s: Shop, tone: Int) -> some View {
-        Button { path.append(.shop(s)) } label: {
+        Button { route = .shop(s) } label: {
             HStack(spacing: YMSpace.md) {
                 PhotoPlaceholder(url: API.imageURL(s.logo ?? s.cover), label: "ЛОГО", radius: 12, tone: tone)
                     .frame(width: 44, height: 44)
@@ -478,10 +485,10 @@ private struct CategoriesSection: View {
     @State private var cats: [OrgCategory] = []
     @State private var loading = true
     // Листинг организаций выбранной категории (orgType + заголовок).
-    @State private var path: [DiscoverRoute] = []
+    @State private var route: DiscoverRoute?
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Категории")
@@ -505,8 +512,8 @@ private struct CategoriesSection: View {
                             ForEach(Array(cats.enumerated()), id: \.element.id) { idx, cat in
                                 CategoryTile(category: cat, tone: idx) {
                                     Haptics.selection()
-                                    path.append(.listing(orgType: tab.apiType,
-                                                         title: cat.name ?? tab.title))
+                                    route = .listing(orgType: tab.apiType,
+                                                     title: cat.name ?? tab.title)
                                 }
                             }
                         }
@@ -517,8 +524,10 @@ private struct CategoriesSection: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
-            .navigationDestination(for: DiscoverRoute.self) { r in
-                switch r {
+            .navigationDestination(isPresented: Binding(
+                get: { route != nil }, set: { if !$0 { route = nil } }
+            )) {
+                switch route {
                 case .listing(let type, let title):
                     ListingView(orgType: type, title: title, cityId: session.cityId)
                 default:
@@ -619,10 +628,10 @@ private struct FavoritesSection: View {
     @State private var loading = true
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
-    @State private var path: [DiscoverRoute] = []
+    @State private var route: DiscoverRoute?
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Избранное")
@@ -645,7 +654,7 @@ private struct FavoritesSection: View {
                         else {
                             VStack(spacing: YMSpace.lg) {
                                 ForEach(Array(shops.enumerated()), id: \.element.id) { idx, s in
-                                    FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { path.append(.shop(s)) }
+                                    FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { route = .shop(s) }
                                 }
                             }
                             .padding(.horizontal, YMSpace.xl)
@@ -655,7 +664,7 @@ private struct FavoritesSection: View {
                         else {
                             VStack(spacing: YMSpace.lg) {
                                 ForEach(Array(products.enumerated()), id: \.element.id) { idx, p in
-                                    FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { path.append(.product(p.id)) }
+                                    FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { route = .product(p.id) }
                                 }
                             }
                             .padding(.horizontal, YMSpace.xl)
@@ -666,18 +675,11 @@ private struct FavoritesSection: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
-            // Переключение «Организации ⇄ Товары» — смена содержимого списка,
-            // а не переход. Гасим отложенный переход явно: если он почему-то
-            // остался с прошлого раза, нажатие на сегмент не должно открывать
-            // прошлый экран — именно так и выглядел баг: тап по «Товары»
-            // открывал первую организацию.
-            // Переключение вкладки — это смена списка, а не переход. Стек
-            // экранов при этом всегда пуст: сюда мы попадаем, только когда
-            // пользователь стоит на самом экране «Избранное».
-            .onChange(of: tab) { _ in path.removeAll() }
-            // ОДИН destination на тип маршрута (см. DiscoverRoute).
-            .navigationDestination(for: DiscoverRoute.self) { r in
-                switch r {
+            // ОДИН destination на экран (см. DiscoverRoute).
+            .navigationDestination(isPresented: Binding(
+                get: { route != nil }, set: { if !$0 { route = nil } }
+            )) {
+                switch route {
                 case .shop(let s):     OrgView(shop: s)
                 case .product(let id): ProductView(id: id)
                 default:               EmptyView()
@@ -685,6 +687,14 @@ private struct FavoritesSection: View {
             }
         }
         .task { await load() }
+        // Гашение отложенного перехода — СНАРУЖИ NavigationStack.
+        // Раньше эта строка стояла ВНУТРИ стека, на его же корневом ScrollView,
+        // и меняла состояние перехода прямо в анимации нажатия на сегмент
+        // (YMSegmented пишет selection внутри withAnimation). Переключение
+        // вкладки и перестройка стека попадали в одну транзакцию, и тап по
+        // сегменту терялся — вкладка не переключалась. В соседней секции
+        // «Категории» такой строки внутри стека нет, и она работает.
+        .onChange(of: tab) { _ in route = nil }
     }
 
     private func empty(_ title: String) -> some View {
@@ -712,7 +722,11 @@ private struct FavoritesSection: View {
     }
 
     private func load() async {
-        loading = true
+        // Скелетоны — только когда показывать нечего. `.task` перезапускается
+        // при каждом возврате на вкладку, и loading = true прятал весь список
+        // целиком — со стороны это выглядело так, будто переключение
+        // «Организации ⇄ Товары» не сработало.
+        if shops.isEmpty && products.isEmpty { loading = true }
         shops = (try? await API.shared.list("api/v1/favorites")) ?? []
         products = (try? await API.shared.list("api/v1/product-favorites")) ?? []
         favShops = Set(shops.map { $0.id })
@@ -753,9 +767,6 @@ private struct FavOrgCard: View {
                         StatusPill(text: isOpen ? "Открыто" : "Закрыто",
                                    kind: isOpen ? .open : .cancel, solid: true).padding(11)
                     }
-                    .overlay(alignment: .topTrailing) {
-                        HeartButton(isFav: $isFav, size: 34, favColor: YMColor.statusCancel).padding(11)
-                    }
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline) {
                         Text(shop.name ?? "—")
@@ -785,9 +796,14 @@ private struct FavOrgCard: View {
             }
         }
         .buttonStyle(CardPressStyle())
-        .ymCard(radius: 20)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(shop.name ?? "Организация"), \(isOpen ? "открыто" : "закрыто")")
+        .ymCard(radius: 20)
+        // ♥ — СНАРУЖИ кнопки карточки. Внутри label это была кнопка в кнопке:
+        // тап по сердечку срабатывал и на внешней кнопке, открывая карточку.
+        .overlay(alignment: .topTrailing) {
+            HeartButton(isFav: $isFav, size: 34, favColor: YMColor.statusCancel).padding(11)
+        }
     }
 }
 
@@ -803,9 +819,6 @@ private struct FavProductCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 PhotoPlaceholder(url: API.imageURL(product.photo), label: "ФОТО", radius: 0, tone: tone)
                     .frame(height: 120).frame(maxWidth: .infinity).clipped()
-                    .overlay(alignment: .topTrailing) {
-                        HeartButton(isFav: $isFav, size: 34, favColor: YMColor.statusCancel).padding(11)
-                    }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(product.name ?? "—")
                         .font(.system(size: 16, weight: .heavy))
@@ -826,8 +839,12 @@ private struct FavProductCard: View {
             }
         }
         .buttonStyle(CardPressStyle())
-        .ymCard(radius: 20)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(product.name ?? "Товар")
+        .ymCard(radius: 20)
+        // ♥ — СНАРУЖИ кнопки карточки (см. FavOrgCard).
+        .overlay(alignment: .topTrailing) {
+            HeartButton(isFav: $isFav, size: 34, favColor: YMColor.statusCancel).padding(11)
+        }
     }
 }
