@@ -211,9 +211,63 @@ struct Appointment: Codable, Identifiable {
     @LenientBool var isPast: Bool?
 }
 struct OrderItem: Codable, Identifiable {
-    var id: Int { (productId ?? 0) &* 100000 &+ Int((qty ?? 0).rounded()) }
-    @LenientInt var productId: Int?; let name: String?; @LenientDouble var qty: Double?; @LenientDouble var price: Double?
+    /// order_items.id — настоящий, стабильный ключ строки. Появился вместе с
+    /// правкой состава заказа (миграция 2026_09_order_edit.sql). Пока сервер его
+    /// не отдавал, id приходилось выводить из productId и qty, из-за чего смена
+    /// количества выглядела для SwiftUI как удаление строки и вставка новой.
+    @LenientInt var lineId: Int?
+    @LenientInt var productId: Int?
+    let name: String?
+    @LenientDouble var qty: Double?
+    /// Сколько заказывал КЛИЕНТ. Отличается от qty, если продавец правил заказ.
+    @LenientDouble var qtyOrdered: Double?
+    @LenientDouble var price: Double?
     let unit: String?
+
+    // Ключи камелкейсом: декодер работает с .convertFromSnakeCase, он уже
+    // превратил product_id → productId. Явно переименовываем только id → lineId.
+    enum CodingKeys: String, CodingKey {
+        case lineId = "id"
+        case productId, name, qty, qtyOrdered, price, unit
+    }
+
+    var id: Int { lineId ?? ((productId ?? 0) &* 100000 &+ Int((qty ?? 0).rounded())) }
+
+    /// Количество отличается от заказанного — позицию правил продавец.
+    var quantityChanged: Bool {
+        guard let was = qtyOrdered, let now = qty else { return false }
+        return abs(was - now) > 0.0005
+    }
+}
+
+// ── Правки заказа продавцом/кассой (аддитивно) ──────────────────────────────
+// Клиент заказал 1 кг помидоров, в магазине оказалось 700 г. Сервер хранит
+// историю правок, а мы показываем её отдельным блоком: человек должен видеть
+// не только новый состав, но и чем он отличается от заказанного.
+struct OrderChangeLine: Codable, Identifiable {
+    let op: String?                  // qty | remove
+    @LenientInt var itemId: Int?
+    let name: String?
+    let unit: String?
+    @LenientDouble var qtyBefore: Double?
+    @LenientDouble var qtyAfter: Double?
+    @LenientDouble var price: Double?
+    @LenientDouble var sumBefore: Double?
+    @LenientDouble var sumAfter: Double?
+    var id: String { "\(itemId ?? 0)|\(name ?? "")|\(qtyAfter ?? 0)" }
+}
+
+struct OrderChange: Codable, Identifiable {
+    @LenientInt var rev: Int?
+    let at: String?
+    let actorType: String?           // pos | seller | system
+    let actor: String?
+    let reason: String?
+    @LenientDouble var totalBefore: Double?
+    @LenientDouble var totalAfter: Double?
+    let lines: [OrderChangeLine]?
+    let text: String?                // готовая строка на случай, если рисовать построчно негде
+    var id: Int { rev ?? 0 }
 }
 struct OrderDetail: Codable, Identifiable {
     let id: Int; @LenientInt var dailyNumber: Int?; let status: String?; @LenientDouble var total: Double?
@@ -225,6 +279,9 @@ struct OrderDetail: Codable, Identifiable {
     @LenientDouble var pointsSpent: Double?; @LenientDouble var pointsEarned: Double?
     /// Тип организации: shop | cafe | service (аддитивно, см. Order.shopType).
     let shopType: String?
+    /// Ревизия состава и история правок (аддитивно). Пусто — заказ не правили.
+    @LenientInt var rev: Int?
+    let changes: [OrderChange]?
 }
 struct TrackData: Codable {
     let status: String?; @LenientDouble var courierLat: Double?; @LenientDouble var courierLng: Double?

@@ -60,6 +60,7 @@ final class OrderDetailViewModel: ObservableObject {
     @Published var payLink: PayLink?       // ссылка YooKassa → открыть во внешнем браузере
 
     private var pollTimer: Timer?
+    private var pollTick: Int = 0
 
     init(id: Int) { self.id = id }
 
@@ -140,11 +141,20 @@ final class OrderDetailViewModel: ObservableObject {
     func startTrackingIfActive() {
         guard OrderFlow.isActive(order?.status ?? track?.status) else { return }
         pollTimer?.invalidate()
+        pollTick = 0
         pollTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 if let t: TrackData = try? await API.shared.get("api/v1/orders/\(self.id)/track") {
                     self.track = t
+                }
+                // Каждый третий тик (24 с) перечитываем заказ: продавец мог
+                // изменить состав, и на открытом экране это должно появиться
+                // само, а не после выхода и повторного входа.
+                self.pollTick &+= 1
+                if self.pollTick % 3 == 0,
+                   let o: OrderDetail = try? await API.shared.get("api/v1/orders/\(self.id)") {
+                    self.order = o
                 }
             }
         }
@@ -222,6 +232,7 @@ struct OrderDetailView: View {
                     }
                     timelineCard(o)
                     if canPay(o) { payCard(o) }          // онлайн-оплата (неоплаченный online-заказ)
+                    if let ch = o.changes, !ch.isEmpty { changesCard(ch) }
                     itemsCard(o)
                     if canReview(o) {                     // отзыв + NPS (для доставленных)
                         reviewCard(o)
@@ -426,13 +437,19 @@ struct OrderDetailView: View {
             Text("Состав").font(YMFont.title3).foregroundStyle(YMColor.text)
                 .padding(.bottom, YMSpace.xs)
             ForEach(o.items ?? []) { it in
-                HStack(spacing: YMSpace.sm) {
-                    Text(qtyLabel(it))
-                        .font(.system(size: 14, weight: .heavy)).foregroundStyle(YMColor.accent)
-                    Text(it.name ?? "—").font(YMFont.body).foregroundStyle(YMColor.text)
-                    Spacer(minLength: 8)
-                    Text(Money.format(Money.parse(it.price)))
-                        .font(YMFont.body).foregroundStyle(YMColor.muted)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: YMSpace.sm) {
+                        Text(qtyLabel(it))
+                            .font(.system(size: 14, weight: .heavy)).foregroundStyle(YMColor.accent)
+                        Text(it.name ?? "—").font(YMFont.body).foregroundStyle(YMColor.text)
+                        Spacer(minLength: 8)
+                        Text(Money.format(Money.parse(it.price)))
+                            .font(YMFont.body).foregroundStyle(YMColor.muted)
+                    }
+                    if it.quantityChanged {
+                        Text("изменено: было \(numText(it.qtyOrdered))\((it.unit ?? "").isEmpty ? "" : " " + (it.unit ?? ""))")
+                            .font(YMFont.caption).foregroundStyle(YMColor.accent)
+                    }
                 }
             }
             Divider().overlay(YMColor.hairline).padding(.vertical, YMSpace.xs)
@@ -455,6 +472,59 @@ struct OrderDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(YMSpace.lg)
         .ymCard(radius: YMRadius.card)
+    }
+
+    // ── Что изменилось в заказе ─────────────────────────────────────────────
+    // Продавец мог уменьшить количество (не оказалось товара). Клиент должен
+    // видеть не только новый состав, но и чем он отличается от заказанного.
+    private func changesCard(_ changes: [OrderChange]) -> some View {
+        VStack(alignment: .leading, spacing: YMSpace.sm) {
+            Text("Заказ изменён").font(YMFont.title3).foregroundStyle(YMColor.text)
+            Text("Продавец скорректировал состав.")
+                .font(YMFont.caption).foregroundStyle(YMColor.muted)
+            ForEach(changes) { ch in
+                VStack(alignment: .leading, spacing: 4) {
+                    Divider().overlay(YMColor.hairline)
+                    HStack {
+                        Text(DateFmt.short(ch.at)).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        Spacer()
+                        if let a = ch.actor, !a.isEmpty {
+                            Text(a).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        }
+                    }
+                    ForEach(ch.lines ?? []) { l in
+                        Text(changeLineText(l))
+                            .font(YMFont.body).foregroundStyle(YMColor.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let r = ch.reason, !r.isEmpty {
+                        Text("Причина: \(r)").font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    }
+                    HStack {
+                        Text("Сумма заказа").font(YMFont.callout).foregroundStyle(YMColor.muted)
+                        Spacer()
+                        Text(Money.format(Money.parse(ch.totalBefore)) + " → " + Money.format(Money.parse(ch.totalAfter)))
+                            .font(YMFont.callout.weight(.semibold)).foregroundStyle(YMColor.text)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(YMSpace.lg)
+        .ymCard(radius: YMRadius.card)
+    }
+
+    private func changeLineText(_ l: OrderChangeLine) -> String {
+        let unit = (l.unit ?? "").isEmpty ? "" : " " + (l.unit ?? "")
+        let before = numText(l.qtyBefore) + unit
+        let after = numText(l.qtyAfter) + unit
+        let name = l.name ?? "Позиция"
+        return l.op == "remove" ? "\(name) — убрано (было \(before))" : "\(name): \(before) → \(after)"
+    }
+
+    private func numText(_ v: Double?) -> String {
+        let q = v ?? 0
+        return q == q.rounded() ? String(Int(q)) : String(format: "%g", q)
     }
 
     private func qtyLabel(_ it: OrderItem) -> String {
