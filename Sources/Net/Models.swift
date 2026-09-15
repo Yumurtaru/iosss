@@ -38,7 +38,16 @@ struct Banner: Codable, Identifiable {
     let id: Int; let imageWebp: String?; let title: String?; let link: String?
     var image: String? { imageWebp }
 }
-struct Category: Codable, Identifiable, Hashable { let id: Int; let name: String?; let image: String? }
+struct Category: Codable, Identifiable, Hashable {
+    let id: Int
+    let name: String?
+    let image: String?
+    /// Категории ОРГАНИЗАЦИИ (ShopDetail.categories) дополнительно несут slug и
+    /// признак лицензирования — по нему карточка медцентра/аптеки понимает,
+    /// что должна показать номер лицензии. У категорий товаров этих полей нет.
+    let slug: String?
+    @LenientBool var requiresLicense: Bool?
+}
 
 struct Shop: Codable, Identifiable, Hashable {
     let id: Int; let slug: String?; let name: String?; let logo: String?; let cover: String?; let banner: String?
@@ -67,6 +76,32 @@ struct OrgApplyResult: Decodable {
     @LenientInt var registrationId: Int?
     let status: String?          // "pending"
 }
+// ── Лицензия организации ────────────────────────────────────────────────────
+// Медцентр, стоматология, аптека, ветклиника, автошкола обязаны показывать
+// клиенту номер лицензии и дату выдачи. Сервер отдаёт готовый блок license
+// (самый свежий одобренный документ с номером) и полный список documents.
+struct OrgDocument: Codable, Identifiable {
+    let id: Int
+    let title: String?
+    let url: String?
+    @LenientInt var categoryId: Int?
+    let category: String?
+    let licenseNumber: String?
+    let issuedAt: String?        // "2026-09-13"
+    let issuedBy: String?
+    let validUntil: String?
+}
+
+struct OrgLicense: Codable {
+    let number: String?
+    let issuedAt: String?
+    let issuedBy: String?
+    let validUntil: String?
+    let title: String?
+    let category: String?
+    let url: String?
+}
+
 struct ShopDetail: Codable, Identifiable {
     let id: Int; let slug: String?; let name: String?; let logo: String?; let cover: String?; let banner: String?
     // Режим организации: "service" = запись на услуги, иначе магазин/меню (аддитивно, как на Android).
@@ -78,6 +113,11 @@ struct ShopDetail: Codable, Identifiable {
     @LenientDouble var deliveryFee: Double?; @LenientDouble var minOrder: Double?; let deliveryTime: String?; let categories: [Category]?
     let deliveryZones: [DeliveryZone]?
     @LenientDouble var serviceFeePercent: Double?; let serviceFeePayer: String?; let serviceFeeType: String?; @LenientDouble var serviceFeeFixed: Double?
+    /// Лицензия (аддитивно). requiresLicense — организация в лицензируемой
+    /// категории; license — реквизиты, если организация их опубликовала.
+    @LenientBool var requiresLicense: Bool?
+    let license: OrgLicense?
+    let documents: [OrgDocument]?
 }
 /// Зона доставки заведения. Сервер отдаёт массив `delivery_zones` в карточке магазина.
 struct DeliveryZone: Codable, Identifiable, Hashable {
@@ -372,6 +412,22 @@ struct ServiceItem: Codable, Identifiable {
     @LenientDouble var travelFee: Double?
     /// Услуга с выездом к клиенту — тогда при записи нужен адрес.
     var isAtClient: Bool { locationType == "at_client" }
+
+    /// Кто оказывает услугу (аддитивно). Раньше сервер отдавал masters[] общим
+    /// списком по организации, и связать их с услугой приложение не умело —
+    /// имя мастера на услуге не показывалось вовсе.
+    let masters: [Master]?
+    /// Готовая подпись с сервера: «Анна» или «Анна, Ольга». nil — любой мастер.
+    let masterName: String?
+
+    /// «мастер Анна» / «мастера: Анна, Ольга». nil, если мастер не назначен.
+    var mastersLabel: String? {
+        let names = (masters ?? []).compactMap { $0.name }.filter { !$0.isEmpty }
+        if names.count > 1 { return "мастера: " + names.joined(separator: ", ") }
+        if let one = names.first { return "мастер " + one }
+        if let n = masterName, !n.isEmpty { return "мастер " + n }
+        return nil
+    }
 }
 struct ServicesResponse: Codable { let masters: [Master]?; let services: [ServiceItem]? }
 struct CatalogItem: Codable, Hashable {

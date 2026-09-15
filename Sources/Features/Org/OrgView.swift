@@ -306,6 +306,9 @@ struct OrgView: View {
             addressCard
                 .padding(.top, 16)
 
+            // Лицензия — для медцентров, стоматологий, аптек, ветклиник, автошкол.
+            licenseCard
+
             // Услуга (запись) или меню.
             if vm.isService {
                 OrgBookingSection(slug: vm.slug, detail: vm.detail) { showAuth = true }
@@ -334,6 +337,57 @@ struct OrgView: View {
             YMColor.bg
                 .clipShape(RoundedRectangle(cornerRadius: YMRadius.sheet, style: .continuous))
         )
+    }
+
+    // MARK: Лицензия
+
+    /// Номер лицензии и дата выдачи. Показываем, если организация в
+    /// лицензируемой категории (requires_license) либо реквизиты уже
+    /// опубликованы. Пустую карточку «Лицензия: —» не рисуем: лучше ничего,
+    /// чем строка без данных.
+    @ViewBuilder private var licenseCard: some View {
+        let needs = (vm.detail?.requiresLicense ?? false)
+            || (vm.detail?.categories ?? []).contains { $0.requiresLicense == true }
+        if let lic = vm.detail?.license, let number = lic.number, !number.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.seal")
+                        .foregroundStyle(YMColor.accent)
+                    Text(lic.title?.isEmpty == false ? lic.title! : "Лицензия")
+                        .font(YMFont.title3).foregroundStyle(YMColor.text)
+                }
+                Text("№ \(number)" + (licDate(lic.issuedAt).map { " от \($0)" } ?? ""))
+                    .font(YMFont.body.weight(.semibold)).foregroundStyle(YMColor.text)
+                if let by = lic.issuedBy, !by.isEmpty {
+                    Text("Выдана: \(by)").font(YMFont.callout).foregroundStyle(YMColor.muted)
+                }
+                if let until = licDate(lic.validUntil) {
+                    Text("Действует до \(until)").font(YMFont.callout).foregroundStyle(YMColor.muted)
+                }
+                if let cat = lic.category, !cat.isEmpty {
+                    Text(cat).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(YMSpace.lg)
+            .ymCard(radius: YMRadius.card)
+            .padding(.top, 16)
+        } else if needs {
+            Text("Реквизиты лицензии ещё не опубликованы организацией.")
+                .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(YMSpace.lg)
+                .ymCard(radius: YMRadius.card)
+                .padding(.top, 16)
+        }
+    }
+
+    /// «2026-09-13» → «13.09.2026». Пустое и неожиданное отдаём как nil.
+    private func licDate(_ iso: String?) -> String? {
+        guard let iso = iso, iso.count >= 10 else { return nil }
+        let p = iso.prefix(10).split(separator: "-")
+        guard p.count == 3 else { return nil }
+        return "\(p[2]).\(p[1]).\(p[0])"
     }
 
     // MARK: Address card + mini-map

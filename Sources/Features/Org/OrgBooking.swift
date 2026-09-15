@@ -333,6 +333,12 @@ private struct ServiceRow: View {
                                 .font(.system(size: 12))
                                 .foregroundStyle(YMColor.muted)
                         }
+                        // Кто оказывает услугу: «мастер Анна» / «мастера: Анна, Ольга».
+                        if let who = service.mastersLabel {
+                            Text(who)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(YMColor.accent)
+                        }
                     }
                     Spacer(minLength: 8)
                     VStack(alignment: .trailing, spacing: 2) {
