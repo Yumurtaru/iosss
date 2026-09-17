@@ -34,8 +34,15 @@ private enum Tune {
     /// Виртуальный холст: вся геометрия ниже — в этих единицах.
     static let vw: CGFloat = 320
     static let vh: CGFloat = 660
-    /// Полная длительность, мс.
-    static let duration: Double = 3400
+    /// Сколько идёт анимация, мс. Единственная ручка скорости: сцена внутри
+    /// живёт в собственном времени длиной `sceneMs`, а сюда просто растягивается.
+    static let duration: Double = 5400
+    /// Длительность сцены в её собственном времени — под неё считана вся физика.
+    static let sceneMs: Double = 3400
+    /// Во столько раз реальное время медленнее сценического.
+    static var timeScale: Double { duration / sceneMs }
+    /// Опорный кадр 60 Гц: к нему приводятся покадровые затухания.
+    static let frameMs: Double = 1000.0 / 60.0
 
     // Жидкость
     static let sigma: CGFloat = 2.4        // ширина гауссова пятна одной капли
@@ -136,15 +143,22 @@ private final class YolkFluid {
         }
     }
 
-    /// Шаг симуляции. `t` — мс от старта, `dt` — мс с прошлого кадра (6..34).
+    /// Шаг симуляции. `t` и `dt` — в СЦЕНИЧЕСКОМ времени, не в реальном.
+    ///
+    /// Коэффициенты вида «умножить на 0.885 за кадр» переведены в «за dt»:
+    /// иначе на экране 120 Гц сцена считалась бы вдвое чаще и выглядела бы
+    /// иначе, чем на 60 Гц, а растянуть время было бы нельзя вовсе.
     func step(t: Double, dt: Double) {
         let w = Double(Tune.vw)
+        let frames = dt / Tune.frameMs
+        let damp = pow(YolkFluid.damping, frames)
+        func approach(_ rate: Double) -> Double { 1 - pow(1 - rate, frames) }
         for p in droplets {
             if t < p.releaseAt {
                 // Дрожит внутри целого яйца.
-                p.x += sin(t * 0.006 + p.s * 6.3) * 0.07
-                p.y += cos(t * 0.005 + p.s * 6.3) * 0.06
-                p.r += (3.4 - p.r) * 0.04
+                p.x += sin(t * 0.006 + p.s * 6.3) * 0.07 * frames
+                p.y += cos(t * 0.005 + p.s * 6.3) * 0.06 * frames
+                p.r += (3.4 - p.r) * approach(0.04)
             } else if t < YolkFluid.splashEnd {
                 // Падает и разбивается о невидимый пол.
                 if !p.kicked {
@@ -161,24 +175,24 @@ private final class YolkFluid {
                     p.vy = -p.vy * 0.34
                     p.vx = p.vx * 0.9 + (p.x - w / 2) * 0.0016 + (p.s - 0.5) * 0.06
                 }
-                p.r += (p.splashR - p.r) * 0.06
+                p.r += (p.splashR - p.r) * approach(0.06)
             } else if t < p.drainAt {
                 // Стекается в свою точку логотипа.
                 let k = YolkFluid.spring * dt
                 p.vx += (p.tx - p.x) * k
                 p.vy += (p.ty - p.y) * k
-                p.vx *= YolkFluid.damping
-                p.vy *= YolkFluid.damping
+                p.vx *= damp
+                p.vy *= damp
                 p.x += p.vx * dt
                 p.y += p.vy * dt
-                p.r += (YolkFluid.settledR - p.r) * 0.05
+                p.r += (YolkFluid.settledR - p.r) * approach(0.05)
             } else {
                 // Стекает вниз.
                 p.vy += 0.0027 * dt
-                p.vx *= 0.94
+                p.vx *= pow(0.94, frames)
                 p.x += p.vx * dt
                 p.y += p.vy * dt
-                p.r *= 0.996
+                p.r *= pow(0.996, frames)
             }
         }
     }
@@ -286,6 +300,56 @@ private let shellLight = Color(hex: "#FFFFFF")
 private let shellMid = Color(hex: "#F1E7D4")
 private let shellDeep = Color(hex: "#D8CAB2")
 
+// MARK: - Тактильные удары
+
+/// Сцена отдаётся в руку: трещина, взрыв скорлупы, удар желтка о пол, сбор
+/// капель в буквы, проявление логотипа и «готово» в конце. Генераторы
+/// создаются здесь же, внутри main-actor задачи вьюхи, и заранее прогреваются —
+/// иначе первый толчок приходит с заметным опозданием.
+private enum SplashHaptics {
+    enum Kind {
+        case soft(Double), light(Double), medium(Double), heavy, success
+    }
+
+    /// Доли таймлайна, на которых бьём. Совпадают с ключевыми кадрами сцены.
+    private static let beats: [(at: Double, kind: Kind)] = [
+        (0.045, .soft(0.45)),    // по скорлупе пошла трещина
+        (0.115, .heavy),         // скорлупа лопнула
+        (0.240, .medium(0.75)),  // желток ударился о пол
+        (0.500, .soft(0.60)),    // капли собрались в буквы
+        (0.670, .light(0.50)),   // проявился логотип
+        (0.900, .success),       // передача приложению
+    ]
+
+    /// Проигрывает толчки и досыпает до конца анимации — отсюда же берётся
+    /// момент, когда сплэш пора убирать.
+    static func run() async {
+        let light = UIImpactFeedbackGenerator(style: .light)
+        let medium = UIImpactFeedbackGenerator(style: .medium)
+        let heavy = UIImpactFeedbackGenerator(style: .heavy)
+        let soft = UIImpactFeedbackGenerator(style: .soft)
+        let done = UINotificationFeedbackGenerator()
+        light.prepare(); medium.prepare(); heavy.prepare(); soft.prepare(); done.prepare()
+
+        var previous: Double = 0
+        for beat in beats {
+            let wait = (beat.at - previous) * Tune.duration
+            previous = beat.at
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000)) }
+            if Task.isCancelled { return }
+            switch beat.kind {
+            case .soft(let i):   soft.impactOccurred(intensity: i)
+            case .light(let i):  light.impactOccurred(intensity: i)
+            case .medium(let i): medium.impactOccurred(intensity: i)
+            case .heavy:         heavy.impactOccurred()
+            case .success:       done.notificationOccurred(.success)
+            }
+        }
+        let tail = (1 - previous) * Tune.duration
+        if tail > 0 { try? await Task.sleep(nanoseconds: UInt64(tail * 1_000_000)) }
+    }
+}
+
 // MARK: - Состояние сцены
 
 /// Держит симуляцию и часы. Класс, а не структура: TimelineView пересобирает
@@ -314,7 +378,7 @@ private final class SplashScene {
         let t = date.timeIntervalSince(start) * 1000
         let dt = min(34, max(6, date.timeIntervalSince(lastAt ?? date) * 1000))
         lastAt = date
-        fluid.step(t: t, dt: dt)
+        fluid.step(t: t / Tune.timeScale, dt: dt / Tune.timeScale)
         return t
     }
 
@@ -353,8 +417,14 @@ struct SplashView: View {
         .contentShape(Rectangle())
         .onTapGesture {}
         .task {
-            let wait = reduceMotion ? 420.0 : Tune.duration
-            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000))
+            if reduceMotion {
+                try? await Task.sleep(nanoseconds: 420_000_000)
+                onFinished()
+                return
+            }
+            // Толчки и отсчёт до конца анимации — одна и та же задача:
+            // так они не могут разъехаться между собой.
+            await SplashHaptics.run()
             onFinished()
         }
     }
@@ -445,7 +515,8 @@ struct SplashView: View {
         drawGoo(ctx: ctx, size: size, scale: scale, ox: ox, oy: oy)
 
         // 5. Блики поверх жидкости — обычным рисованием, без порога.
-        let highlight = timeMs > 2380 ? max(0, 1 - (timeMs - 2380) / 620) : 1
+        let sceneMs = timeMs / Tune.timeScale
+        let highlight = sceneMs > 2380 ? max(0, 1 - (sceneMs - 2380) / 620) : 1
         if highlight > 0.002 {
             var layer = ctx
             layer.opacity = ctx.opacity * 0.42 * highlight
@@ -578,6 +649,36 @@ struct SplashView: View {
         }
     }
 
+    /// Контур яйца. Не овал: верх выше низа — ровно как border-radius
+    /// 50% / 62% 62% 38% 38% в макете. Сверху половина эллипса с ry = 0.62h,
+    /// снизу — с ry = 0.38h. Габарит по вертикали остаётся ровно [top, top + h],
+    /// поэтому полосы, на которые режутся осколки, накрывают фигуру целиком —
+    /// раньше овал был сдвинут вверх и у яйца срезало верхушку.
+    private func eggPath(left: CGFloat, top: CGFloat, w: CGFloat, h: CGFloat) -> Path {
+        let rx = w / 2
+        let ryTop = h * 0.62
+        let ryBottom = h * 0.38
+        let cx = left + rx
+        let cy = top + ryTop
+        let k: CGFloat = 0.5523
+        var path = Path()
+        path.move(to: CGPoint(x: cx - rx, y: cy))
+        path.addCurve(to: CGPoint(x: cx, y: cy - ryTop),
+                      control1: CGPoint(x: cx - rx, y: cy - ryTop * k),
+                      control2: CGPoint(x: cx - rx * k, y: cy - ryTop))
+        path.addCurve(to: CGPoint(x: cx + rx, y: cy),
+                      control1: CGPoint(x: cx + rx * k, y: cy - ryTop),
+                      control2: CGPoint(x: cx + rx, y: cy - ryTop * k))
+        path.addCurve(to: CGPoint(x: cx, y: cy + ryBottom),
+                      control1: CGPoint(x: cx + rx, y: cy + ryBottom * k),
+                      control2: CGPoint(x: cx + rx * k, y: cy + ryBottom))
+        path.addCurve(to: CGPoint(x: cx - rx, y: cy),
+                      control1: CGPoint(x: cx - rx * k, y: cy + ryBottom),
+                      control2: CGPoint(x: cx - rx, y: cy + ryBottom * k))
+        path.closeSubpath()
+        return path
+    }
+
     private func drawEgg(ctx: GraphicsContext, center: CGPoint, scale: CGFloat, p: Double) {
         let w = 116 * scale
         let h = 152 * scale
@@ -588,7 +689,7 @@ struct SplashView: View {
         let alpha = p < 0.115 ? 1 : max(0, 1 - seg(p, 0.2, 0.44))
         if alpha <= 0.002 { return }
 
-        let eggRect = CGRect(x: left, y: top - h * 0.06, width: w, height: h)
+        let shell = eggPath(left: left, top: top, w: w, h: h)
         let shading = GraphicsContext.Shading.linearGradient(
             Gradient(stops: [
                 .init(color: shellLight, location: 0),
@@ -612,10 +713,10 @@ struct SplashView: View {
                 x: left + s.left * w, y: top + s.top * h,
                 width: (s.right - s.left) * w, height: (s.bottom - s.top) * h
             )))
-            layer.fill(Path(ellipseIn: eggRect), with: shading)
+            layer.fill(shell, with: shading)
         }
 
-        // Зубчатая трещина по шву.
+        // Зубчатая трещина по шву — там, где сходятся верхняя и нижняя половины.
         var crack: Double
         if p < 0.045 { crack = 0 }
         else if p < 0.10 { crack = seg(p, 0.045, 0.10) }
@@ -623,7 +724,7 @@ struct SplashView: View {
         else { crack = max(0, 1 - seg(p, 0.125, 0.135)) }
         if crack > 0.002 {
             let grow = CGFloat(max(0.1, seg(p, 0.045, 0.10, land)))
-            let yc = center.y - h * 0.06 + h * 0.02
+            let yc = top + h * 0.62
             let half = w / 2 * grow
             var path = Path()
             for i in 0...8 {
