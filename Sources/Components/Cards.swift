@@ -33,11 +33,13 @@ struct OrgCard: View {
         nil
     }
 
-    // Доставка: сервер в списке отдаёт deliveryTime строкой; цену доставки в списке нет.
-    private var deliveryText: String {
-        // TODO(API): цена доставки в списке организаций отсутствует (есть в ShopDetail/DeliveryQuote).
-        // Пока показываем нейтральное «уточняется» вместо выдуманной «бесплатно».
-        "уточняется"
+    // Способы получения приходят с сервера готовой строкой: «Доставка и самовывоз»,
+    // «Только самовывоз», у услуг — «На месте и с выездом». Раньше здесь стояло
+    // жёстко зашитое «Доставка уточняется» — для заведения, работающего только
+    // на вынос, это была неправда, а для салона — бессмыслица.
+    private var fulfillmentText: String? {
+        guard let t = shop.fulfillmentLabel, !t.isEmpty else { return nil }
+        return t
     }
 
     var body: some View {
@@ -94,9 +96,11 @@ struct OrgCard: View {
                                 .foregroundStyle(YMColor.accent)
                             Circle().fill(YMColor.muted).frame(width: 3, height: 3)
                         }
-                        Text("Доставка \(deliveryText)")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(YMColor.muted)
+                        if let fulfillment = fulfillmentText {
+                            Text(fulfillment)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(YMColor.muted)
+                        }
                     }
                     .padding(.top, 4)
                 }

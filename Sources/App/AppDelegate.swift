@@ -66,8 +66,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     private func handleNotification(_ userInfo: [AnyHashable: Any]) {
         let type = (userInfo["type"] as? String) ?? ""
         let orderId = Self.intValue(userInfo["order_id"])
+        // Новое заведение в городе: сервер присылает slug — это ключ экрана
+        // организации (OrgView(shopSlug:)). RootTabView покажет её поверх
+        // активного таба.
+        let orgSlug = (userInfo["slug"] as? String) ?? ""
         DispatchQueue.main.async {
-            if type == "order_chat", let id = orderId, id > 0 {
+            if type == "new_shop", !orgSlug.isEmpty {
+                NavCoordinator.shared.openOrg(slug: orgSlug)
+            } else if type == "order_chat", let id = orderId, id > 0 {
                 NavCoordinator.shared.openChat(orderId: id)
             } else if let id = orderId, id > 0 {
                 // OrdersView наблюдает pendingOrderDetail и открывает деталь; RootTabView

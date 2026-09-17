@@ -250,4 +250,8 @@ struct EmptyResp: Decodable {
 struct PushBody: Encodable {
     let token: String
     let platform: String
+    /// Город, выбранный в приложении. Сервер иначе не знает, где клиент, и не
+    /// может прислать «новое заведение в вашем городе». Поле аддитивное:
+    /// nil не кодируется, старый сервер его игнорирует.
+    var cityId: Int? = nil
 }

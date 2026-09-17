@@ -86,6 +86,32 @@ struct RootTabView: View {
             .environmentObject(coord)
             .environmentObject(Session.shared)
         }
+        // ── Организация из уведомления «новое заведение в городе» ──
+        // Отдельный cover, а не маршрут внутри таба: у табов по одному
+        // navigationDestination, второй в SwiftUI просто не срабатывает.
+        .fullScreenCover(isPresented: Binding(
+            get: { coord.pendingOrgSlug != nil },
+            set: { if !$0 { coord.pendingOrgSlug = nil } }
+        )) {
+            NavigationStack {
+                Group {
+                    if let slug = coord.pendingOrgSlug, !slug.isEmpty {
+                        OrgView(shopSlug: slug)
+                    } else {
+                        EmptyView()
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Закрыть") { coord.pendingOrgSlug = nil }
+                    }
+                }
+            }
+            .environmentObject(cart)
+            .environmentObject(router)
+            .environmentObject(coord)
+            .environmentObject(Session.shared)
+        }
         // ── Глобальный диалог конфликта корзины (single-store) ──
         .cartConflictDialog(
             isPresented: $coord.cartConflict,

@@ -469,10 +469,12 @@ struct OrgListRow: View {
                         Text(isOpen ? "Открыто" : "Закрыто")
                             .font(.system(size: 11.5, weight: .bold))
                             .foregroundStyle(isOpen ? YMColor.statusDone : YMColor.statusCancel)
-                        // TODO(API): цена доставки и расстояние в списке организаций отсутствуют.
-                        Text("· Доставка уточняется")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(YMColor.muted)
+                        // Способы получения — готовой строкой с сервера.
+                        if let fulfillment = shop.fulfillmentLabel, !fulfillment.isEmpty {
+                            Text("· \(fulfillment)")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(YMColor.muted)
+                        }
                     }
                     .padding(.top, 2)
                 }

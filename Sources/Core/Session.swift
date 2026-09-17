@@ -5,7 +5,16 @@ import Combine
 final class Session: ObservableObject {
     static let shared = Session()
     @Published private(set) var token: String?
-    @Published var cityId: Int? { didSet { UserDefaults.standard.set(cityId ?? 0, forKey: "cityId") } }
+    @Published var cityId: Int? {
+        didSet {
+            UserDefaults.standard.set(cityId ?? 0, forKey: "cityId")
+            // Город сменился — сообщаем серверу вместе с push-токеном, иначе
+            // уведомления о новых заведениях продолжат приходить по старому
+            // городу. Вызов идемпотентен и молча выходит, если вход не сделан.
+            guard cityId != oldValue else { return }
+            Task { await Push.shared.registerIfPossible() }
+        }
+    }
     @Published var cityName: String? { didSet { UserDefaults.standard.set(cityName, forKey: "cityName") } }
 
     var isLoggedIn: Bool { token != nil }

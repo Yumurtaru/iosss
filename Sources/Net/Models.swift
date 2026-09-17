@@ -55,6 +55,14 @@ struct Shop: Codable, Identifiable, Hashable {
     @LenientInt var avgCookTime: Int?; @LenientInt var reviewsCount: Int?
     // Буст-продвижение (Фаза 3.1, аддитивно): 1 = показать бейдж «Реклама».
     @LenientInt var isPromoted: Int?
+    /// Способы получения (аддитивно). Коды: у товаров и еды — delivery | pickup |
+    /// dine_in, у услуг — at_business | at_client. Пусто = заведение ничего не
+    /// настроило. Для иконок; текст под названием берём из fulfillmentLabel.
+    let fulfillment: [String]?
+    /// Готовая подпись от сервера: «Доставка и самовывоз», «Только самовывоз»,
+    /// «На месте и с выездом». Собирается на сервере, чтобы сайт, Android и iOS
+    /// писали одно и то же и формулировку можно было менять без пересборки.
+    let fulfillmentLabel: String?
 }
 // Категория организации (магазин/услуга). Ключи snake_case декодируются авто-конвертером — CodingKeys НЕ добавляем.
 struct OrgCategory: Codable, Identifiable, Hashable {
@@ -118,6 +126,9 @@ struct ShopDetail: Codable, Identifiable {
     @LenientBool var requiresLicense: Bool?
     let license: OrgLicense?
     let documents: [OrgDocument]?
+    /// Способы получения — те же коды и подпись, что в списке (аддитивно).
+    let fulfillment: [String]?
+    let fulfillmentLabel: String?
 }
 /// Зона доставки заведения. Сервер отдаёт массив `delivery_zones` в карточке магазина.
 struct DeliveryZone: Codable, Identifiable, Hashable {
@@ -232,6 +243,9 @@ struct Appointment: Codable, Identifiable {
     @LenientInt var durationMin: Int?
     let master: String?
     let masterPhoto: String?
+    /// Человек в брони и сколько окон она занимает (аддитивно, по умолчанию 1).
+    @LenientInt var guests: Int?
+    @LenientInt var slots: Int?
     let status: String?         // new | accepted | done | cancelled
     @LenientDouble var total: Double?
     @LenientInt var shopId: Int?
@@ -420,6 +434,57 @@ struct ServiceItem: Codable, Identifiable {
     /// Готовая подпись с сервера: «Анна» или «Анна, Ольга». nil — любой мастер.
     let masterName: String?
 
+    // ── Бронирование с местами: игровой зал, кинозал, бильярд, дорожка ──────
+    // У такой «услуги» цена считается за человека и/или за час, одновременно
+    // ей пользуются несколько человек, а время берут на 1..maxSlots окон подряд.
+    // Поля аддитивные: у старого сервера их нет, и значения по умолчанию дают
+    // прежнее поведение — одно место, фиксированная цена, одно окно.
+    let pricingMode: String?
+    /// Готовая подпись единицы цены с сервера: «за человека в час».
+    let priceUnit: String?
+    @LenientInt var capacity: Int?
+    @LenientInt var minGuests: Int?
+    /// 0 — ограничение только ёмкостью.
+    @LenientInt var maxGuests: Int?
+    @LenientInt var maxSlots: Int?
+    /// Длительность одного окна, мин. Дублирует durationMin — считает сервер.
+    @LenientInt var slotMin: Int?
+    /// Группа в списке: «Игровой зал», «Кинозал».
+    let groupName: String?
+
+    var capacityValue: Int { max(1, capacity ?? 1) }
+    var slotMinutes: Int { max(5, (slotMin ?? 0) > 0 ? (slotMin ?? 0) : (durationMin ?? 30)) }
+    /// Максимум человек в ОДНОЙ брони.
+    var guestsMax: Int {
+        let mg = maxGuests ?? 0
+        return (mg > 0 && mg <= capacityValue) ? mg : capacityValue
+    }
+    var guestsMin: Int { min(max(1, minGuests ?? 1), guestsMax) }
+    var maxSlotsValue: Int { max(1, maxSlots ?? 1) }
+    /// Нужен ли выбор количества человек.
+    var needsGuests: Bool { capacityValue > 1 || pricingMode == "per_person" || pricingMode == "per_person_hour" }
+    /// Нужен ли выбор количества часов.
+    var needsHours: Bool { maxSlotsValue > 1 }
+
+    /// Предпросмотр стоимости. Повторяет serviceBookingQuote() из
+    /// core/helpers.php; ИТОГ всегда считает сервер, здесь только экран.
+    func quote(guests: Int, slots: Int) -> Decimal {
+        let g = Decimal(max(1, guests))
+        let s = Decimal(max(1, slots))
+        let base = Money.dec(price)
+        let minutes = Decimal(slotMinutes * max(1, slots))
+        var raw: Decimal
+        switch pricingMode {
+        case "per_person": raw = base * g * s
+        case "per_hour": raw = base * minutes / 60
+        case "per_person_hour": raw = base * g * minutes / 60
+        default: raw = base * s
+        }
+        var out = Decimal()
+        NSDecimalRound(&out, &raw, 2, .plain)
+        return out
+    }
+
     /// «мастер Анна» / «мастера: Анна, Ольга». nil, если мастер не назначен.
     var mastersLabel: String? {
         let names = (masters ?? []).compactMap { $0.name }.filter { !$0.isEmpty }
@@ -443,7 +508,19 @@ struct RecommendationsResp: Codable {
     let orderedAgain: [Shop]?
     let popular: [CatalogItem]?
 }
-struct Slot: Codable, Identifiable { let id: Int; let timeStart: String?; let timeEnd: String? }
+struct Slot: Codable, Identifiable {
+    let id: Int
+    let timeStart: String?
+    let timeEnd: String?
+    // Места в окне. Аддитивно: старый сервер их не отдаёт, и по умолчанию окно
+    // считается «на одного и свободно» — как было до бронирования с местами.
+    @LenientInt var capacity: Int?
+    @LenientInt var booked: Int?
+    @LenientInt var free: Int?
+
+    var capacityValue: Int { max(1, capacity ?? 1) }
+    var freeValue: Int { max(0, free ?? 1) }
+}
 
 // ---- Подарочные карты ----
 struct GiftCard: Codable { let code: String?; @LenientDouble var balance: Double?; let status: String?; let expiresAt: String? }
@@ -500,7 +577,33 @@ struct VisitAddress: Codable, Equatable {
 /// для услуги в заведении поле не отправляется вовсе (nil не кодируется).
 // address по умолчанию nil: карточка товара (ProductView) записывает на слот
 // без адреса, и её вызов AppointmentBody(slotId:) остаётся валидным.
-struct AppointmentBody: Encodable { let slotId: Int; var address: VisitAddress? = nil }
+struct AppointmentBody: Encodable {
+    let slotId: Int
+    var address: VisitAddress? = nil
+    // Человек и окон подряд. nil = не отправляем — тело запроса у обычной
+    // услуги остаётся ровно таким, как раньше, и сервер подставляет 1 и 1.
+    var guests: Int? = nil
+    var slots: Int? = nil
+}
+
+/// Ответ на создание записи/брони — POST api/v1/appointments.
+///
+/// Раньше разбирался общий с заказами OrderCreateResult, из которого
+/// использовался только id. Своя модель нужна, чтобы экран успеха показал
+/// интервал и состав брони, не пересчитывая их сам.
+struct AppointmentResult: Codable {
+    @LenientInt var orderId: Int?
+    let date: String?
+    let time: String?
+    let timeEnd: String?
+    @LenientInt var guests: Int?
+    @LenientInt var slots: Int?
+    @LenientDouble var hours: Double?
+    @LenientDouble var price: Double?
+    @LenientInt var atClient: Int?
+    @LenientDouble var travelFee: Double?
+    let address: String?
+}
 struct SocialBody: Encodable { let provider: String; let code: String }
 struct NpsBody: Encodable { let score: Int; let comment: String? }
 struct ReferralInfo: Decodable {

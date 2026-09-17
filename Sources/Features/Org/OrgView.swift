@@ -309,12 +309,21 @@ struct OrgView: View {
             // Лицензия — для медцентров, стоматологий, аптек, ветклиник, автошкол.
             licenseCard
 
-            // Услуга (запись) или меню.
+            // Услуга (запись) или меню. У ресторана и магазина — И меню, И блок
+            // броней: кроме еды и товаров бывает игровой зал, кинозал, бильярд,
+            // дорожка — их бронируют на время, а не кладут в корзину. Если услуг
+            // нет, блок сам ничего не рисует (hideWhenEmpty), и витрина прежняя.
             if vm.isService {
                 OrgBookingSection(slug: vm.slug, detail: vm.detail) { showAuth = true }
                     .padding(.top, 20)
             } else {
                 menuSection.padding(.top, 20)
+                OrgBookingSection(
+                    slug: vm.slug, detail: vm.detail,
+                    onNeedAuth: { showAuth = true },
+                    serviceOrg: false, hideWhenEmpty: true
+                )
+                .padding(.top, vm.services.isEmpty ? 0 : 20)
             }
 
             // Отзывы — для всех типов организаций. Сводка нажимаема → полный экран ReviewsScreen.
