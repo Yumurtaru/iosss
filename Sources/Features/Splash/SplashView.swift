@@ -24,6 +24,9 @@ import UIKit
 /// Рубильник. false — приложение стартует сразу, как до анимации.
 let splashEnabled = true
 
+// Цвет текста задаётся через Text.foregroundColor, а не foregroundStyle:
+// вариант foregroundStyle, возвращающий Text (он нужен для GraphicsContext.resolve),
+// появился только в iOS 17, а цель сборки — iOS 16.0.
 private let wordmarkText = "Yumurta"
 private let taglineText = "МАРКЕТПЛЕЙС ТВОЕГО ГОРОДА"
 
@@ -368,7 +371,7 @@ struct SplashView: View {
     /// вместо сцены. Разбивать яйцо человеку, который просил не двигать
     /// картинку, — плохая идея.
     private func drawReduced(context: GraphicsContext, size: CGSize) {
-        var ctx = context
+        let ctx = context
         let full = CGRect(origin: .zero, size: size)
         ctx.fill(Path(full), with: .color(appBackground))
         let scale = min(size.width / Tune.vw, size.height / Tune.vh)
@@ -378,7 +381,7 @@ struct SplashView: View {
                 Text(wordmarkText)
                     .font(.system(size: px, weight: .heavy))
                     .tracking(-0.02 * px)
-                    .foregroundStyle(appText)
+                    .foregroundColor(appText)
             ),
             at: CGPoint(x: size.width / 2, y: size.height * 0.44),
             anchor: .center
@@ -501,7 +504,7 @@ struct SplashView: View {
                     Text(wordmarkText)
                         .font(.system(size: px, weight: .heavy))
                         .tracking(-0.02 * px)
-                        .foregroundStyle(color)
+                        .foregroundColor(color)
                 ),
                 at: CGPoint(x: ox + Tune.vw / 2 * scale, y: cy),
                 anchor: .center
@@ -520,7 +523,7 @@ struct SplashView: View {
                     Text(taglineText)
                         .font(.system(size: px, weight: .semibold))
                         .tracking(0.26 * px)
-                        .foregroundStyle(Color(hex: "#EFD49B"))
+                        .foregroundColor(Color(hex: "#EFD49B"))
                 ),
                 at: CGPoint(
                     x: ox + Tune.vw / 2 * scale,
