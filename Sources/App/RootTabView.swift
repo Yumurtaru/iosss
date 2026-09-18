@@ -65,6 +65,30 @@ struct RootTabView: View {
                     .tabItem { Label("Избранное", systemImage: "heart.fill") }
                     .tag(4)
             }
+            // ── Раздел «Жильё» (поиск → объект → мои поездки) ──
+            // Вход — чип «Жильё» на Главной; отдельной нижней вкладки нет,
+            // там уже пять. Внутри своя NavigationStack, дальше каждый экран
+            // раздела ведёт навигацию сам (по одному navigationDestination).
+            //
+            // ВАЖНО: cover навешен на TabView, а не на внешний VStack, где
+            // уже висят корзина и организация-из-пуша. Несколько
+            // fullScreenCover на ОДНОЙ вьюхе — известный способ получить
+            // «шторка не открывается»: побеждает последняя. Разные уровни
+            // иерархии этой проблемы не имеют.
+            .fullScreenCover(isPresented: $coord.showLodging) {
+                NavigationStack {
+                    LodgingSearchView()
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Закрыть") { coord.showLodging = false }
+                            }
+                        }
+                }
+                .environmentObject(cart)
+                .environmentObject(router)
+                .environmentObject(coord)
+                .environmentObject(Session.shared)
+            }
         }
         .tint(YMColor.accent)
         .animation(.easeInOut, value: net.online)

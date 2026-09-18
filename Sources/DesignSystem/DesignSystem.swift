@@ -169,56 +169,11 @@ enum YMMotion {
 }
 
 // MARK: - Decimal money parsing (толерантно к строкам API)
-
-enum Money {
-    /// Парсит суммы из API, которые приходят строками ("0.00", "1 310,00", "590 ₽", 590).
-    /// Возвращает Decimal. Никогда не использует Double.
-    static func parse(_ raw: Any?) -> Decimal {
-        switch raw {
-        case let d as Decimal: return d
-        case let i as Int:     return Decimal(i)
-        case let d as Double:  return Decimal(string: String(format: "%.2f", d)) ?? 0
-        case let s as String:
-            var cleaned = s
-                .replacingOccurrences(of: "\u{00A0}", with: "") // NBSP
-                .replacingOccurrences(of: " ", with: "")
-                .replacingOccurrences(of: "₽", with: "")
-                .replacingOccurrences(of: ",", with: ".")       // 1310,00 → 1310.00
-                .trimmingCharacters(in: .whitespaces)
-            // если несколько точек (тысячные разделители) — оставляем последнюю как дробную
-            let parts = cleaned.components(separatedBy: ".")
-            if parts.count > 2 {
-                cleaned = parts.dropLast().joined() + "." + parts.last!
-            }
-            return Decimal(string: cleaned) ?? 0
-        default:
-            return 0
-        }
-    }
-
-    /// Псевдоним `parse` — экраны (Org/Product/Listing) вызывают `Money.dec(...)`.
-    /// Ничего в денежной логике не меняет: это тот же толерантный парсинг в Decimal.
-    static func dec(_ raw: Any?) -> Decimal { parse(raw) }
-
-    /// Форматирование в рубли: 1310 → "1 310 ₽".
-    static func format(_ value: Decimal) -> String {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.groupingSeparator = "\u{00A0}"
-        f.maximumFractionDigits = value == value.rounded(0) ? 0 : 2
-        let n = f.string(from: value as NSDecimalNumber) ?? "\(value)"
-        return "\(n)\u{00A0}₽"
-    }
-}
-
-private extension Decimal {
-    func rounded(_ scale: Int) -> Decimal {
-        var result = Decimal()
-        var v = self
-        NSDecimalRound(&result, &v, scale, .plain)
-        return result
-    }
-}
+//
+// `Money` (парсинг и формат сумм) переехал в Core/MoneyFormat.swift: там
+// только Foundation, поэтому тот же код прогоняется тестами на машине без
+// SwiftUI. Поведение не изменилось — Money.parse / Money.dec / Money.format
+// остались теми же.
 
 // MARK: - Reusable view modifiers
 

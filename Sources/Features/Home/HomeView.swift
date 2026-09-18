@@ -24,6 +24,7 @@ final class HomeViewModel: ObservableObject {
         case .restaurants: return "restaurant"
         case .shops:       return "store"
         case .services:    return "service"
+        case .lodging:     return "lodging"
         }
     }
 
@@ -95,6 +96,13 @@ final class HomeViewModel: ObservableObject {
             case .services:
                 q["type"] = "service"
                 shops = try await API.shared.list("api/v1/organizations", query: q)
+            case .lodging:
+                // Сюда мы в норме не попадаем: чип «Жильё» открывает раздел и
+                // возвращается на место (см. ChipRow ниже). Ветка нужна, чтобы
+                // switch был полным, и на всякий случай отдаёт согласованный
+                // список — отели/квартиры, а не чужие организации.
+                q["type"] = "lodging"
+                shops = try await API.shared.list("api/v1/organizations", query: q)
             }
         } catch is CancellationError {
             // отмена (быстрый повторный запрос) — молча
@@ -109,6 +117,7 @@ final class HomeViewModel: ObservableObject {
 struct HomeView: View {
     @EnvironmentObject private var session: Session
     @EnvironmentObject private var router: DeepLinkRouter
+    @EnvironmentObject private var coord: NavCoordinator
     @StateObject private var vm = HomeViewModel()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -116,6 +125,8 @@ struct HomeView: View {
     @State private var favShops: Set<Int> = []
     @State private var favPopular: Set<String> = []
     @State private var appeared = false
+    /// Чип, выбранный до нажатия на «Жильё» — к нему возвращаемся (см. ChipRow).
+    @State private var lastKind: OrgKind = .all
 
     // Единый маршрут навигации таба. ВАЖНО: несколько .navigationDestination(isPresented:)
     // в одном NavigationStack конфликтуют в SwiftUI (срабатывает только первый) — поэтому
@@ -150,7 +161,17 @@ struct HomeView: View {
                         .padding(.top, 6)
 
                     ChipRow(selected: $vm.kind) { k in
-                        // Все чипы (Все/Рестораны/Магазины/Услуги) — одинаково: инлайн-загрузка.
+                        // «Жильё» — не фильтр, а отдельный раздел: у него свой
+                        // поиск по датам и гостям. Открываем его поверх таба и
+                        // возвращаем чип на прежний, чтобы список под ним
+                        // остался тем, что человек видел до нажатия.
+                        if k == .lodging {
+                            vm.kind = lastKind
+                            coord.openLodging()
+                            return
+                        }
+                        lastKind = k
+                        // Остальные чипы (Все/Рестораны/Магазины/Услуги) — инлайн-загрузка.
                         Task { await vm.changeKind(k, session: session) }
                     }
                     .padding(.top, 12)

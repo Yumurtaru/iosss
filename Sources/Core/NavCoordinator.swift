@@ -32,6 +32,11 @@ final class NavCoordinator: ObservableObject {
     /// туда ещё один маршрут нельзя.
     @Published var pendingOrgSlug: String?
 
+    /// Показать раздел «Жильё» (поиск → карточка объекта → мои поездки).
+    /// Как и корзина, он открывается ПОВЕРХ активного таба: вход — чип «Жильё»
+    /// на Главной, отдельной нижней вкладки нет (там уже пять).
+    @Published var showLodging = false
+
     // ── Диалог конфликта корзины (single-store) ──
     /// Показать ли диалог конфликта.
     @Published var cartConflict = false
@@ -53,6 +58,7 @@ final class NavCoordinator: ObservableObject {
 
     /// Удобные хелперы (читабельные точки вызова из экранов).
     func openCart() { showCart = true }
+    func openLodging() { showLodging = true }
     func openOrg(slug: String) { if !slug.isEmpty { pendingOrgSlug = slug } }
     func openChat(orderId: Int) { chatOrderId = orderId }
     func openChatList() { chatOrderId = -1 }
