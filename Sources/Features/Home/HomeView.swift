@@ -398,6 +398,10 @@ struct HomeView: View {
         case .all, .restaurants: return "Рестораны"
         case .shops:             return "Магазины"
         case .services:          return "Услуги"
+        // Чип «Жильё» не остаётся выбранным: он открывает раздел и
+        // возвращается на прежний (см. ChipRow выше). Ветка нужна, чтобы
+        // switch был полным, и на всякий случай даёт осмысленный заголовок.
+        case .lodging:           return "Жильё"
         }
     }
 
@@ -408,6 +412,7 @@ struct HomeView: View {
         case .restaurants: return "restaurant"
         case .shops:       return "store"
         case .services:    return "service"
+        case .lodging:     return "lodging"
         }
     }
 
