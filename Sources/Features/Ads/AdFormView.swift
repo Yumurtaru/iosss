@@ -165,7 +165,11 @@ struct AdFormView: View {
                 ToolbarItem(placement: .navigationBarLeading) { Button("Закрыть") { dismiss() } }
             }
             .task { await vm.start(editAdId: editAdId) }
-            .onChange(of: picked) { _, items in
+            // onChange с ОДНИМ параметром: цель проекта — iOS 16 (project.yml,
+            // deploymentTarget 16.0), а форма с двумя параметрами
+            // .onChange(of:initial:_:) появилась только в iOS 17 и роняет
+            // сборку. Так же сделано во всём остальном приложении.
+            .onChange(of: picked) { items in
                 guard !items.isEmpty else { return }
                 Task { await vm.addPhotos(items); picked = [] }
             }

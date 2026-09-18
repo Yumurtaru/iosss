@@ -188,7 +188,8 @@ struct AdsBoardView: View {
             Image(systemName: "magnifyingglass").foregroundStyle(YMColor.muted)
             TextField("Что ищете?", text: $vm.query)
                 .textInputAutocapitalization(.never)
-                .onChange(of: vm.query) { _, _ in vm.searchChanged() }
+                // Один параметр: двухпараметровая форма — iOS 17, а цель iOS 16.
+                .onChange(of: vm.query) { _ in vm.searchChanged() }
             if !vm.query.isEmpty {
                 Button { vm.query = ""; vm.searchChanged() } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(YMColor.muted)

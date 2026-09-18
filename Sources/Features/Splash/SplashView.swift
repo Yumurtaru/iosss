@@ -323,6 +323,14 @@ private enum SplashHaptics {
 
     /// Проигрывает толчки и досыпает до конца анимации — отсюда же берётся
     /// момент, когда сплэш пора убирать.
+    ///
+    /// @MainActor обязателен: UIImpactFeedbackGenerator и
+    /// UINotificationFeedbackGenerator изолированы главным актором, и вызов их
+    /// из неизолированного кода в Swift 5 давал шесть предупреждений, а в
+    /// режиме Swift 6 стал бы ошибкой. Ждать это не мешает: await внутри
+    /// @MainActor-функции отпускает актор, интерфейс не подвисает. Вызов и так
+    /// идёт из .task вьюхи, то есть с главного актора, — поведение не меняется.
+    @MainActor
     static func run() async {
         let light = UIImpactFeedbackGenerator(style: .light)
         let medium = UIImpactFeedbackGenerator(style: .medium)
