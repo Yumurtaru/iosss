@@ -415,7 +415,11 @@ struct LodgingTrip: Codable, Hashable, Identifiable {
 struct LodgingCancelResp: Codable {
     @LenientBool var cancelled: Bool?
     @LenientDecimal var penalty: Decimal?
+    /// Сколько реально прошло через площадку. За проживание гость платит на
+    /// месте, поэтому обычно 0 — и возвращать нечего.
+    @LenientDecimal var paid: Decimal?
     @LenientDecimal var refund: Decimal?
     var penaltyValue: Decimal { penalty ?? 0 }
+    var paidValue: Decimal { paid ?? 0 }
     var refundValue: Decimal { refund ?? 0 }
 }

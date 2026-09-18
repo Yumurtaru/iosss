@@ -445,7 +445,7 @@ struct LodgingUnitView: View {
                     }
                     .padding(.top, YMSpace.xs)
                     if q.prepayValue > 0 {
-                        Text("Предоплата " + Money.format(q.prepayValue))
+                        Text("Предоплата " + Money.format(q.prepayValue) + " — запросит объект")
                             .font(YMFont.caption).foregroundStyle(YMColor.muted)
                     }
                     if q.depositValue > 0 {
@@ -633,7 +633,7 @@ struct LodgingBookedSheet: View {
                 Text(LodgingText.stay(checkIn: resp.checkInFrom, checkOut: resp.checkOutUntil) + ".")
                     .font(YMFont.caption).foregroundStyle(YMColor.muted)
                 if resp.prepayValue > 0 {
-                    Text("Предоплата " + Money.format(resp.prepayValue))
+                    Text("Предоплата " + Money.format(resp.prepayValue) + " — объект свяжется с вами")
                         .font(YMFont.caption).foregroundStyle(YMColor.muted)
                 }
                 if let dl = resp.cancelDeadline, !dl.isEmpty {
