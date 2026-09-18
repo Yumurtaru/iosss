@@ -58,6 +58,22 @@ enum Money {
         let n = f.string(from: value as NSDecimalNumber) ?? "\(value)"
         return "\(n)\u{00A0}₽"
     }
+
+    /// Деньги НА ПРОВОД: всегда "0.00" — точка разделителем, два знака, без
+    /// пробелов и ₽ (канон SKILL.md, так же как number_format на сервере).
+    /// `format` для этого не годится: он печатает «1 000,50 ₽» под русскую
+    /// локаль, и сервер разобрал бы такую строку как 1.
+    static func wire(_ value: Decimal) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.groupingSeparator = ""
+        f.usesGroupingSeparator = false
+        f.decimalSeparator = "."
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        return f.string(from: value as NSDecimalNumber) ?? "0.00"
+    }
 }
 
 private extension Decimal {

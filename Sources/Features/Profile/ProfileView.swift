@@ -126,6 +126,9 @@ struct ProfileView: View {
         case .support:      SupportView()
         case .plus:         PlusView()
         case .loyalty:      LoyaltyView()
+        case .wallet:       WalletView()
+        case .favorites:    FavoritesScreen(onOpenProduct: { _ in }, onOpenOrg: { _ in })
+        case .myAds:        MyAdsView()
         case .bonuses:      BonusesView()
         case .referral:     ReferralView()
         case .gift:         GiftCardView()
@@ -222,6 +225,10 @@ struct ProfileView: View {
     private var loyaltyMenu: some View {
         VStack(spacing: 0) {
             // Yumurta Plus и «Уровень лояльности» временно скрыты по требованию.
+            menuRow(icon: "👛", label: "Кошелёк") { path.append(ProfileRoute.wallet) }
+            divider
+            menuRow(icon: "📣", label: "Мои объявления") { path.append(ProfileRoute.myAds) }
+            divider
             menuRow(icon: "💰", label: "Бонусы") { path.append(ProfileRoute.bonuses) }
             divider
             menuRow(icon: "🎁", label: "Подарочная карта") { path.append(ProfileRoute.gift) }
@@ -254,6 +261,10 @@ struct ProfileView: View {
                 }
                 divider
                 menuRow(icon: "📅", label: "Мои записи") { openBookings() }
+                divider
+                // «Избранное» переехало сюда из нижней вкладки: её место занял
+                // раздел объявлений.
+                menuRow(icon: "❤️", label: "Избранное") { path.append(ProfileRoute.favorites) }
                 divider
                 menuRow(icon: "⚙️", label: "Настройки") { path.append(ProfileRoute.settings) }
                 divider
@@ -390,7 +401,7 @@ struct ProfileView: View {
 /// Разделы профиля для NavigationPath (значения-маршруты).
 private enum ProfileRoute: Hashable {
     case addresses, bookings, notifications, editProfile, settings, support
-    case plus, loyalty, bonuses, referral, gift, jobs, applications, returns, auth
+    case plus, loyalty, wallet, myAds, favorites, bonuses, referral, gift, jobs, applications, returns, auth
 }
 
 /// Опция темы ↔ значение @AppStorage(AppStorageKey.theme) ("system"|"light"|"dark").

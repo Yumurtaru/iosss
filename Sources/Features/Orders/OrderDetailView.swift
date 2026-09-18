@@ -288,7 +288,12 @@ struct OrderDetailView: View {
     /// (сервер повторную оплату оплаченного заказа отклонит; UI аддитивен).
     private func canPay(_ o: OrderDetail) -> Bool {
         let pt = (o.paymentType ?? "").lowercased()
-        let isOnline = pt == "online" || pt == "online_card" || pt.contains("card")
+        // ТОЛЬКО реальные онлайн-способы. Раньше здесь было ещё
+        // pt.contains("card") — под это подпадает card_courier, то есть «картой
+        // на месте по терминалу». Такому заказу баннер «Оплатить онлайн» не
+        // нужен: человек платит курьеру, а нажатие создало бы в ЮKassa платёж
+        // по заказу, который оплачивается при получении.
+        let isOnline = pt == "online" || pt == "online_card"
         return isOnline && OrderFlow.isActive(o.status)
     }
 

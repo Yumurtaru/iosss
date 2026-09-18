@@ -7,6 +7,10 @@ enum APIError: LocalizedError {
     case timeout          // истёк таймаут — повторяем
     case unauthorized     // 401 — нужен повторный вход
     case decoding
+    /// 409 «не хватает денег на кошельке». Сервер присылает суммы, и экран
+    /// показывает «Пополните на 269 ₽» с кнопкой, а не «Ошибка сервера (409)».
+    /// Так отвечают создание заказа с оплатой кошельком и публикация объявления.
+    case walletShortage(need: Decimal, balance: Decimal, missing: Decimal, message: String)
     var errorDescription: String? {
         switch self {
         case .server(let m): return m
@@ -15,6 +19,7 @@ enum APIError: LocalizedError {
         case .timeout:       return "Превышено время ожидания. Попробуйте ещё раз"
         case .unauthorized:  return "Сессия истекла, войдите снова"
         case .decoding:      return "Не удалось обработать ответ"
+        case .walletShortage(_, _, _, let m): return m
         }
     }
     /// Стоит ли повторять запрос при этой ошибке (для идемпотентных GET).
@@ -118,6 +123,18 @@ final class API {
 
         do {
             let env = try decoder.decode(APIEnvelope<T>.self, from: data)
+            // 409 с суммами need/balance/missing — это «не хватает на кошельке».
+            // Разбираем ДО общей ветки success == false, иначе экран получил бы
+            // только текст и не смог бы дать кнопку «Пополнить».
+            if status == 409, let d = env.error?.details,
+               let missing = d["missing"].flatMap({ Decimal(string: $0) }) {
+                throw APIError.walletShortage(
+                    need: d["need"].flatMap { Decimal(string: $0) } ?? 0,
+                    balance: d["balance"].flatMap { Decimal(string: $0) } ?? 0,
+                    missing: missing,
+                    message: env.error?.message ?? "Не хватает денег на кошельке"
+                )
+            }
             if env.success == false { throw APIError.server(env.error?.message ?? "Ошибка сервера") }
             // Ошибочный статус с телом {ok:false,error:"..."} (Response::error): success отсутствует,
             // но текст есть — показываем его (иначе терялось «Минимальная сумма заказа…» → «Ошибка 422»).
@@ -223,6 +240,59 @@ final class API {
         let r: PhotoResp = try await send(req, as: PhotoResp.self)
         return r.attachment
     }
+    // ── Доска объявлений (routes/ads.php) ──────────────────────────────────
+    //
+    // Загрузка фото лежит ЗДЕСЬ, а не в отдельном файле: send() приватный и
+    // виден только внутри этого файла, а именно он разбирает конверт ответа,
+    // обновляет токен по 401 и повторяет запрос.
+    func adCategories() async throws -> AdCategoriesResponse {
+        try await get("api/v1/ads/categories")
+    }
+    func ads(categoryId: Int = 0, q: String = "", cityId: Int = 0,
+             priceMin: String = "", priceMax: String = "",
+             sort: String = "new", withPhoto: Bool = false, page: Int = 1) async throws -> AdsFeedResponse {
+        var query: [String: String] = ["sort": sort, "page": String(page)]
+        if categoryId > 0 { query["category_id"] = String(categoryId) }
+        if !q.isEmpty { query["q"] = q }
+        if cityId > 0 { query["city_id"] = String(cityId) }
+        if !priceMin.isEmpty { query["price_min"] = priceMin }
+        if !priceMax.isEmpty { query["price_max"] = priceMax }
+        if withPhoto { query["with_photo"] = "1" }
+        return try await get("api/v1/ads", query: query)
+    }
+    func ad(_ id: Int) async throws -> AdDetailResponse { try await get("api/v1/ads/\(id)") }
+    func myAds() async throws -> MyAdsResponse { try await get("api/v1/ads/my") }
+    func adFavorites() async throws -> AdsFeedResponse { try await get("api/v1/ads/favorites") }
+    func adCreate(_ body: AdSaveBody) async throws -> AdCreatedResponse { try await post("api/v1/ads", body: body) }
+    func adUpdate(_ id: Int, _ body: AdSaveBody) async throws { try await putVoid("api/v1/ads/\(id)", body: body) }
+    func adPublish(_ id: Int) async throws -> AdPublishResponse { try await post("api/v1/ads/\(id)/publish") }
+    func adArchive(_ id: Int) async throws { _ = try await post("api/v1/ads/\(id)/archive", body: [String: String]()) as EmptyResp }
+    func adDelete(_ id: Int) async throws { try await deleteVoid("api/v1/ads/\(id)") }
+    func adPhotoDelete(adId: Int, photoId: Int) async throws { try await deleteVoid("api/v1/ads/\(adId)/photos/\(photoId)") }
+    func adFavorite(_ id: Int) async throws -> AdFavoriteResponse { try await post("api/v1/ads/\(id)/favorite") }
+    func adContact(_ id: Int) async throws -> AdContactResponse { try await post("api/v1/ads/\(id)/contact") }
+    func adReport(_ id: Int, reason: String, comment: String?) async throws {
+        _ = try await post("api/v1/ads/\(id)/report", body: AdReportBody(reason: reason, comment: comment)) as EmptyResp
+    }
+
+    /// Одна фотография объявления: POST api/v1/ads/{id}/photos, поле "photo".
+    func uploadAdPhoto(adId: Int, jpeg: Data) async throws -> AdPhoto? {
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var req = URLRequest(url: URL(string: API.base + "/api/v1/ads/\(adId)/photos")!)
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        if let token = UserDefaults.standard.string(forKey: "token") { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(jpeg)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        req.httpBody = body
+        let r: AdPhotoUploadedResponse = try await send(req, as: AdPhotoUploadedResponse.self)
+        return r.photo
+    }
+
     func deleteVoid(_ path: String) async throws { _ = try await send(try makeRequest("DELETE", path), as: EmptyResp.self) }
     func putVoid(_ path: String, body: Encodable? = nil) async throws { _ = try await send(try makeRequest("PUT", path, body: body), as: EmptyResp.self) }
 }

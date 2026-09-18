@@ -72,11 +72,30 @@ private enum Fulfillment: String, CaseIterable, Hashable {
     }
 }
 
-// Способ оплаты. «Картой» — это онлайн-оплата (серверу paymentType="online"), «Наличные» → "cash".
+// Способ оплаты. Значения apiValue — РОВНО те, что принимает сервер
+// (routes/api_v1.php): cash | card_courier | wallet.
+//
+// Раньше «Картой» отправляла paymentType="online", которого в белом списке
+// сервера НЕТ, — заказ молча записывался как наличные, и продавец с курьером
+// приезжали без терминала. Теперь это card_courier: «картой на месте», что и
+// значит эта кнопка. Онлайн-оплата картой — отдельная история (pay-online), и
+// когда её включат на площадке, она добавится сюда своим значением.
 private enum Payment: String, CaseIterable, Hashable {
-    case cash, card
-    var apiValue: String { self == .card ? "online" : "cash" }
-    var title: String { self == .card ? "Картой" : "Наличные" }
+    case wallet, cash, card
+    var apiValue: String {
+        switch self {
+        case .wallet: return "wallet"
+        case .card:   return "card_courier"
+        case .cash:   return "cash"
+        }
+    }
+    var title: String {
+        switch self {
+        case .wallet: return "Кошелёк"
+        case .card:   return "Картой"
+        case .cash:   return "Наличные"
+        }
+    }
 }
 
 struct CheckoutView: View {
@@ -95,6 +114,20 @@ struct CheckoutView: View {
     @State private var placing = false
     @State private var errorText: String?
     @State private var showAddAddress = false
+
+    // Кошелёк: nil — гость, кошелёк не поднят на сервере или на нём ноль.
+    // Способ «Кошелёк» показываем только когда хватает на ВЕСЬ заказ:
+    // предложить способ, которым нельзя заплатить, — тупик на последнем шаге.
+    //
+    // ВАЖНО: поле enabled в ответе /wallet означает «работает ОНЛАЙН-
+    // ПОПОЛНЕНИЕ» (настроена ли ЮKassa), а не «кошелёк есть». Тратить уже
+    // лежащие деньги можно и когда пополнение недоступно, поэтому смотрим
+    // только на баланс.
+    @State private var walletBalance: Decimal?
+    // Не хватило денег в момент оформления (потратили с другого устройства):
+    // сервер ответил 409 с суммами — показываем их и кнопку «Пополнить».
+    @State private var shortage: (need: Decimal, balance: Decimal, missing: Decimal)?
+    @State private var showWallet = false
 
     // Город из настроек — клиент его НЕ вводит (шапка «Ваш город»).
     private var cityName: String { Session.shared.cityName ?? "" }
@@ -131,6 +164,24 @@ struct CheckoutView: View {
         !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin
     }
 
+    // MARK: - Кошелёк
+
+    /// Хватает ли на весь заказ. 0.001 — та же поправка, что на сервере:
+    /// сравниваем деньги, а не биты.
+    private var walletEnough: Bool {
+        guard let b = walletBalance else { return false }
+        return b + Decimal(string: "0.001")! >= grandTotal
+    }
+    /// Способы оплаты для переключателя. Кошелёк идёт ПЕРВЫМ, потому что это
+    /// оплата в один тап — без наличных и без терминала.
+    private var availablePayments: [Payment] {
+        walletEnough ? [.wallet, .cash, .card] : [.cash, .card]
+    }
+    private func paymentTitle(_ p: Payment) -> String {
+        guard p == .wallet, let b = walletBalance else { return p.title }
+        return "Кошелёк · " + Money.format(b)
+    }
+
     var body: some View {
         ZStack {
             YMColor.bg.ignoresSafeArea()
@@ -150,11 +201,47 @@ struct CheckoutView: View {
         }
         .task {
             await loadAddresses()
+            await loadWallet()
             if let slug = cart.shopSlug {
                 shop = try? await API.shared.get("api/v1/shops/\(slug)")
             }
         }
         .onChange(of: fulfillment) { _ in Task { await quoteDelivery() } }
+        // Итог мог вырасти ПОСЛЕ выбора кошелька (добавилась доставка, слетел
+        // промокод) — снимаем выбор, иначе человек ушёл бы в 409 на кнопке.
+        .onChange(of: walletEnough) { ok in
+            if !ok && payment == .wallet { payment = .cash }
+        }
+        // Пополнение прямо из оформления: вернулся — перечитываем баланс, и
+        // способ «Кошелёк» появляется сам, без выхода из корзины.
+        .sheet(isPresented: $showWallet, onDismiss: { Task { await loadWallet() } }) {
+            NavigationStack {
+                WalletView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Готово") { showWallet = false }
+                        }
+                    }
+            }
+        }
+        .alert("Не хватает денег на кошельке", isPresented: .constant(shortage != nil)) {
+            Button("Пополнить") { shortage = nil; showWallet = true }
+            Button("Платить иначе", role: .cancel) { shortage = nil; payment = .cash }
+        } message: {
+            if let sh = shortage {
+                Text("Заказ стоит \(Money.format(sh.need)), на кошельке \(Money.format(sh.balance)). "
+                     + "Заказ не оформлен и деньги не списаны. Пополните кошелёк на "
+                     + "\(Money.format(sh.missing)) или выберите другой способ оплаты.")
+            }
+        }
+    }
+
+    /// Баланс кошелька. Ошибку глотаем: гость и площадка без кошелька — это не
+    /// сбой, просто способ «Кошелёк» не появится.
+    private func loadWallet() async {
+        let info: WalletInfo? = try? await API.shared.get("api/v1/wallet")
+        let b = info?.balance ?? 0
+        await MainActor.run { walletBalance = b > 0 ? b : nil }
     }
 
     // MARK: - Header «‹ Оформление»
@@ -207,7 +294,15 @@ struct CheckoutView: View {
                 }
 
                 SectionKicker("Оплата").padding(.top, YMSpace.lg).padding(.bottom, YMSpace.sm)
-                YMSegmented(options: Payment.allCases, selection: $payment) { $0.title }
+                YMSegmented(options: availablePayments, selection: $payment) { paymentTitle($0) }
+                // Кошелёк есть, но на этот заказ не хватает — честная подсказка
+                // вместо способа оплаты, которым нельзя воспользоваться.
+                if let b = walletBalance, !walletEnough {
+                    Text("На кошельке \(Money.format(b)) — на этот заказ не хватает")
+                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, YMSpace.sm)
+                }
 
                 commentField.padding(.top, YMSpace.lg)
 
@@ -477,7 +572,7 @@ struct CheckoutView: View {
         let body = OrderBody(
             shopId: shopId, items: items,
             deliveryType: fulfillment.apiValue,
-            paymentType: payment.apiValue,   // "cash" | "online" («Картой» → online)
+            paymentType: payment.apiValue,   // "cash" | "card_courier" | "wallet"
             address: fulfillment == .delivery ? composedAddress() : nil,
             comment: trimmed.isEmpty ? nil : trimmed,
             deliveryPrice: dp,
@@ -493,6 +588,19 @@ struct CheckoutView: View {
                     cart.clear()
                     placing = false
                     onSuccess(r)
+                }
+            } catch let e as APIError {
+                await MainActor.run {
+                    Haptics.error()
+                    placing = false
+                    // Нехватка денег — не ошибка оформления: заказ не создан,
+                    // деньги не тронуты. Показываем суммы и кнопку «Пополнить».
+                    if case let .walletShortage(need, balance, missing, _) = e {
+                        shortage = (need: need, balance: balance, missing: missing)
+                        walletBalance = balance > 0 ? balance : nil
+                    } else {
+                        errorText = e.errorDescription
+                    }
                 }
             } catch {
                 await MainActor.run {

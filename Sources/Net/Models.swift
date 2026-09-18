@@ -8,17 +8,28 @@ struct APIEnvelope<T: Decodable>: Decodable { let success: Bool?; let data: T?; 
 // иначе понятный текст (напр. «Минимальная сумма заказа…») терялся и показывалось «Ошибка 422».
 struct APIErr: Decodable {
     let message: String?
-    init(message: String?) { self.message = message }
+    /// details из v1err: словарь строк. Нужен для 409 «не хватает на кошельке»
+    /// — там приходят need / balance / missing, и без них экран не смог бы
+    /// написать «пополните на 269 ₽». Другие формы details (например список
+    /// сообщений по полям) декодируются в nil и никому не мешают.
+    let details: [String: String]?
+    init(message: String?, details: [String: String]? = nil) {
+        self.message = message
+        self.details = details
+    }
     init(from decoder: Decoder) throws {
         if let s = try? decoder.singleValueContainer().decode(String.self) {
             self.message = s
+            self.details = nil
         } else if let c = try? decoder.container(keyedBy: CodingKeys.self) {
             self.message = try? c.decode(String.self, forKey: .message)
+            self.details = try? c.decode([String: String].self, forKey: .details)
         } else {
             self.message = nil
+            self.details = nil
         }
     }
-    private enum CodingKeys: String, CodingKey { case message }
+    private enum CodingKeys: String, CodingKey { case message, details }
 }
 
 // Список: массив или {items:[...], has_more}
@@ -389,9 +400,199 @@ struct OrderCreateResult: Codable {
     var gifts: [PromoGift]? = nil
     var pointsSpent: Double? = nil
     var pointsEarned: Double? = nil
+    /// Оплата с кошелька: остаток после списания. Аддитивно и опционально —
+    /// при других способах оплаты сервер поля не присылает. Деньги — Decimal.
+    @LenientDecimal var walletBalance: Decimal?
 }
 // Ответ создания онлайн-платежа (YooKassa). Декодер сам делает snake_case → CodingKeys не нужны.
 struct PayOnlineResp: Codable { let confirmationUrl: String?; let paymentId: String? }
+
+// ---- Доска объявлений (routes/ads.php) ----
+// Декодер делает snake_case → camelCase сам, CodingKeys не нужны.
+// Деньги — @LenientDecimal (точный Decimal из строки "0.00"), не Double.
+// price у объявления ОПЦИОНАЛЬНА: «цена не указана» — это не ноль, и
+// price_text уже приходит готовой строкой, чтобы все клиенты писали одинаково.
+struct AdCategory: Codable, Identifiable, Hashable {
+    @LenientInt var id: Int?
+    @LenientInt var parentId: Int?
+    var name: String?
+    var slug: String?
+    var icon: String?
+    @LenientDecimal var price: Decimal?      // стоимость размещения, ₽
+    @LenientInt var days: Int?
+    @LenientInt var maxPhotos: Int?
+    var allowPrice: Bool?
+    var children: [AdCategory]?
+
+    var stableId: Int { id ?? 0 }
+    var priceValue: Decimal { price ?? 0 }
+    var daysValue: Int { days ?? 30 }
+    var photosLimit: Int { maxPhotos ?? 8 }
+    var priceAllowed: Bool { allowPrice ?? true }
+}
+struct AdCategoriesResponse: Codable {
+    var categories: [AdCategory]?
+    var enabled: Bool?
+}
+struct AdCard: Codable, Identifiable, Hashable {
+    @LenientInt var id: Int?
+    var title: String?
+    @LenientDecimal var price: Decimal?
+    var priceText: String?
+    var isNegotiable: Bool?
+    @LenientInt var categoryId: Int?
+    var categoryName: String?
+    var city: String?
+    var photo: String?
+    var photoThumb: String?
+    @LenientInt var photosCount: Int?
+    @LenientInt var viewsCount: Int?
+    var publishedAt: String?
+    var status: String?
+    var expiresAt: String?
+    var favorite: Bool?
+    // Только в «моих объявлениях»
+    @LenientDecimal var renewPrice: Decimal?
+    @LenientInt var renewDays: Int?
+    var blockReason: String?
+
+    var stableId: Int { id ?? 0 }
+    var photoURL: String? { (photo?.isEmpty == false ? photo : nil) ?? (photoThumb?.isEmpty == false ? photoThumb : nil) }
+}
+struct AdsFeedResponse: Codable {
+    var items: [AdCard]?
+    @LenientInt var total: Int?
+    @LenientInt var page: Int?
+    @LenientInt var pages: Int?
+    var enabled: Bool?
+}
+struct AdPhoto: Codable, Identifiable, Hashable {
+    @LenientInt var id: Int?
+    var thumb: String?
+    var card: String?
+    var full: String?
+    var stableId: Int { id ?? 0 }
+}
+struct AdAuthor: Codable, Hashable {
+    @LenientInt var id: Int?
+    var name: String?
+    var since: String?
+}
+struct AdDetail: Codable, Identifiable {
+    @LenientInt var id: Int?
+    var title: String?
+    @LenientDecimal var price: Decimal?
+    var priceText: String?
+    var isNegotiable: Bool?
+    @LenientInt var categoryId: Int?
+    var categoryName: String?
+    var city: String?
+    var status: String?
+    @LenientInt var viewsCount: Int?
+    var publishedAt: String?
+    var expiresAt: String?
+    var favorite: Bool?
+    var description: String?
+    var conditionNew: Bool?
+    var address: String?
+    var contactName: String?
+    // nil — владелец спрятал номер, он придёт по POST .../contact
+    var contactPhone: String?
+    var phoneHidden: Bool?
+    @LenientInt var contactsCount: Int?
+    var photos: [AdPhoto]?
+    var author: AdAuthor?
+    var isMine: Bool?
+    @LenientDecimal var renewPrice: Decimal?
+    @LenientInt var renewDays: Int?
+}
+struct AdDetailResponse: Codable { var ad: AdDetail? }
+struct MyAdsResponse: Codable {
+    var items: [AdCard]?
+    @LenientInt var active: Int?
+    @LenientInt var maxActive: Int?
+    @LenientDecimal var balance: Decimal?
+}
+/// Тело создания и правки. Деньги — строкой "0.00" (Money.wire), "" = цена не указана.
+struct AdSaveBody: Encodable {
+    let categoryId: Int
+    let title: String
+    let description: String
+    let price: String
+    let isNegotiable: Bool
+    let conditionNew: Bool?
+    let address: String?
+    let contactPhone: String
+    let hidePhone: Bool
+}
+struct AdCreatedResponse: Codable {
+    @LenientInt var adId: Int?
+    var status: String?
+    @LenientDecimal var price: Decimal?
+    @LenientInt var days: Int?
+    @LenientInt var maxPhotos: Int?
+    @LenientDecimal var balance: Decimal?
+}
+/// Ответ публикации. charged = 0 и free = true — включили бесплатно.
+struct AdPublishResponse: Codable {
+    @LenientInt var adId: Int?
+    var status: String?
+    @LenientDecimal var charged: Decimal?
+    @LenientDecimal var balance: Decimal?
+    var expiresAt: String?
+    var free: Bool?
+}
+struct AdPhotoUploadedResponse: Codable {
+    var photo: AdPhoto?
+    @LenientInt var photosCount: Int?
+}
+struct AdContactResponse: Codable { var phone: String? }
+struct AdFavoriteResponse: Codable { var favorite: Bool? }
+struct AdReportBody: Encodable { let reason: String; let comment: String? }
+
+// ---- Кошелёк клиента (routes/wallet.php) ----
+// Декодер делает snake_case → camelCase сам, CodingKeys не нужны.
+// Деньги — @LenientDecimal (точный Decimal из строки "0.00"), не Double.
+// enabled=false: онлайн-оплата на площадке не настроена или схема кошелька ещё
+// не накатана — экран показывает баланс и историю, но не предлагает пополнение.
+struct WalletInfo: Codable {
+    @LenientDecimal var balance: Decimal?
+    var enabled: Bool?
+    @LenientDecimal var minTopup: Decimal?
+    @LenientDecimal var maxTopup: Decimal?
+    var transactions: [WalletTx]?
+}
+struct WalletTx: Codable, Identifiable {
+    @LenientInt var id: Int?
+    var type: String?            // topup | order_pay | order_refund | correction
+    var typeLabel: String?
+    @LenientDecimal var amount: Decimal?
+    @LenientDecimal var balanceAfter: Decimal?
+    var description: String?
+    @LenientInt var orderId: Int?
+    var createdAt: String?
+    var stableId: String { "\(id ?? 0)-\(createdAt ?? "")" }
+}
+/// POST api/v1/wallet/topup → ссылка на страницу оплаты ЮKassa.
+struct WalletTopupCreated: Codable {
+    @LenientInt var topupId: Int?
+    @LenientDecimal var amount: Decimal?
+    var confirmationUrl: String?
+}
+/// GET api/v1/wallet/topup/{id} — статус. Баланс поднимает только сервер и
+/// только после подтверждения платежа провайдером.
+struct WalletTopupStatus: Codable {
+    @LenientInt var topupId: Int?
+    var status: String?          // pending | confirmed | rejected
+    @LenientDecimal var amount: Decimal?
+    @LenientDecimal var balance: Decimal?
+}
+/// Тело POST api/v1/wallet/topup. method — необязательный предвыбор способа
+/// («card» | «sbp»); без него открывается общая страница выбора ЮKassa.
+struct WalletTopupBody: Encodable {
+    let amount: String           // деньги на провод — строкой "0.00", как везде
+    let method: String?
+}
 
 // ---- Возвраты ----
 struct ReturnItem: Codable, Identifiable {
