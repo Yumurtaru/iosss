@@ -650,6 +650,21 @@ struct ServiceItem: Codable, Identifiable {
     /// Группа в списке: «Игровой зал», «Кинозал».
     let groupName: String?
 
+    // ── Категория услуги ────────────────────────────────────────────────────
+    // Услуга лежит в той же категории, что и товары организации, а порядок
+    // категории задаёт, где стоит блок услуг на витрине. Поля аддитивные: у
+    // старого сервера их нет → nil/0, поведение прежнее.
+    //
+    // Отдельно: сервер подставляет название категории в group_name, если своей
+    // группы у услуги нет, — поэтому подзаголовки и порядок работают и в уже
+    // установленных сборках, без обновления в App Store.
+    @LenientInt var categoryId: Int?
+    let categoryName: String?
+    /// Порядок категории. 999999 — услуга без категории (идёт последней).
+    @LenientInt var categorySort: Int?
+    /// Порядок услуги внутри категории.
+    @LenientInt var sortOrder: Int?
+
     var capacityValue: Int { max(1, capacity ?? 1) }
     var slotMinutes: Int { max(5, (slotMin ?? 0) > 0 ? (slotMin ?? 0) : (durationMin ?? 30)) }
     /// Максимум человек в ОДНОЙ брони.
@@ -692,7 +707,12 @@ struct ServiceItem: Codable, Identifiable {
         return nil
     }
 }
-struct ServicesResponse: Codable { let masters: [Master]?; let services: [ServiceItem]? }
+/// placement — где показывать блок услуг относительно меню: "first" (до меню,
+/// как было) или "last" (после). Решение принимает сервер по порядку категории,
+/// в которую продавец положил услуги: считать это на каждом клиенте по-своему —
+/// верный способ получить три разные витрины. Старый сервер поля не отдаёт →
+/// nil → "first".
+struct ServicesResponse: Codable { let masters: [Master]?; let services: [ServiceItem]?; let placement: String? }
 struct CatalogItem: Codable, Hashable {
     let id: Int; let name: String?; @LenientDouble var price: Double?
     let type: String?; let shopName: String?; let shopSlug: String?; let photo: String?; let category: String?

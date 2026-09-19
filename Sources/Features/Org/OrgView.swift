@@ -28,6 +28,10 @@ final class OrgViewModel: ObservableObject {
     @Published var detail: ShopDetail?
     @Published var products: [Product] = []
     @Published var services: [ServiceItem] = []
+    /// Где показывать блок услуг: "first" (до меню) или "last" (после).
+    /// Значение присылает сервер — продавец задаёт его порядком категории,
+    /// в которую положил услуги. До ответа — "first", как было всегда.
+    @Published var servicePlacement: String = "first"
     /// Категории товаров магазина (для меню-табов и фильтра) — грузятся отдельным
     /// запросом по shopId, как на Android (Repo.categories(shopId)). НЕ путать с
     /// detail.categories (категории-теги организации).
@@ -89,6 +93,8 @@ final class OrgViewModel: ObservableObject {
         Task { @MainActor in
             if let r: ServicesResponse = try? await API.shared.get("api/v1/shops/\(slug)/services") {
                 services = r.services ?? []
+                // Пустой список — блок всё равно скрыт, положение не важно.
+                if !services.isEmpty { servicePlacement = r.placement ?? "first" }
             }
         }
         // Избранное организации — в фоне (сердечко станет красным, если она уже в избранном).
@@ -316,7 +322,9 @@ struct OrgView: View {
             if vm.isService {
                 OrgBookingSection(slug: vm.slug, detail: vm.detail) { showAuth = true }
                     .padding(.top, 20)
-            } else {
+            } else if vm.servicePlacement == "last" {
+                // Продавец положил услуги в категорию НИЖЕ первой категории
+                // меню: сначала еда, потом бронь игрового зала.
                 menuSection.padding(.top, 20)
                 OrgBookingSection(
                     slug: vm.slug, detail: vm.detail,
@@ -324,6 +332,18 @@ struct OrgView: View {
                     serviceOrg: false, hideWhenEmpty: true
                 )
                 .padding(.top, vm.services.isEmpty ? 0 : 20)
+            } else {
+                // Как было всегда: блок услуг над меню.
+                // Отступ только при непустом списке: при hideWhenEmpty блок
+                // схлопывается в нулевую высоту, но родительский padding
+                // остался бы пустой полосой над меню.
+                OrgBookingSection(
+                    slug: vm.slug, detail: vm.detail,
+                    onNeedAuth: { showAuth = true },
+                    serviceOrg: false, hideWhenEmpty: true
+                )
+                .padding(.top, vm.services.isEmpty ? 0 : 20)
+                menuSection.padding(.top, 20)
             }
 
             // Отзывы — для всех типов организаций. Сводка нажимаема → полный экран ReviewsScreen.

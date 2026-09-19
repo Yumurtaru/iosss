@@ -20,18 +20,46 @@ struct ChipRow: View {
     @Binding var selected: OrgKind
     var onChange: ((OrgKind) -> Void)? = nil
 
+    /// Раньше ряд был горизонтальным ScrollView без индикатора прокрутки, и на
+    /// обычном телефоне последний чип («Жильё») целиком уезжал за правый край.
+    /// Подсказки, что ряд прокручивается, не было никакой — раздел просто не
+    /// существовал для человека, который не догадался свайпнуть.
+    ///
+    /// ViewThatFits (iOS 16+) выбирает первый вариант, который помещается:
+    /// одна строка → две строки → и только в совсем узком случае (огромный
+    /// системный шрифт) прежняя прокрутка, чтобы ничего не обрезалось.
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: YMSpace.sm) {
-                ForEach(OrgKind.allCases) { kind in
-                    Chip(label: kind.rawValue, active: kind == selected) {
-                        Haptics.selection()
-                        withAnimation(YMMotion.snappy) { selected = kind }
-                        onChange?(kind)
-                    }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: YMSpace.sm) { chips(Array(OrgKind.allCases)) }
+                .padding(.horizontal, YMSpace.xl)
+
+            VStack(alignment: .leading, spacing: YMSpace.sm) {
+                HStack(spacing: YMSpace.sm) {
+                    chips(Array(OrgKind.allCases.prefix(3)))
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: YMSpace.sm) {
+                    chips(Array(OrgKind.allCases.dropFirst(3)))
+                    Spacer(minLength: 0)
                 }
             }
             .padding(.horizontal, YMSpace.xl)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: YMSpace.sm) { chips(Array(OrgKind.allCases)) }
+                    .padding(.horizontal, YMSpace.xl)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func chips(_ kinds: [OrgKind]) -> some View {
+        ForEach(kinds) { kind in
+            Chip(label: kind.rawValue, active: kind == selected) {
+                Haptics.selection()
+                withAnimation(YMMotion.snappy) { selected = kind }
+                onChange?(kind)
+            }
         }
     }
 }

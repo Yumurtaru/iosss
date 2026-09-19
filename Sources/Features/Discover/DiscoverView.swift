@@ -626,6 +626,11 @@ private struct FavoritesSection: View {
     @State private var shops: [Shop] = []
     @State private var products: [Product] = []
     @State private var loading = true
+    /// Текст ошибки. Раньше обе загрузки шли через `try?`, и ЛЮБОЙ сбой —
+    /// истёкшая сессия, нет сети, 500 — превращался в пустой список: человек с
+    /// непустым избранным видел «здесь пока пусто» и шёл искать поломку.
+    @State private var error: String?
+    @State private var reloadKey = 0
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
     @State private var route: DiscoverRoute?
@@ -640,15 +645,36 @@ private struct FavoritesSection: View {
                         .padding(.horizontal, YMSpace.xl)
                         .padding(.top, YMSpace.sm).padding(.bottom, YMSpace.md)
 
-                    YMSegmented(options: FavTab.allCases, selection: $tab) { $0.title }
+                    // Количество прямо на сегменте: пустые «Организации» больше
+                    // нельзя принять за пустое избранное целиком, когда товары есть.
+                    YMSegmented(options: FavTab.allCases, selection: $tab) { t in
+                        let n = (t == .orgs) ? shops.count : products.count
+                        return n > 0 ? "\(t.title)  \(n)" : t.title
+                    }
                         .padding(.horizontal, YMSpace.xl)
                         .padding(.bottom, YMSpace.lg)
 
-                    if loading {
+                    if !Session.shared.isLoggedIn {
+                        // Гость видел ровно то же «здесь пока пусто», что и человек
+                        // с пустым избранным. Избранное лежит на сервере и привязано
+                        // к аккаунту — причину надо назвать прямо.
+                        notice(icon: "♥", title: "Войдите в аккаунт",
+                               text: "Избранное хранится в вашем аккаунте, а не на телефоне.")
+                    } else if loading {
                         VStack(spacing: YMSpace.lg) {
                             ForEach(0..<3, id: \.self) { _ in SkeletonBox(radius: 20).frame(height: 178) }
                         }
                         .padding(.horizontal, YMSpace.xl)
+                    } else if let e = error {
+                        VStack(spacing: YMSpace.sm) {
+                            Text(e).font(YMFont.callout).foregroundStyle(YMColor.muted)
+                                .multilineTextAlignment(.center)
+                            Button("Повторить") { reloadKey += 1 }
+                                .font(YMFont.callout.weight(.bold))
+                                .foregroundStyle(YMColor.accent)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, YMSpace.xxxl).padding(.top, 40)
                     } else if tab == .orgs {
                         if shops.isEmpty { empty("Нет избранных организаций") }
                         else {
@@ -686,7 +712,7 @@ private struct FavoritesSection: View {
                 }
             }
         }
-        .task { await load() }
+        .task(id: reloadKey) { await load() }
         // Гашение отложенного перехода — СНАРУЖИ NavigationStack.
         // Раньше эта строка стояла ВНУТРИ стека, на его же корневом ScrollView,
         // и меняла состояние перехода прямо в анимации нажатия на сегмент
@@ -726,12 +752,39 @@ private struct FavoritesSection: View {
         // при каждом возврате на вкладку, и loading = true прятал весь список
         // целиком — со стороны это выглядело так, будто переключение
         // «Организации ⇄ Товары» не сработало.
+        guard Session.shared.isLoggedIn else { loading = false; return }
         if shops.isEmpty && products.isEmpty { loading = true }
-        shops = (try? await API.shared.list("api/v1/favorites")) ?? []
-        products = (try? await API.shared.list("api/v1/product-favorites")) ?? []
+        error = nil
+        // try? здесь больше нет: сбой должен быть виден, а не выглядеть как
+        // пустое избранное.
+        do {
+            shops = try await API.shared.list("api/v1/favorites")
+        } catch {
+            shops = []
+            self.error = "Не удалось загрузить избранное: \(error.localizedDescription)"
+        }
+        do {
+            products = try await API.shared.list("api/v1/product-favorites")
+        } catch {
+            products = []
+            // Ошибку первого запроса не затираем: показываем ту, что случилась раньше.
+            if self.error == nil { self.error = "Не удалось загрузить избранное: \(error.localizedDescription)" }
+        }
         favShops = Set(shops.map { $0.id })
         favProducts = Set(products.map { $0.id })
         loading = false
+    }
+
+    /// Простое сообщение по центру: иконка, заголовок, пояснение.
+    private func notice(icon: String, title: String, text: String) -> some View {
+        VStack(spacing: YMSpace.sm) {
+            Text(icon).font(.system(size: 44)).foregroundStyle(YMColor.accent)
+            Text(title).font(YMFont.title3).foregroundStyle(YMColor.text)
+            Text(text).font(YMFont.callout).foregroundStyle(YMColor.muted)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, YMSpace.xxxl).padding(.top, 40)
     }
     private func toggleShopFav(_ id: Int, on: Bool) async {
         do {

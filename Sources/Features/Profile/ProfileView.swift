@@ -127,10 +127,8 @@ struct ProfileView: View {
         case .plus:         PlusView()
         case .loyalty:      LoyaltyView()
         case .wallet:       WalletView()
-        // FavoritesScreen аргументов НЕ принимает: это обёртка
-        // DiscoverView(mode: .favorites) (Features/Discover/DiscoverView.swift),
-        // навигацию внутри она делает сама. Я по инерции дописал сюда колбэки
-        // от одноимённого экрана Android — сборка на это и упала.
+        // FavoritesScreen(…) без аргументов: у типа их нет вовсе
+        // (DiscoverView.swift), переходы он делает сам.
         case .favorites:    FavoritesScreen()
         case .myAds:        MyAdsView()
         case .bonuses:      BonusesView()
