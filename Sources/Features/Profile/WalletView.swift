@@ -176,7 +176,7 @@ struct WalletView: View {
                 } else {
                     // enabled=false — онлайн-оплата на площадке не настроена.
                     // Кнопку не показываем: нажатие всё равно вернуло бы 503.
-                    Text("Пополнение сейчас недоступно. Баланс можно тратить на заказы.")
+                    Text("Онлайн-пополнение пока не настроено на площадке. Баланс кошелька тратится на размещение объявлений.")
                         .font(YMFont.caption)
                         .foregroundStyle(YMColor.muted)
                 }
@@ -218,6 +218,11 @@ struct WalletView: View {
             Text(Money.format(vm.info?.balance ?? 0))
                 .font(YMFont.largeTitle)
                 .foregroundStyle(YMColor.onAccent)
+            // Прямо говорим, на что эти деньги. Раньше экран обещал оплату
+            // заказов — заказы кошельком не оплачиваются.
+            Text("Для размещения объявлений")
+                .font(YMFont.caption)
+                .foregroundStyle(YMColor.onAccent.opacity(0.85))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(YMSpace.xl)

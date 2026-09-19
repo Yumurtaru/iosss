@@ -400,9 +400,6 @@ struct OrderCreateResult: Codable {
     var gifts: [PromoGift]? = nil
     var pointsSpent: Double? = nil
     var pointsEarned: Double? = nil
-    /// Оплата с кошелька: остаток после списания. Аддитивно и опционально —
-    /// при других способах оплаты сервер поля не присылает. Деньги — Decimal.
-    @LenientDecimal var walletBalance: Decimal?
 }
 // Ответ создания онлайн-платежа (YooKassa). Декодер сам делает snake_case → CodingKeys не нужны.
 struct PayOnlineResp: Codable { let confirmationUrl: String?; let paymentId: String? }
