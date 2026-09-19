@@ -635,91 +635,93 @@ private struct FavoritesSection: View {
     @State private var favProducts: Set<Int> = []
     @State private var route: DiscoverRoute?
 
+    /// СВОЕГО NavigationStack здесь НЕТ, и это принципиально.
+    ///
+    /// «Избранное» перестало быть нижней вкладкой и открывается из профиля —
+    /// то есть ВНУТРИ NavigationStack профиля (ProfileView.profileDestination).
+    /// Стек внутри стека SwiftUI не прощает: экран открывался и тут же
+    /// схлопывался обратно, а после нескольких попыток навигация ломалась
+    /// совсем — белый экран с жёлтым треугольником вместо содержимого.
+    ///
+    /// Поэтому секция — обычное содержимое, как AddressesView и остальные
+    /// разделы профиля: заголовок в навбаре, переходы уходят в стек родителя.
+    /// Соседние секции (Поиск) остаются вкладками и свой стек сохраняют.
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Избранное")
-                        .font(.system(size: 28, weight: .heavy)).tracking(-0.6)
-                        .foregroundStyle(YMColor.text)
-                        .padding(.horizontal, YMSpace.xl)
-                        .padding(.top, YMSpace.sm).padding(.bottom, YMSpace.md)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                // Количество прямо на сегменте: пустые «Организации» больше
+                // нельзя принять за пустое избранное целиком, когда товары есть.
+                YMSegmented(options: FavTab.allCases, selection: $tab) { t in
+                    let n = (t == .orgs) ? shops.count : products.count
+                    return n > 0 ? "\(t.title)  \(n)" : t.title
+                }
+                    .padding(.horizontal, YMSpace.xl)
+                    .padding(.bottom, YMSpace.lg)
 
-                    // Количество прямо на сегменте: пустые «Организации» больше
-                    // нельзя принять за пустое избранное целиком, когда товары есть.
-                    YMSegmented(options: FavTab.allCases, selection: $tab) { t in
-                        let n = (t == .orgs) ? shops.count : products.count
-                        return n > 0 ? "\(t.title)  \(n)" : t.title
+                if !Session.shared.isLoggedIn {
+                    // Гость видел ровно то же «здесь пока пусто», что и человек
+                    // с пустым избранным. Избранное лежит на сервере и привязано
+                    // к аккаунту — причину надо назвать прямо.
+                    notice(icon: "♥", title: "Войдите в аккаунт",
+                           text: "Избранное хранится в вашем аккаунте, а не на телефоне.")
+                } else if loading {
+                    VStack(spacing: YMSpace.lg) {
+                        ForEach(0..<3, id: \.self) { _ in SkeletonBox(radius: 20).frame(height: 178) }
                     }
-                        .padding(.horizontal, YMSpace.xl)
-                        .padding(.bottom, YMSpace.lg)
-
-                    if !Session.shared.isLoggedIn {
-                        // Гость видел ровно то же «здесь пока пусто», что и человек
-                        // с пустым избранным. Избранное лежит на сервере и привязано
-                        // к аккаунту — причину надо назвать прямо.
-                        notice(icon: "♥", title: "Войдите в аккаунт",
-                               text: "Избранное хранится в вашем аккаунте, а не на телефоне.")
-                    } else if loading {
+                    .padding(.horizontal, YMSpace.xl)
+                } else if let e = error {
+                    VStack(spacing: YMSpace.sm) {
+                        Text(e).font(YMFont.callout).foregroundStyle(YMColor.muted)
+                            .multilineTextAlignment(.center)
+                        Button("Повторить") { reloadKey += 1 }
+                            .font(YMFont.callout.weight(.bold))
+                            .foregroundStyle(YMColor.accent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, YMSpace.xxxl).padding(.top, 40)
+                } else if tab == .orgs {
+                    if shops.isEmpty { empty("Нет избранных организаций") }
+                    else {
                         VStack(spacing: YMSpace.lg) {
-                            ForEach(0..<3, id: \.self) { _ in SkeletonBox(radius: 20).frame(height: 178) }
+                            ForEach(Array(shops.enumerated()), id: \.element.id) { idx, s in
+                                FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { route = .shop(s) }
+                            }
                         }
                         .padding(.horizontal, YMSpace.xl)
-                    } else if let e = error {
-                        VStack(spacing: YMSpace.sm) {
-                            Text(e).font(YMFont.callout).foregroundStyle(YMColor.muted)
-                                .multilineTextAlignment(.center)
-                            Button("Повторить") { reloadKey += 1 }
-                                .font(YMFont.callout.weight(.bold))
-                                .foregroundStyle(YMColor.accent)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, YMSpace.xxxl).padding(.top, 40)
-                    } else if tab == .orgs {
-                        if shops.isEmpty { empty("Нет избранных организаций") }
-                        else {
-                            VStack(spacing: YMSpace.lg) {
-                                ForEach(Array(shops.enumerated()), id: \.element.id) { idx, s in
-                                    FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { route = .shop(s) }
-                                }
+                    }
+                } else {
+                    if products.isEmpty { empty("Нет избранных товаров") }
+                    else {
+                        VStack(spacing: YMSpace.lg) {
+                            ForEach(Array(products.enumerated()), id: \.element.id) { idx, p in
+                                FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { route = .product(p.id) }
                             }
-                            .padding(.horizontal, YMSpace.xl)
                         }
-                    } else {
-                        if products.isEmpty { empty("Нет избранных товаров") }
-                        else {
-                            VStack(spacing: YMSpace.lg) {
-                                ForEach(Array(products.enumerated()), id: \.element.id) { idx, p in
-                                    FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { route = .product(p.id) }
-                                }
-                            }
-                            .padding(.horizontal, YMSpace.xl)
-                        }
+                        .padding(.horizontal, YMSpace.xl)
                     }
                 }
-                .padding(.bottom, YMSpace.xxxl)
             }
-            .background(YMColor.bg.ignoresSafeArea())
-            .navigationBarHidden(true)
-            // ОДИН destination на экран (см. DiscoverRoute).
-            .navigationDestination(isPresented: Binding(
-                get: { route != nil }, set: { if !$0 { route = nil } }
-            )) {
-                switch route {
-                case .shop(let s):     OrgView(shop: s)
-                case .product(let id): ProductView(id: id)
-                default:               EmptyView()
-                }
+            .padding(.bottom, YMSpace.xxxl)
+        }
+        .background(YMColor.bg.ignoresSafeArea())
+        .navigationTitle("Избранное")
+        .navigationBarTitleDisplayMode(.inline)
+        // ОДИН destination на экран (см. DiscoverRoute). Привязывается к
+        // стеку профиля — своего у секции больше нет.
+        .navigationDestination(isPresented: Binding(
+            get: { route != nil }, set: { if !$0 { route = nil } }
+        )) {
+            switch route {
+            case .shop(let s):     OrgView(shop: s)
+            case .product(let id): ProductView(id: id)
+            default:               EmptyView()
             }
         }
         .task(id: reloadKey) { await load() }
-        // Гашение отложенного перехода — СНАРУЖИ NavigationStack.
-        // Раньше эта строка стояла ВНУТРИ стека, на его же корневом ScrollView,
-        // и меняла состояние перехода прямо в анимации нажатия на сегмент
-        // (YMSegmented пишет selection внутри withAnimation). Переключение
-        // вкладки и перестройка стека попадали в одну транзакцию, и тап по
-        // сегменту терялся — вкладка не переключалась. В соседней секции
-        // «Категории» такой строки внутри стека нет, и она работает.
+        // Гашение отложенного перехода при смене вкладки. YMSegmented пишет
+        // selection внутри withAnimation, поэтому сбрасываем маршрут здесь,
+        // а не в теле — иначе переключение сегмента и перестройка перехода
+        // попадают в одну транзакцию и тап по сегменту теряется.
         .onChange(of: tab) { _ in route = nil }
     }
 
