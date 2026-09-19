@@ -205,11 +205,11 @@ struct AdsBoardView: View {
         VStack(alignment: .leading, spacing: YMSpace.sm) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: YMSpace.sm) {
-                    AdCatChip(title: "Все", price: nil, selected: vm.categoryId == 0) { vm.pick(0) }
+                    AdCatChip(title: "Все", symbol: "square.grid.2x2.fill", selected: vm.categoryId == 0) { vm.pick(0) }
                     ForEach(vm.cats) { cat in
                         AdCatChip(
                             title: cat.name ?? "",
-                            price: cat.priceValue,
+                            symbol: adCategorySymbol(cat.icon, cat.name ?? ""),
                             selected: vm.activeRoot?.stableId == cat.stableId
                         ) { vm.pick(cat.stableId) }
                     }
@@ -219,7 +219,7 @@ struct AdsBoardView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: YMSpace.sm) {
                         ForEach(kids) { k in
-                            AdCatChip(title: k.name ?? "", price: nil, selected: vm.categoryId == k.stableId) {
+                            AdCatChip(title: k.name ?? "", symbol: nil, selected: vm.categoryId == k.stableId) {
                                 vm.pick(k.stableId)
                             }
                         }
@@ -236,27 +236,77 @@ enum AdsRoute: Hashable {
     case detail(Int)
 }
 
+/// Иконка корневой категории объявлений.
+///
+/// Сервер хранит имя иконки набора Phosphor (поле `icon`, засевается в
+/// tools/migrate_ads.php). В iOS такого набора нет, поэтому переводим имя в
+/// ближайший SF Symbol. Если администратор заведёт категорию без иконки —
+/// пробуем угадать по названию, в самом конце отдаём общий значок: экран не
+/// должен зависеть от содержимого справочника.
+func adCategorySymbol(_ icon: String?, _ name: String) -> String {
+    switch (icon ?? "").trimmingCharacters(in: .whitespaces).lowercased() {
+    case "car", "truck", "motorcycle":            return "car.fill"
+    case "house", "buildings", "building":        return "house.fill"
+    case "briefcase", "suitcase":                 return "briefcase.fill"
+    case "wrench", "hammer", "toolbox":           return "wrench.and.screwdriver.fill"
+    case "tshirt", "dress", "baby":               return "tshirt.fill"
+    case "sofa", "armchair", "plant":             return "leaf.fill"
+    case "device-mobile", "devicemobile", "laptop", "desktop": return "iphone"
+    case "dog", "cat", "paw-print":               return "pawprint.fill"
+    case "bicycle", "bike", "football":           return "bicycle"
+    case "guitar":                                return "guitars.fill"
+    case "gift", "hand-heart":                    return "gift.fill"
+    case "game-controller", "gamepad":            return "gamecontroller.fill"
+    default: break
+    }
+    let n = name.lowercased()
+    if n.contains("транспорт") || n.contains("авто")      { return "car.fill" }
+    if n.contains("недвижим")  || n.contains("жиль")      { return "house.fill" }
+    if n.contains("работ")     || n.contains("ваканс")    { return "briefcase.fill" }
+    if n.contains("услуг")                                { return "wrench.and.screwdriver.fill" }
+    if n.contains("вещи")      || n.contains("одежд")     { return "tshirt.fill" }
+    if n.contains("дом")       || n.contains("дач")       { return "leaf.fill" }
+    if n.contains("электрон")  || n.contains("техник")    { return "iphone" }
+    if n.contains("животн")                               { return "pawprint.fill" }
+    if n.contains("хобби")     || n.contains("отдых") || n.contains("спорт") { return "bicycle" }
+    if n.contains("даром")     || n.contains("подар")     { return "gift.fill" }
+    return "tag.fill"
+}
+
+/// Чип категории: иконка в кружке + название. Цену размещения здесь не
+/// показываем — покупателю она не нужна, её видно при подаче объявления.
+/// У подкатегорий иконки нет: symbol == nil — обычный текстовый чип.
 struct AdCatChip: View {
     let title: String
-    let price: Decimal?
+    let symbol: String?
     let selected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(YMFont.callout)
-                if let p = price {
-                    Text(p > 0 ? Money.format(p) : "бесплатно")
-                        .font(YMFont.caption2)
-                        .foregroundStyle(selected ? YMColor.accent.opacity(0.8) : YMColor.muted)
+            HStack(spacing: YMSpace.sm) {
+                if let symbol {
+                    ZStack {
+                        Circle().fill(selected ? Color.white.opacity(0.22) : YMColor.accent.opacity(0.12))
+                        Image(systemName: symbol)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(selected ? Color.white : YMColor.accent)
+                    }
+                    .frame(width: 28, height: 28)
                 }
+                Text(title)
+                    .font(YMFont.callout)
+                    .fontWeight(selected ? .semibold : .regular)
+                    .lineLimit(1)
             }
-            .padding(.horizontal, YMSpace.md)
-            .padding(.vertical, YMSpace.sm)
-            .foregroundStyle(selected ? YMColor.accent : YMColor.text)
+            .padding(.leading, symbol == nil ? YMSpace.md : 6)
+            .padding(.trailing, YMSpace.md)
+            .padding(.vertical, symbol == nil ? YMSpace.sm : 6)
+            .foregroundStyle(selected ? (symbol == nil ? YMColor.accent : Color.white) : YMColor.text)
             .background(
-                (selected ? YMColor.accent.opacity(0.16) : YMColor.surface),
+                selected
+                    ? (symbol == nil ? YMColor.accent.opacity(0.16) : YMColor.accent)
+                    : YMColor.surface,
                 in: RoundedRectangle(cornerRadius: YMRadius.chip, style: .continuous)
             )
             .overlay(
@@ -275,7 +325,8 @@ struct AdGridCard: View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack {
                 Rectangle().fill(YMColor.surface2)
-                if let url = ad.photoURL, let u = URL(string: url) {
+                // API.imageURL — сервер отдаёт путь от корня сайта, нужна база.
+                if let u = API.imageURL(ad.photoURL) {
                     AsyncImage(url: u) { phase in
                         if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
                         else { Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(YMColor.muted) }

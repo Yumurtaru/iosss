@@ -113,7 +113,7 @@ struct AdDetailView: View {
                 ZStack {
                     Rectangle().fill(YMColor.surface2)
                     let shown = bigPhoto ?? photos.first?.full ?? photos.first?.card
-                    if let s = shown, let u = URL(string: s) {
+                    if let u = API.imageURL(shown) {
                         AsyncImage(url: u) { phase in
                             if let img = phase.image { img.resizable().aspectRatio(contentMode: .fit) }
                             else { ProgressView() }
@@ -129,7 +129,7 @@ struct AdDetailView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: YMSpace.sm) {
                             ForEach(photos) { p in
-                                if let s = p.thumb ?? p.card, let u = URL(string: s) {
+                                if let u = API.imageURL(p.thumb ?? p.card) {
                                     AsyncImage(url: u) { phase in
                                         if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
                                         else { Rectangle().fill(YMColor.surface2) }

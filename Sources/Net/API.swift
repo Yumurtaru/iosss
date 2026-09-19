@@ -57,9 +57,22 @@ final class API {
 
     private let maxRetries = 2                    // доп. попытки (итого до 3) для GET
 
+    /// Абсолютный адрес картинки.
+    ///
+    /// Сервер отдаёт пути в двух видах, и это не оплошность, а история разделов:
+    ///   • товары, логотипы, баннеры — голый путь внутри хранилища
+    ///     ("products/2026/06/x.webp"), к нему нужно дописать /assets/uploads/;
+    ///   • объявления — уже готовый путь от корня сайта
+    ///     ("/assets/uploads/ads/2026/09/x.webp", см. adsPhotoUrl в routes/ads.php),
+    ///     к нему нужно дописать ТОЛЬКО адрес сайта.
+    ///
+    /// Второй случай раньше не обрабатывался: URL(string:) отдавал относительный
+    /// адрес без схемы, AsyncImage такой не грузит — фото объявлений было видно на
+    /// сайте и не видно в приложении.
     static func imageURL(_ path: String?) -> URL? {
         guard let p = path, !p.isEmpty else { return nil }
         if p.hasPrefix("http") { return URL(string: p) }
+        if p.hasPrefix("/") { return URL(string: base + p) }
         return URL(string: base + "/assets/uploads/" + p)
     }
 
