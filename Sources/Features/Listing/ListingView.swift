@@ -29,6 +29,16 @@ enum ListingSort: String, CaseIterable, Identifiable {
     case fastest  = "Быстрее доставка"
     case cheapest = "Сначала недорогие"
     var id: String { rawValue }
+    /// Значение параметра sort для сервера: он сортирует ВСЮ выборку, а не одну
+    /// загруженную страницу.
+    var apiValue: String {
+        switch self {
+        case .rating:   return "rating"
+        case .nearest:  return "distance"
+        case .fastest:  return "cook_time"
+        case .cheapest: return "price"
+        }
+    }
     var icon: String {
         switch self {
         case .rating:   return "star.fill"
@@ -56,6 +66,15 @@ final class ListingViewModel: ObservableObject {
     // Категории раздела (Магазины/Услуги). Ряд-чипов + выбранная категория (nil = «Все»).
     @Published var categories: [OrgCategory] = []
     @Published var pickedCategoryId: Int?
+
+    /// Координаты для «Ближе ко мне» — из АДРЕСА ДОСТАВКИ, не из GPS: разрешение
+    /// на геолокацию приложение не просит, да и человеку важно, что ближе к его
+    /// дому. Нет адреса — пункт сортировки не показываем, чтобы он не
+    /// притворялся рабочим.
+    @Published var geo: (lat: Double, lng: Double)?
+    var hasGeo: Bool { geo != nil }
+    /// Пункты сортировки, доступные прямо сейчас.
+    var sortOptions: [ListingSort] { ListingSort.allCases.filter { $0 != .nearest || hasGeo } }
 
     let screen: Screen
     let orgType: String        // restaurant | store | service | all
@@ -98,6 +117,15 @@ final class ListingViewModel: ObservableObject {
         await load()
     }
 
+    /// Подтянуть координаты адреса доставки (один раз за сессию экрана).
+    func loadGeo() async {
+        guard screen == .category, geo == nil, Session.shared.isLoggedIn else { return }
+        let list: [Address] = (try? await API.shared.list("api/v1/profile/addresses")) ?? []
+        let pick = list.first { $0.isDefaultBool && $0.lat != nil && $0.lng != nil }
+            ?? list.first { $0.lat != nil && $0.lng != nil }
+        if let a = pick, let la = a.lat, let ln = a.lng { geo = (la, ln) }
+    }
+
     func load() async {
         loading = true; error = nil
         switch screen {
@@ -105,6 +133,13 @@ final class ListingViewModel: ObservableObject {
             do {
                 var q: [String: String] = [:]
                 if let cid = cityId { q["city_id"] = String(cid) }
+                // Фильтры и сортировку считает СЕРВЕР — иначе они применялись бы
+                // только к загруженной странице. Локальный проход в sortedOrgs
+                // оставлен: он совпадает с серверным и спасает на старом сервере.
+                q["sort"] = sort.apiValue
+                if let g = geo { q["lat"] = String(g.lat); q["lng"] = String(g.lng) }
+                if activeFilters.contains("Открыто") { q["open"] = "1" }
+                if activeFilters.contains("Бесплатная доставка") { q["free_delivery"] = "1" }
                 if orgType == "all" {
                     orgs = try await API.shared.list("api/v1/shops", query: q)
                 } else {
@@ -128,17 +163,21 @@ final class ListingViewModel: ObservableObject {
         loading = false
     }
 
-    /// Локальная сортировка/фильтрация организаций (клиентская — сервер сортировку по этим ключам не отдаёт).
+    /// Тот же фильтр и та же сортировка, что уже применил сервер. Проход
+    /// оставлен намеренно: на старом сервере без is_open / free_delivery /
+    /// avg_check / distance_km он просто ничего не отбрасывает.
     var sortedOrgs: [Shop] {
         var list = orgs
         if activeFilters.contains("Открыто") { list = list.filter { $0.isOpen ?? true } }
         if activeFilters.contains("4.5+") { list = list.filter { ($0.rating ?? 0) >= 4.5 } }
-        // TODO(API): «Бесплатная доставка» и «Ближе/Быстрее» требуют полей deliveryFee/lat в списке — их нет.
+        // nil = поля нет (старый сервер) → заведение не отбрасываем.
+        if activeFilters.contains("Бесплатная доставка") { list = list.filter { $0.freeDelivery ?? true } }
         switch sort {
         case .rating:   list.sort { ($0.rating ?? 0) > ($1.rating ?? 0) }
-        case .nearest:  break   // TODO(API): нет дистанции в списке организаций.
-        case .fastest:  break   // TODO(API): нет числового времени доставки в списке.
-        case .cheapest: break   // TODO(API): нет цены/чека в списке организаций.
+        // Без координат и без среднего чека — в конец списка, а не в начало.
+        case .nearest:  list.sort { ($0.distanceKm ?? .greatestFiniteMagnitude) < ($1.distanceKm ?? .greatestFiniteMagnitude) }
+        case .fastest:  list.sort { ($0.avgCookTime ?? Int.max) < ($1.avgCookTime ?? Int.max) }
+        case .cheapest: list.sort { ($0.avgCheck ?? .greatestFiniteMagnitude) < ($1.avgCheck ?? .greatestFiniteMagnitude) }
         }
         return list
     }
@@ -201,10 +240,17 @@ struct ListingView: View {
         .navigationBarHidden(true)
         .task {
             await vm.loadCategories()
+            // Координаты адреса доставки — до первой загрузки, чтобы сервер сразу
+            // вернул distance_km и сортировка «Ближе ко мне» работала с первого раза.
+            await vm.loadGeo()
             await vm.load()
         }
+        // Смена сортировки и набора фильтров — это НОВЫЙ запрос к серверу:
+        // он применяет их ко всей выборке, а не к загруженной странице.
+        .onChange(of: vm.sort) { _ in Task { await vm.load() } }
+        .onChange(of: vm.activeFilters) { _ in Task { await vm.load() } }
         .sheet(isPresented: $showSort) {
-            SortSheet(selection: $vm.sort)
+            SortSheet(selection: $vm.sort, options: vm.sortOptions)
                 .presentationDetents([.height(360)])
                 .presentationDragIndicator(.visible)
         }
@@ -559,8 +605,13 @@ struct SortSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: ListingSort
 
-    init(selection: Binding<ListingSort>) {
+    /// Доступные пункты: «Ближе ко мне» появляется только когда есть адрес
+    /// доставки, от которого считать расстояние.
+    let options: [ListingSort]
+
+    init(selection: Binding<ListingSort>, options: [ListingSort] = ListingSort.allCases) {
         _selection = selection
+        self.options = options
         _draft = State(initialValue: selection.wrappedValue)
     }
 
@@ -574,7 +625,7 @@ struct SortSheet: View {
                 .padding(.horizontal, YMSpace.xl)
 
             VStack(spacing: 0) {
-                ForEach(Array(ListingSort.allCases.enumerated()), id: \.element.id) { i, opt in
+                ForEach(Array(options.enumerated()), id: \.element.id) { i, opt in
                     Button {
                         Haptics.selection()
                         draft = opt
@@ -599,7 +650,7 @@ struct SortSheet: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    if i < ListingSort.allCases.count - 1 {
+                    if i < options.count - 1 {
                         Divider().overlay(YMColor.hairline).padding(.horizontal, YMSpace.xl)
                     }
                 }

@@ -26,6 +26,9 @@ final class AdFormViewModel: ObservableObject {
     @Published var phone = ""
     @Published var hidePhone = false
     @Published var address = ""
+    /// Город объявления. По умолчанию — тот, что выбран в приложении сейчас.
+    @Published var cityId: Int? = Session.shared.cityId
+    @Published var cities: [City] = []
     @Published var photos: [AdPhoto] = []
     @Published var balance: Decimal = 0
     @Published var adId = 0
@@ -51,6 +54,8 @@ final class AdFormViewModel: ObservableObject {
             cats = leaves(r.categories ?? []).map { (cat: $0.0, label: $0.1) }
         }
         if let w: WalletInfo = try? await API.shared.get("api/v1/wallet") { balance = w.balance ?? 0 }
+        if let list: [City] = try? await API.shared.list("api/v1/cities") { cities = list }
+        if (cityId ?? 0) <= 0 { cityId = nil }
         if editAdId > 0, let r = try? await API.shared.ad(editAdId), let a = r.ad {
             adId = editAdId
             title = a.title ?? ""
@@ -61,6 +66,7 @@ final class AdFormViewModel: ObservableObject {
             phone = a.contactPhone ?? ""
             hidePhone = a.phoneHidden ?? false
             address = a.address ?? ""
+            if let cid = a.cityId, cid > 0 { cityId = cid }
             photos = a.photos ?? []
             canChangeCategory = (a.status ?? "draft") == "draft"
             chosen = cats.first { $0.cat.stableId == (a.categoryId ?? 0) }?.cat
@@ -81,7 +87,8 @@ final class AdFormViewModel: ObservableObject {
             conditionNew: condition == 1 ? true : (condition == 0 ? false : nil),
             address: address.trimmingCharacters(in: .whitespaces).isEmpty ? nil : address,
             contactPhone: phone.trimmingCharacters(in: .whitespaces),
-            hidePhone: hidePhone
+            hidePhone: hidePhone,
+            cityId: cityId
         )
     }
 
@@ -235,6 +242,12 @@ struct AdFormView: View {
             Section("Контакты") {
                 TextField("Телефон для связи", text: $vm.phone).keyboardType(.phonePad)
                 Toggle("Показывать телефон только по кнопке", isOn: $vm.hidePhone)
+                Picker("Город", selection: $vm.cityId) {
+                    Text("Не указан").tag(Int?.none)
+                    ForEach(vm.cities) { city in
+                        Text(city.name ?? "").tag(Int?.some(city.id))
+                    }
+                }
                 TextField("Адрес или район (необязательно)", text: $vm.address)
             }
 

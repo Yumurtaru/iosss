@@ -35,9 +35,13 @@ private struct OrderBody: Encodable {
     let paymentType: String; let address: String?; let comment: String?
     let deliveryPrice: Double?
     let lat: Double?; let lng: Double?
+    /// Тумблер «оплатить баллами»: сервер сам спишет min(баланс, потолок).
+    /// Сумму на клиенте не считаем — источник правды один.
+    let spendPointsAll: Bool
     enum CodingKeys: String, CodingKey {
         case shopId = "shop_id", items, deliveryType = "delivery_type", paymentType = "payment_type",
-             address, comment, deliveryPrice = "delivery_price", lat, lng
+             address, comment, deliveryPrice = "delivery_price", lat, lng,
+             spendPointsAll = "spend_points_all"
     }
 }
 // Тело расчёта доставки (совпадает со старым клиентом).
@@ -72,16 +76,15 @@ private enum Fulfillment: String, CaseIterable, Hashable {
     }
 }
 
-// Способ оплаты. Значения apiValue — РОВНО те, что принимает сервер
-// (routes/api_v1.php): cash | card_courier.
-//
-// Раньше «Картой» отправляла paymentType="online", которого в белом списке
-// сервера НЕТ, — заказ молча записывался как наличные, и продавец с курьером
-// приезжали без терминала. Теперь это card_courier: «картой на месте», что и
-// значит эта кнопка. Онлайн-оплата картой — отдельная история (pay-online), и
-// когда её включат на площадке, она добавится сюда своим значением.
+// Способ оплаты при получении: «Наличные» или «Картой» курьеру/на месте.
+// Онлайн-оплаты на экране оформления нет — ни редиректа на ЮKassa, ни
+// подтверждения платежа, поэтому и значения соответствующие. Так же на Android.
 private enum Payment: String, CaseIterable, Hashable {
     case cash, card
+    // Значения из белого списка сервера: cash | card_courier | sbp | online_card
+    // (routes/api_v1.php). Всё прочее сервер молча заменяет на "cash" — и раньше
+    // "online" именно так и превращалось в наличные: человек выбирал «Картой»,
+    // а курьер приезжал за наличными.
     var apiValue: String { self == .card ? "card_courier" : "cash" }
     var title: String { self == .card ? "Картой" : "Наличные" }
 }
@@ -101,6 +104,15 @@ struct CheckoutView: View {
     @State private var comment = ""
     @State private var placing = false
     @State private var errorText: String?
+
+    // Движок акций и баллов: сервер считает ВСЁ (автоматические акции, подарки,
+    // бесплатную доставку, потолок списания баллов и начисление). Клиент только
+    // показывает результат. Раньше приложение об этом не знало вовсе: акция
+    // применялась молча при создании заказа, и человек до последнего экрана
+    // видел цену без скидки, а баллами заплатить было нельзя.
+    @State private var promo: PromoPreview?
+    @State private var spendPoints = false
+    @State private var promoTask: Task<Void, Never>?
     @State private var showAddAddress = false
 
     // Город из настроек — клиент его НЕ вводит (шапка «Ваш город»).
@@ -117,7 +129,44 @@ struct CheckoutView: View {
         return Money.parse(q.deliveryPrice ?? 0)
     }
     private var serviceFee: Decimal { Money.parse(Fees.service(subtotal: cart.total, shop: shop)) }
-    private var grandTotal: Decimal { max(0, subtotal + deliveryCost + serviceFee) }
+
+    // Итоги: если сервер посчитал акции — используем ЕГО числа, иначе прежний
+    // локальный расчёт (старый сервер, обрыв связи — оформление не блокируем).
+    private var freeDelivery: Bool { promo?.freeDelivery == true }
+    private var effectiveDelivery: Decimal { freeDelivery ? 0 : deliveryCost }
+    private var promoDiscount: Decimal { Money.parse(promo?.discount ?? 0) }
+    private var pointsSpent: Decimal { Money.parse(promo?.pointsSpent ?? 0) }
+    private var pointsEarned: Decimal { Money.parse(promo?.pointsEarned ?? 0) }
+    private var pointsMax: Decimal { Money.parse(promo?.pointsSpendMax ?? 0) }
+    private var grandTotal: Decimal {
+        max(0, subtotal + effectiveDelivery + serviceFee - promoDiscount - pointsSpent)
+    }
+
+    /// Пересчёт акций на сервере. Дебаунс 350 мс: зовётся на каждое изменение
+    /// корзины, способа получения, адреса и тумблера баллов.
+    private func refreshPromo() {
+        promoTask?.cancel()
+        guard let sid = cart.shopId, !cart.isEmpty else { promo = nil; return }
+        let body = PromoPreviewRequest(
+            shopId: sid,
+            items: cart.lines.map { PromoCartItem(productId: $0.productId, qty: $0.qty, modifiers: $0.modifierIds) },
+            deliveryType: fulfillment.apiValue,
+            deliveryPrice: NSDecimalNumber(decimal: deliveryCost).doubleValue,
+            promoCode: nil,
+            spendPoints: 0,
+            spendPointsAll: spendPoints
+        )
+        promoTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if Task.isCancelled { return }
+            let r: PromoPreview? = try? await API.shared.post("api/v1/cart/promo-preview", body: body)
+            await MainActor.run {
+                promo = r
+                // Списывать нечего — тумблер сам гаснет.
+                if (r?.pointsSpendMax ?? 0) <= 0 { spendPoints = false }
+            }
+        }
+    }
 
     // MARK: - Блокировка CTA (паритет с Android: outOfZone / noAddress / belowMin)
 
@@ -160,8 +209,14 @@ struct CheckoutView: View {
             if let slug = cart.shopSlug {
                 shop = try? await API.shared.get("api/v1/shops/\(slug)")
             }
+            refreshPromo()
         }
-        .onChange(of: fulfillment) { _ in Task { await quoteDelivery() } }
+        .onChange(of: fulfillment) { _ in Task { await quoteDelivery() }; refreshPromo() }
+        // Один параметр в onChange: двухпараметрический вариант — iOS 17, цель 16.0.
+        .onChange(of: cart.lines.count) { _ in refreshPromo() }
+        .onChange(of: cart.total) { _ in refreshPromo() }
+        .onChange(of: spendPoints) { _ in refreshPromo() }
+        .onChange(of: selectedAddress?.id) { _ in refreshPromo() }
     }
 
     // MARK: - Header «‹ Оформление»
@@ -217,6 +272,8 @@ struct CheckoutView: View {
                 YMSegmented(options: Payment.allCases, selection: $payment) { $0.title }
 
                 commentField.padding(.top, YMSpace.lg)
+
+                promoCard
 
                 totalsCard.padding(.top, YMSpace.lg)
 
@@ -342,7 +399,72 @@ struct CheckoutView: View {
         )
     }
 
-    // Итоги: Товары / Доставка / Сервисный сбор.
+    // Акции, подарки и списание баллов — то, что посчитал сервер.
+    // Карточки нет, если движок ничего не нашёл: экран остаётся прежним (и на
+    // старом сервере без ручки предпросмотра — тоже).
+    @ViewBuilder
+    private var promoCard: some View {
+        let applied = promo?.applied ?? []
+        let gifts = promo?.gifts ?? []
+        if !applied.isEmpty || !gifts.isEmpty || pointsMax > 0 {
+            VStack(alignment: .leading, spacing: 9) {
+                if !applied.isEmpty {
+                    Text("Акции").font(YMFont.headline).foregroundStyle(YMColor.text)
+                    ForEach(applied) { a in
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(a.name).font(.system(size: 13.5)).foregroundStyle(YMColor.text)
+                                if let d = a.description, !d.isEmpty {
+                                    Text(d).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            Text(promoBadge(a))
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .foregroundStyle(YMColor.accent)
+                        }
+                    }
+                }
+                if !gifts.isEmpty {
+                    Text("Подарки").font(YMFont.headline).foregroundStyle(YMColor.text)
+                    ForEach(gifts) { g in
+                        HStack {
+                            Text((g.name ?? "Подарок") + ((g.qty ?? 1) > 1 ? " ×\(Int(g.qty ?? 1))" : ""))
+                                .font(.system(size: 13.5)).foregroundStyle(YMColor.text)
+                            Spacer()
+                            Text("бесплатно").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(YMColor.accent)
+                        }
+                    }
+                }
+                if pointsMax > 0 {
+                    Toggle(isOn: $spendPoints) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Оплатить баллами").font(.system(size: 13.5)).foregroundStyle(YMColor.text)
+                            Text(spendPoints && pointsSpent > 0
+                                 ? "Списываем \(Money.format(pointsSpent))"
+                                 : "Доступно до \(Money.format(pointsMax))")
+                                .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        }
+                    }
+                    .tint(YMColor.accent)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(YMSpace.lg)
+            .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+            .padding(.top, YMSpace.lg)
+        }
+    }
+
+    private func promoBadge(_ a: AppliedPromo) -> String {
+        if let d = a.discount, d > 0 { return "−" + Money.format(Money.parse(d)) }
+        if a.freeDelivery == true { return "доставка бесплатно" }
+        if let p = a.points, p > 0 { return "+" + Money.format(Money.parse(p)) + " баллов" }
+        return ""
+    }
+
+    // Итоги: Товары / Доставка / Сервисный сбор / Скидка / Баллы.
     private var totalsCard: some View {
         VStack(spacing: 9) {
             totalRow("Товары (\(cart.count))", Money.format(subtotal))
@@ -352,6 +474,15 @@ struct CheckoutView: View {
             if serviceFee > 0 {
                 totalRow("Сервисный сбор", Money.format(serviceFee))
             }
+            if promoDiscount > 0 {
+                totalRow("Скидка по акции", "−" + Money.format(promoDiscount), accent: true)
+            }
+            if pointsSpent > 0 {
+                totalRow("Оплачено баллами", "−" + Money.format(pointsSpent), accent: true)
+            }
+            if pointsEarned > 0 {
+                totalRow("Вернётся баллами", Money.format(pointsEarned), accent: true)
+            }
         }
         .padding(YMSpace.lg)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -359,16 +490,18 @@ struct CheckoutView: View {
     }
 
     private var deliveryLabel: String {
+        if freeDelivery { return "бесплатно" }
         guard let q = quote else { return "уточняется" }
         if !q.available { return "недоступна" }
         return deliveryCost <= 0 ? "бесплатно" : Money.format(deliveryCost)
     }
 
-    private func totalRow(_ label: String, _ value: String) -> some View {
+    private func totalRow(_ label: String, _ value: String, accent: Bool = false) -> some View {
         HStack {
-            Text(label).font(.system(size: 13.5)).foregroundStyle(YMColor.muted)
+            Text(label).font(.system(size: 13.5)).foregroundStyle(accent ? YMColor.accent : YMColor.muted)
             Spacer()
-            Text(value).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(YMColor.muted)
+            Text(value).font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(accent ? YMColor.accent : YMColor.muted)
         }
     }
 
@@ -440,7 +573,9 @@ struct CheckoutView: View {
             "api/v1/delivery/quote",
             body: QuoteBody(shopId: sid, lat: la, lng: lo, subtotal: cart.total)
         )
-        await MainActor.run { quote = q }
+        // Пересчёт акций — ПОСЛЕ расчёта доставки: движок должен видеть её цену
+        // (иначе акция «бесплатная доставка от N» не сработает).
+        await MainActor.run { quote = q; refreshPromo() }
     }
 
     // Полный адрес курьеру: город/улица/дом + доп. поля из выбранного адреса.
@@ -484,12 +619,13 @@ struct CheckoutView: View {
         let body = OrderBody(
             shopId: shopId, items: items,
             deliveryType: fulfillment.apiValue,
-            paymentType: payment.apiValue,   // "cash" | "card_courier"
+            paymentType: payment.apiValue,   // "cash" | "online" («Картой» → online)
             address: fulfillment == .delivery ? composedAddress() : nil,
             comment: trimmed.isEmpty ? nil : trimmed,
             deliveryPrice: dp,
             lat: fulfillment == .delivery ? selectedAddress?.lat : nil,
-            lng: fulfillment == .delivery ? selectedAddress?.lng : nil
+            lng: fulfillment == .delivery ? selectedAddress?.lng : nil,
+            spendPointsAll: spendPoints
         )
 
         Task {

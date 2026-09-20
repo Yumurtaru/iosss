@@ -364,7 +364,12 @@ struct ProfileView: View {
         // TODO(API): эндпоинт удаления аккаунта (напр. DELETE api/v1/profile) в контракте
         // ещё не подтверждён. Пока — graceful: пытаемся вызвать, при отсутствии просто выходим.
         Task {
-            try? await API.shared.deleteVoid("api/v1/profile")
+            // Маршрут удаления — DELETE /api/v1/account (routes/api_v1.php).
+            // Раньше здесь стоял "api/v1/profile": такого метода у этого пути
+            // нет, ошибка гасилась `try?`, и человека просто разлогинивало —
+            // аккаунт и данные оставались на сервере. Для App Store это ещё и
+            // невыполненное обещание «удалить аккаунт».
+            try? await API.shared.deleteVoid("api/v1/account")
             await MainActor.run { session.signOut(); profile = nil }
         }
     }

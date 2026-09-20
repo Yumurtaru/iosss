@@ -48,7 +48,10 @@ enum OrderStatus {
             case "shop":    return "Собран"
             default:        return "Готов"
             }
-        case "delivering": return "Доставляется"
+        // Канон сервера — in_delivery (routes/api_v1.php, orderStatusTitles).
+        // "delivering" оставляем для совместимости со старыми ответами; без
+        // in_delivery экран показывал человеку сырой код статуса.
+        case "in_delivery", "delivering": return "В пути"
         case "done", "delivered", "completed":
             return shopType == "service" ? "Завершена" : "Выполнен"
         case "cancelled", "canceled": return "Отменён"

@@ -23,6 +23,9 @@ final class AdsBoardViewModel: ObservableObject {
     @Published var total = 0
     @Published var query = ""
     @Published var categoryId = 0
+    /// Режим «Избранное»: та же лента, но из api/v1/ads/favorites. Сердечко на
+    /// карточке было, а посмотреть сохранённое было негде.
+    @Published var favOnly = false
 
     private var page = 1
     private var pages = 1
@@ -45,7 +48,10 @@ final class AdsBoardViewModel: ObservableObject {
     func load(reset: Bool) async {
         if reset { loading = items.isEmpty; page = 1 } else { loadingMore = true }
         do {
-            let r = try await API.shared.ads(categoryId: categoryId, q: query, page: reset ? 1 : page + 1)
+            let next = reset ? 1 : page + 1
+            let r = favOnly
+                ? try await API.shared.adFavorites(page: next)
+                : try await API.shared.ads(categoryId: categoryId, q: query, page: next)
             enabled = r.enabled ?? true
             total = r.total ?? 0
             pages = max(1, r.pages ?? 1)
@@ -75,6 +81,14 @@ final class AdsBoardViewModel: ObservableObject {
 
     func pick(_ id: Int) {
         categoryId = id
+        Task { await load(reset: true) }
+    }
+
+    /// Переключить ленту «все / избранные». Поиск и категорию сбрасываем:
+    /// в избранном фильтров нет.
+    func toggleFavorites() {
+        favOnly.toggle()
+        query = ""; categoryId = 0
         Task { await load(reset: true) }
     }
 }
@@ -109,9 +123,21 @@ struct AdsBoardView: View {
                 }
             }
             .background(YMColor.bg.ignoresSafeArea())
-            .navigationTitle("Объявления")
+            .navigationTitle(vm.favOnly ? "Избранные" : "Объявления")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // Избранное доступно только вошедшим: ручка требует токен.
+                if Session.shared.isLoggedIn {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button {
+                            Haptics.selection()
+                            vm.toggleFavorites()
+                        } label: {
+                            Image(systemName: vm.favOnly ? "heart.fill" : "heart")
+                        }
+                        .accessibilityLabel(vm.favOnly ? "Все объявления" : "Избранные объявления")
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     NavigationLink(value: AdsRoute.my) { Text("Мои") }
                 }
@@ -144,11 +170,17 @@ struct AdsBoardView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: YMSpace.md) {
-                    searchField
-                    categoryRow
+                    if !vm.favOnly {
+                        searchField
+                        categoryRow
+                    }
                     if vm.items.isEmpty {
-                        AdsEmptyView(title: "Ничего не нашлось",
-                                     subtitle: "Измените запрос или подайте своё объявление.")
+                        AdsEmptyView(
+                            title: vm.favOnly ? "В избранном пусто" : "Ничего не нашлось",
+                            subtitle: vm.favOnly
+                                ? "Нажмите сердечко на карточке объявления — оно появится здесь."
+                                : "Измените запрос или подайте своё объявление."
+                        )
                             .frame(height: 260)
                     } else {
                         if vm.total > 0 {

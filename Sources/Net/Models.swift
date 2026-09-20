@@ -74,6 +74,17 @@ struct Shop: Codable, Identifiable, Hashable {
     /// «На месте и с выездом». Собирается на сервере, чтобы сайт, Android и iOS
     /// писали одно и то же и формулировку можно было менять без пересборки.
     let fulfillmentLabel: String?
+    /// Витринные признаки для фильтров и сортировок (аддитивно, Фаза 4).
+    /// Раньше чипы «Бесплатная доставка» и сортировки «Ближе ко мне» /
+    /// «Сначала недорогие» были нарисованы, но не работали: таких полей в
+    /// ответе не было вовсе.
+    ///   freeDelivery — есть зона доставки с нулевой ценой;
+    ///   avgCheck     — средний чек за 90 дней (или средняя цена товара);
+    ///   distanceKm   — расстояние от адреса доставки, если мы его прислали.
+    /// Старый сервер полей не шлёт → nil, и чип ничего не отбрасывает.
+    @LenientBool var freeDelivery: Bool?
+    @LenientDouble var avgCheck: Double?
+    @LenientDouble var distanceKm: Double?
 }
 // Категория организации (магазин/услуга). Ключи snake_case декодируются авто-конвертером — CodingKeys НЕ добавляем.
 struct OrgCategory: Codable, Identifiable, Hashable {
@@ -348,9 +359,30 @@ struct OrderDetail: Codable, Identifiable {
     @LenientInt var rev: Int?
     let changes: [OrderChange]?
 }
+/// GET api/v1/orders/{id}/track.
+///
+/// Сервер отдаёт положение курьера ВЛОЖЕННЫМ объектом:
+///   {"status":"in_delivery","courier":{"lat":55.7,"lng":37.6,"updated_at":"…"},"eta_minutes":7}
+/// Раньше здесь ждали плоские courier_lat / courier_lng — таких ключей в ответе
+/// нет и не было, поэтому метка курьера на карте не появлялась ни разу.
+/// Имя и телефон курьера ручка сейчас не отдаёт: поля объявлены опциональными,
+/// чтобы блок «Позвонить курьеру» заработал сам, когда сервер начнёт их слать.
 struct TrackData: Codable {
-    let status: String?; @LenientDouble var courierLat: Double?; @LenientDouble var courierLng: Double?
-    let courierName: String?; let courierPhone: String?; @LenientInt var etaMinutes: Int?
+    struct CourierLoc: Codable {
+        @LenientDouble var lat: Double?
+        @LenientDouble var lng: Double?
+        let updatedAt: String?
+        let name: String?
+        let phone: String?
+    }
+    let status: String?
+    let courier: CourierLoc?
+    @LenientInt var etaMinutes: Int?
+
+    var courierLat: Double? { courier?.lat }
+    var courierLng: Double? { courier?.lng }
+    var courierName: String? { courier?.name }
+    var courierPhone: String? { courier?.phone }
 }
 struct ChatMessage: Codable, Identifiable {
     @LenientInt var id: Int?; let message: String?; let sender: String?; let createdAt: String?
@@ -440,6 +472,8 @@ struct AdCard: Codable, Identifiable, Hashable {
     @LenientInt var categoryId: Int?
     var categoryName: String?
     var city: String?
+    // Нужен форме правки, чтобы подставить город объявления в список.
+    @LenientInt var cityId: Int?
     var photo: String?
     var photoThumb: String?
     @LenientInt var photosCount: Int?
@@ -484,6 +518,8 @@ struct AdDetail: Codable, Identifiable {
     @LenientInt var categoryId: Int?
     var categoryName: String?
     var city: String?
+    // Нужен форме правки, чтобы подставить город объявления в список.
+    @LenientInt var cityId: Int?
     var status: String?
     @LenientInt var viewsCount: Int?
     var publishedAt: String?
@@ -521,6 +557,10 @@ struct AdSaveBody: Encodable {
     let address: String?
     let contactPhone: String
     let hidePhone: Bool
+    // Сервер поле принимал всегда, но приложение его не слало: город брался из
+    // профиля, и объявление о гараже в соседнем городе туда положить было
+    // нельзя — при том что фильтр по городу в ленте есть.
+    let cityId: Int?
 }
 struct AdCreatedResponse: Codable {
     @LenientInt var adId: Int?

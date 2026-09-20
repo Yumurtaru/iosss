@@ -275,7 +275,10 @@ final class API {
     }
     func ad(_ id: Int) async throws -> AdDetailResponse { try await get("api/v1/ads/\(id)") }
     func myAds() async throws -> MyAdsResponse { try await get("api/v1/ads/my") }
-    func adFavorites() async throws -> AdsFeedResponse { try await get("api/v1/ads/favorites") }
+    /// Избранные объявления. Постранично — как обычная лента.
+    func adFavorites(page: Int = 1) async throws -> AdsFeedResponse {
+        try await get("api/v1/ads/favorites", query: ["page": String(page)])
+    }
     func adCreate(_ body: AdSaveBody) async throws -> AdCreatedResponse { try await post("api/v1/ads", body: body) }
     func adUpdate(_ id: Int, _ body: AdSaveBody) async throws { try await putVoid("api/v1/ads/\(id)", body: body) }
     func adPublish(_ id: Int) async throws -> AdPublishResponse { try await post("api/v1/ads/\(id)/publish") }
