@@ -12,8 +12,14 @@ enum MoneyLegacy {
 }
 
 enum DateFmt {
+    /// Сервер отдаёт «2026-09-10 14:03:00» БЕЗ смещения, своим временем
+    /// (Europe/Moscow). Без явного пояса строка разбиралась в поясе телефона, и
+    /// одно и то же время в карточке заказа и в чате по этому же заказу
+    /// показывалось по-разному: чат пояс задаёт, а этот форматтер — нет.
     private static let iso: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss"; f.locale = Locale(identifier: "ru_RU"); return f
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss"; f.locale = Locale(identifier: "ru_RU")
+        f.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
+        return f
     }()
     static func short(_ s: String?) -> String {
         guard let s = s, let date = iso.date(from: s) else { return s ?? "" }

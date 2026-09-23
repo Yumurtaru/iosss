@@ -197,6 +197,7 @@ private final class ChatThreadViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var loading = true
     @Published var sending = false
+    @Published var sendError: String?
 
     private var lastChatId = 0
     private var pollTimer: Timer?
@@ -231,12 +232,22 @@ private final class ChatThreadViewModel: ObservableObject {
     }
     func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
 
-    func send(_ text: String) async {
+    /// true — отправлено. Раньше ошибка (сеть, лимит, 404) глушилась try?,
+    /// а текст уже был стёрт из поля — сообщение пропадало без следа.
+    @discardableResult
+    func send(_ text: String) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return true }
         sending = true; defer { sending = false }
-        try? await API.shared.postVoid("api/v1/orders/\(orderId)/chat", body: ["message": trimmed])
+        do {
+            try await API.shared.postVoid("api/v1/orders/\(orderId)/chat", body: ["message": trimmed])
+        } catch {
+            sendError = (error as? LocalizedError)?.errorDescription ?? "Сообщение не отправлено"
+            return false
+        }
+        sendError = nil
         await fetchNew()
+        return true
     }
 
     /// Отправка фото с оптимистичным превью (localImage) + статусом «отправляется/ошибка».
@@ -282,7 +293,7 @@ private struct ChatThreadScreen: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .principal) { headerTitle } }
-        .task { await vm.initialLoad(); vm.startPolling() }
+        .task { await vm.initialLoad(); if !Task.isCancelled { vm.startPolling() } }   // экран успели закрыть — опрос не запускаем
         .onDisappear { vm.stopPolling() }
     }
 
@@ -376,7 +387,7 @@ private struct ChatThreadScreen: View {
 
             Button {
                 let text = draft; draft = ""
-                Task { await vm.send(text) }
+                Task { if !(await vm.send(text)) { draft = text } }   // не отправилось — возвращаем текст в поле
             } label: {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 18, weight: .heavy)).foregroundStyle(YMColor.onAccent)
@@ -392,11 +403,16 @@ private struct ChatThreadScreen: View {
         .padding(.horizontal, YMSpace.lg)
         .padding(.vertical, YMSpace.sm)
         .background(.ultraThinMaterial)
+        .alert(vm.sendError ?? "", isPresented: Binding(
+            get: { vm.sendError != nil },
+            set: { if !$0 { vm.sendError = nil } }
+        )) { Button("OK", role: .cancel) {} }
         .onChange(of: photoItems) { _ in
             guard let item = photoItems.first else { return }
             Task {
-                if let data = try? await item.loadTransferable(type: Data.self) {
-                    await vm.sendPhoto(data)
+                if let raw = try? await item.loadTransferable(type: Data.self) {
+                    // HEIC с камеры сервер не принимает — отправляем JPEG.
+                    await vm.sendPhoto(ImageUpload.jpeg(from: raw) ?? raw)
                 }
                 photoItems = []
             }

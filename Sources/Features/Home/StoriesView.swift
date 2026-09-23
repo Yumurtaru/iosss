@@ -194,7 +194,9 @@ private struct StoriesPlayer: View {
                 Spacer()
 
                 // Кнопка «Подробнее» — если у баннера есть ссылка.
-                if let link = current?.link, let url = URL(string: link) {
+                // Только веб-ссылки и ссылки самого приложения — не произвольные схемы.
+                if let link = current?.link, let url = URL(string: link),
+                   ["https", "http", "yumurta"].contains(url.scheme?.lowercased() ?? "") {
                     Button {
                         close(); openURL(url)
                     } label: {

@@ -301,6 +301,11 @@ struct OrdersView: View {
                 }
             }
             .padding(.horizontal, YMSpace.xl)
+        } else if vm.loadFailed && vm.orders.isEmpty {
+            // Сбой загрузки — это НЕ «заказов нет». Раньше человек в метро
+            // открывал «Заказы» во время доставки и видел «Активных заказов
+            // нет»: решал, что заказ потерян, и звонил в поддержку.
+            ordersErrorState
         } else {
             let list = tab == .active ? vm.active : vm.history
             if list.isEmpty {
@@ -316,6 +321,26 @@ struct OrdersView: View {
                 }
             }
         }
+    }
+
+    private var ordersErrorState: some View {
+        VStack(spacing: YMSpace.lg) {
+            Text("⚠️").font(.system(size: 44))
+            Text("Не удалось загрузить заказы")
+                .font(YMFont.title3).foregroundStyle(YMColor.text)
+            Text("Заказы на месте — их просто не удалось получить. Проверьте соединение и попробуйте ещё раз.")
+                .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                .multilineTextAlignment(.center)
+            Button { Task { await vm.load() } } label: {
+                Text("Повторить").font(.system(size: 14.5, weight: .heavy)).foregroundStyle(YMColor.accent)
+                    .padding(.horizontal, YMSpace.xxl).padding(.vertical, 12)
+                    .background(YMColor.accent.opacity(0.14), in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, YMSpace.xxxl)
+        .padding(.top, 72)
     }
 
     private func emptyState(icon: String, title: String, hint: String) -> some View {

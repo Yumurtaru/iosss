@@ -25,7 +25,19 @@ enum LodgingDate {
         return f
     }()
 
-    static var today: String { api.string(from: Date()) }
+    /// «Сегодня» — по времени ПЛОЩАДКИ (Europe/Moscow), а не по UTC и не по
+    /// поясу телефона: прошедшие даты сервер отсекает своим `date()`, и с
+    /// полуночи до трёх ночи по Москве UTC-«сегодня» — это вчера (поиск сразу
+    /// отвечал «эти даты уже прошли»).
+    private static let apiMoscow: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Europe/Moscow") ?? TimeZone(identifier: "UTC")!
+        return f
+    }()
+
+    static var today: String { apiMoscow.string(from: Date()) }
 
     static func plusDays(_ iso: String, _ days: Int) -> String {
         guard let d = api.date(from: iso) else { return iso }

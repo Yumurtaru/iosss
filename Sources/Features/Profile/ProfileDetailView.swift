@@ -275,8 +275,17 @@ private struct AddAddressView: View {
                                intercom: intercom.isEmpty ? nil : intercom,
                                lat: lat, lng: lng)
         Task {
-            try? await API.shared.postVoid("api/v1/profile/addresses", body: body)
-            await MainActor.run { Haptics.success(); dismiss() }
+            // Раньше ошибка (лимит 50 адресов, нет сети) глушилась, а окно
+            // закрывалось так, будто адрес сохранён.
+            do {
+                try await API.shared.postVoid("api/v1/profile/addresses", body: body)
+                await MainActor.run { Haptics.success(); dismiss() }
+            } catch {
+                await MainActor.run {
+                    saving = false
+                    self.error = (error as? LocalizedError)?.errorDescription ?? "Не удалось сохранить адрес"
+                }
+            }
         }
     }
 }
@@ -349,6 +358,7 @@ struct BookingsView: View {
     @State private var upcoming: [BookingItem] = []
     @State private var past: [BookingItem] = []
     @State private var loading = true
+    @State private var cancelError: String?
 
     private var current: [BookingItem] { tab == .upcoming ? upcoming : past }
 
@@ -382,6 +392,10 @@ struct BookingsView: View {
         .navigationTitle("Мои записи")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
+        .alert(cancelError ?? "", isPresented: Binding(
+            get: { cancelError != nil },
+            set: { if !$0 { cancelError = nil } }
+        )) { Button("OK", role: .cancel) {} }
     }
 
     private var emptyState: some View {
@@ -411,7 +425,10 @@ struct BookingsView: View {
     /// (POST api/v1/orders/{id}/cancel → releaseServiceSlotForOrder).
     private func cancel(_ b: BookingItem) async {
         guard let oid = b.orderId else { return }
-        try? await API.shared.postVoid("api/v1/orders/\(oid)/cancel")
+        // «Заказ уже готовится — отмена недоступна» и сетевые ошибки раньше
+        // глушились: список просто перезагружался, запись оставалась.
+        do { try await API.shared.postVoid("api/v1/orders/\(oid)/cancel") }
+        catch { cancelError = (error as? LocalizedError)?.errorDescription ?? "Не удалось отменить запись" }
         await load()
     }
 }

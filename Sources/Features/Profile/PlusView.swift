@@ -27,6 +27,8 @@ struct PlusInfo: Decodable {
     @LenientDecimal var priceMonth: Decimal?
     @LenientDouble var cashbackBonus: Double?
     let benefits: [String]?
+    /// false — оформление выключено на сервере; кнопку не показываем.
+    let available: Bool?
 }
 /// Ответ POST api/v1/plus/activate.
 struct PlusActivateResp: Decodable {
@@ -82,7 +84,14 @@ struct PlusView: View {
                         .foregroundStyle(YMColor.accent)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                subscribeButton(i)
+                if i.available == false {
+                    Text("Оформление подписки сейчас недоступно")
+                        .font(YMFont.subhead)
+                        .foregroundStyle(YMColor.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    subscribeButton(i)
+                }
             }
             .padding(.horizontal, YMSpace.xl)
             .padding(.top, YMSpace.sm)

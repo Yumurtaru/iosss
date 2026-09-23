@@ -21,10 +21,14 @@ final class DeepLinkRouter: ObservableObject {
         } else if let idx = parts.firstIndex(of: "shop"), idx + 1 < parts.count { // https://.../shop/СЛАГ
             shopSlug = parts[idx + 1]
         }
-        if let slug = shopSlug, !slug.isEmpty {
+        // Слаг идёт прямо в путь запроса к API — пускаем только «правильные»
+        // (латиница, цифры, дефис). Ссылка из письма или QR с %3F, %2F или
+        // пробелом раньше меняла адрес запроса или роняла приложение.
+        if let slug = shopSlug, slug.range(of: "^[A-Za-z0-9_-]{1,120}$", options: .regularExpression) != nil {
             DispatchQueue.main.async { NavCoordinator.shared.openOrg(slug: slug) }
             return
         }
+        if shopSlug != nil { return }
         var code: String?
         if url.host == "r", let first = parts.first {            // yumurta://r/КОД
             code = first

@@ -30,19 +30,54 @@ private struct OrderItemBody: Encodable {
     let productId: Int; let qty: Double; let modifiers: [Int]?
     enum CodingKeys: String, CodingKey { case productId = "product_id", qty, modifiers }
 }
+/// Адрес доставки — ОБЪЕКТОМ, 1:1 с AddressReq Android-клиента.
+///
+/// Раньше сюда уходила готовая строка. Сервер кладёт значение в
+/// orders.address_json как есть, а панель продавца и приложение курьера читают
+/// из него поля (city/street/house/apartment): из строки они получали
+/// undefined, и адрес доставки у продавца и курьера был ПУСТОЙ. Плюс сервер не
+/// находил в адресе координаты и никогда не считал время в пути (eta_minutes).
+private struct OrderAddressBody: Encodable {
+    let label: String?
+    let city: String?
+    let street: String?
+    let house: String?
+    let apartment: String?
+    let entrance: String?
+    let floor: String?
+    let intercom: String?
+    let lat: Double?
+    let lng: Double?
+}
 private struct OrderBody: Encodable {
     let shopId: Int; let items: [OrderItemBody]; let deliveryType: String
-    let paymentType: String; let address: String?; let comment: String?
+    let paymentType: String; let address: OrderAddressBody?; let comment: String?
     let deliveryPrice: Double?
     let lat: Double?; let lng: Double?
     /// Тумблер «оплатить баллами»: сервер сам спишет min(баланс, потолок).
     /// Сумму на клиенте не считаем — источник правды один.
     let spendPointsAll: Bool
+    /// Ключ идемпотентности (один на экран оформления): если ответ на создание
+    /// заказа потерялся по таймауту, повторное нажатие вернёт уже созданный
+    /// заказ, а не создаст второй.
+    let idempotencyKey: String
+    /// Номер стола для «За столик» и промокод (аддитивно; сервер принимает оба,
+    /// Android их уже шлёт). Nil-поля в JSON не попадают.
+    let tableNumber: String?
+    let promoCode: String?
     enum CodingKeys: String, CodingKey {
         case shopId = "shop_id", items, deliveryType = "delivery_type", paymentType = "payment_type",
              address, comment, deliveryPrice = "delivery_price", lat, lng,
-             spendPointsAll = "spend_points_all"
+             spendPointsAll = "spend_points_all", idempotencyKey = "idempotency_key",
+             tableNumber = "table_number", promoCode = "promo_code"
     }
+}
+/// Ответ POST api/v1/promo/check.
+private struct PromoCheckResult: Decodable {
+    @LenientDecimal var discount: Decimal?
+    let type: String?
+    // Ключи без CodingKeys: декодер API сам переводит free_delivery → freeDelivery.
+    let freeDelivery: Bool?
 }
 // Тело расчёта доставки (совпадает со старым клиентом).
 private struct QuoteBody: Encodable { let shopId: Int; let lat: Double; let lng: Double; let subtotal: Double
@@ -101,9 +136,16 @@ struct CheckoutView: View {
     @State private var selectedAddress: Address?
     @State private var shop: ShopDetail?
     @State private var quote: DeliveryQuote?
+    /// Сумма товаров, по которой считан quote (после скидок и баллов).
+    @State private var quotedGoods: Double?
     @State private var comment = ""
     @State private var placing = false
+    @State private var idemKey = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     @State private var errorText: String?
+    /// Почему не посчиталась доставка (обрыв связи, 5xx). Раньше ошибка
+    /// проглатывалась: кнопка «Оформить заказ» просто становилась серой и
+    /// молчала — человек жал в неё и не понимал, что происходит.
+    @State private var quoteError: String?
 
     // Движок акций и баллов: сервер считает ВСЁ (автоматические акции, подарки,
     // бесплатную доставку, потолок списания баллов и начисление). Клиент только
@@ -114,6 +156,15 @@ struct CheckoutView: View {
     @State private var spendPoints = false
     @State private var promoTask: Task<Void, Never>?
     @State private var showAddAddress = false
+    // «За столик»: номер стола уходит в заказ (раньше не отправлялся вовсе).
+    @State private var tableNumber = ""
+    // Промокод: проверка через api/v1/promo/check, код уходит в заказ.
+    @State private var promoInput = ""
+    @State private var appliedCode: String?
+    @State private var codeDiscount: Decimal = 0
+    @State private var codeFree = false
+    @State private var codeMsg: String?
+    @State private var checkingCode = false
 
     // Город из настроек — клиент его НЕ вводит (шапка «Ваш город»).
     private var cityName: String { Session.shared.cityName ?? "" }
@@ -132,14 +183,47 @@ struct CheckoutView: View {
 
     // Итоги: если сервер посчитал акции — используем ЕГО числа, иначе прежний
     // локальный расчёт (старый сервер, обрыв связи — оформление не блокируем).
-    private var freeDelivery: Bool { promo?.freeDelivery == true }
+    private var freeDelivery: Bool { promo?.freeDelivery == true || (appliedCode != nil && codeFree) }
     private var effectiveDelivery: Decimal { freeDelivery ? 0 : deliveryCost }
     private var promoDiscount: Decimal { Money.parse(promo?.discount ?? 0) }
     private var pointsSpent: Decimal { Money.parse(promo?.pointsSpent ?? 0) }
     private var pointsEarned: Decimal { Money.parse(promo?.pointsEarned ?? 0) }
     private var pointsMax: Decimal { Money.parse(promo?.pointsSpendMax ?? 0) }
+    /// Скидка промокода (не больше суммы товаров — как на сервере).
+    private var codeOff: Decimal { appliedCode == nil ? 0 : min(codeDiscount, subtotal) }
     private var grandTotal: Decimal {
-        max(0, subtotal + effectiveDelivery + serviceFee - promoDiscount - pointsSpent)
+        max(0, subtotal + effectiveDelivery + serviceFee - promoDiscount - codeOff - pointsSpent)
+    }
+
+    /// Проверить/применить промокод. silent — перепроверка после изменения корзины.
+    private func applyCode(_ raw: String, silent: Bool = false) async {
+        let code = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty, let sid = cart.shopId else { return }
+        await MainActor.run { checkingCode = true; if !silent { codeMsg = nil } }
+        let subtotalD = NSDecimalNumber(decimal: subtotal).doubleValue
+        do {
+            let r: PromoCheckResult = try await API.shared.post(
+                "api/v1/promo/check", body: PromoCheckBody(code: code, subtotal: subtotalD, shopId: sid))
+            await MainActor.run {
+                checkingCode = false
+                let d = r.discount ?? 0
+                if d > 0 || r.freeDelivery == true {
+                    appliedCode = code; codeDiscount = d; codeFree = r.freeDelivery == true
+                    codeMsg = r.freeDelivery == true ? "Промокод применён: бесплатная доставка" : "Промокод применён: −" + Money.format(d)
+                } else {
+                    appliedCode = nil; codeDiscount = 0; codeFree = false
+                    codeMsg = "Промокод не даёт скидки на этот заказ"
+                }
+                refreshPromo()
+            }
+        } catch {
+            await MainActor.run {
+                checkingCode = false
+                appliedCode = nil; codeDiscount = 0; codeFree = false
+                codeMsg = (error as? LocalizedError)?.errorDescription ?? "Промокод не подошёл"
+                refreshPromo()
+            }
+        }
     }
 
     /// Пересчёт акций на сервере. Дебаунс 350 мс: зовётся на каждое изменение
@@ -152,7 +236,7 @@ struct CheckoutView: View {
             items: cart.lines.map { PromoCartItem(productId: $0.productId, qty: $0.qty, modifiers: $0.modifierIds) },
             deliveryType: fulfillment.apiValue,
             deliveryPrice: NSDecimalNumber(decimal: deliveryCost).doubleValue,
-            promoCode: nil,
+            promoCode: appliedCode,
             spendPoints: 0,
             spendPointsAll: spendPoints
         )
@@ -164,6 +248,11 @@ struct CheckoutView: View {
                 promo = r
                 // Списывать нечего — тумблер сам гаснет.
                 if (r?.pointsSpendMax ?? 0) <= 0 { spendPoints = false }
+                // Скидка/баллы изменили оплачиваемую сумму — пересчитываем доставку:
+                // «бесплатно от» и минимум считаются от неё (как на сервере).
+                if fulfillment == .delivery, quote != nil, let qg = quotedGoods, abs(qg - goodsForQuote) >= 0.01 {
+                    Task { await quoteDelivery() }
+                }
             }
         }
     }
@@ -183,8 +272,36 @@ struct CheckoutView: View {
     private var belowMin: Bool {
         fulfillment == .delivery && quote?.belowMin == true
     }
+    // Доставка ещё не посчитана (быстрое нажатие или сбой расчёта): раньше
+    // заказ уходил с «Доставка: уточняется» и итогом без доставки, а сервер
+    // добавлял цену зоны — человек платил больше, чем подтвердил.
+    private var quoteMissing: Bool {
+        fulfillment == .delivery && !noAddress && quote == nil
+    }
+    /// Способы получения, которые заведение реально принимает. Сервер отдаёт
+    /// их в карточке (`fulfillment`), а раньше экран всегда рисовал все три и
+    /// отказ приходил на последнем шаге: «Способ „Доставка“ сейчас недоступен».
+    private var allowedFulfillment: [Fulfillment] {
+        guard let list = shop?.fulfillment, !list.isEmpty else { return Fulfillment.allCases }
+        let allowed = Fulfillment.allCases.filter { list.contains($0.apiValue) }
+        return allowed.isEmpty ? Fulfillment.allCases : allowed
+    }
+    /// Способы оплаты, которые принимает заведение (аналогично).
+    private var allowedPayments: [Payment] {
+        guard let list = shop?.paymentMethods, !list.isEmpty else { return Payment.allCases }
+        let allowed = Payment.allCases.filter { list.contains($0.apiValue) }
+        return allowed.isEmpty ? Payment.allCases : allowed
+    }
+    /// Заведение закрыто прямо сейчас (считает сервер — часы работы заданы его
+    /// временем, а не временем телефона).
+    private var shopClosed: Bool { shop?.isOpen == false }
+
     private var ctaEnabled: Bool {
-        !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin
+        // shopClosed — сервер всё равно откажет («Заведение сейчас закрыто —
+        // оформите предзаказ»), а предзаказ приложение не отправляет. Активная
+        // кнопка под надписью «заказ можно оформить, когда откроется» только
+        // путала бы человека.
+        !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin && !quoteMissing && !shopClosed
     }
 
     var body: some View {
@@ -207,14 +324,28 @@ struct CheckoutView: View {
         .task {
             await loadAddresses()
             if let slug = cart.shopSlug {
-                shop = try? await API.shared.get("api/v1/shops/\(slug)")
+                let loaded: ShopDetail? = try? await API.shared.get("api/v1/shops/\(slug)")
+                await MainActor.run { shop = loaded }
+                // Если заведение не принимает выбранный по умолчанию способ
+                // (доставка/наличные) — сразу переключаемся на доступный, а не
+                // ведём человека через весь экран к отказу сервера.
+                await MainActor.run {
+                    let fs = allowedFulfillment
+                    if !fs.contains(fulfillment), let first = fs.first { fulfillment = first }
+                    let ps = allowedPayments
+                    if !ps.contains(payment), let first = ps.first { payment = first }
+                }
             }
             refreshPromo()
         }
         .onChange(of: fulfillment) { _ in Task { await quoteDelivery() }; refreshPromo() }
         // Один параметр в onChange: двухпараметрический вариант — iOS 17, цель 16.0.
         .onChange(of: cart.lines.count) { _ in refreshPromo() }
-        .onChange(of: cart.total) { _ in refreshPromo() }
+        .onChange(of: cart.total) { _ in
+            refreshPromo()
+            // Скидка кода считается от суммы корзины — перепроверяем тихо.
+            if let c = appliedCode { Task { await applyCode(c, silent: true) } }
+        }
         .onChange(of: spendPoints) { _ in refreshPromo() }
         .onChange(of: selectedAddress?.id) { _ in refreshPromo() }
     }
@@ -250,11 +381,35 @@ struct CheckoutView: View {
                 storeBanner
                     .padding(.bottom, YMSpace.md)
 
-                SectionKicker("Способ получения").padding(.top, YMSpace.xs).padding(.bottom, YMSpace.sm)
-                YMSegmented(options: Fulfillment.allCases, selection: $fulfillment) { $0.title }
+                if shopClosed, let st = shop?.statusText, !st.isEmpty {
+                    Text(st + ". Заказ можно оформить, когда заведение откроется.")
+                        .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, YMSpace.sm)
+                }
 
+                SectionKicker("Способ получения").padding(.top, YMSpace.xs).padding(.bottom, YMSpace.sm)
+                YMSegmented(options: allowedFulfillment, selection: $fulfillment) { $0.title }
+
+                if fulfillment == .dineIn {
+                    tableField.padding(.top, YMSpace.md)
+                }
                 if fulfillment == .delivery {
                     addressSelector.padding(.top, YMSpace.md)
+                    if quoteMissing {
+                        Button {
+                            Task { await quoteDelivery() }
+                        } label: {
+                            Text(quoteError == nil
+                                 ? "Считаем стоимость доставки… Нажмите, чтобы повторить"
+                                 : "Не удалось рассчитать доставку: \(quoteError!). Нажмите, чтобы повторить")
+                                .font(YMFont.caption)
+                                .foregroundStyle(quoteError == nil ? YMColor.muted : YMColor.statusCancel)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, YMSpace.sm)
+                    }
                     if outOfZone {
                         Text(quote?.reason?.isEmpty == false ? quote!.reason! : "Доставка по этому адресу недоступна")
                             .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
@@ -269,9 +424,11 @@ struct CheckoutView: View {
                 }
 
                 SectionKicker("Оплата").padding(.top, YMSpace.lg).padding(.bottom, YMSpace.sm)
-                YMSegmented(options: Payment.allCases, selection: $payment) { $0.title }
+                YMSegmented(options: allowedPayments, selection: $payment) { $0.title }
 
                 commentField.padding(.top, YMSpace.lg)
+
+                promoCodeField.padding(.top, YMSpace.md)
 
                 promoCard
 
@@ -382,6 +539,55 @@ struct CheckoutView: View {
         .contentShape(Rectangle())
     }
 
+    private var tableField: some View {
+        HStack(spacing: YMSpace.sm) {
+            Image(systemName: "number").font(.system(size: 15)).foregroundStyle(YMColor.muted)
+            TextField("Номер стола", text: $tableNumber)
+                .font(.system(size: 13.5))
+                .foregroundStyle(YMColor.text)
+                .tint(YMColor.accent)
+        }
+        .padding(14)
+        .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+    }
+
+    private var promoCodeField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: YMSpace.sm) {
+                Image(systemName: "ticket").font(.system(size: 15)).foregroundStyle(YMColor.muted)
+                TextField("Промокод", text: $promoInput)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(YMColor.text)
+                    .tint(YMColor.accent)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                if appliedCode != nil {
+                    Button("Убрать") {
+                        appliedCode = nil; codeDiscount = 0; codeFree = false; codeMsg = nil; promoInput = ""
+                        refreshPromo()
+                    }
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(YMColor.muted)
+                } else {
+                    Button(checkingCode ? "…" : "Применить") {
+                        Task { await applyCode(promoInput) }
+                    }
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(YMColor.accent)
+                    .disabled(checkingCode || promoInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(14)
+            .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+            if let m = codeMsg {
+                Text(m).font(YMFont.caption)
+                    .foregroundStyle(appliedCode != nil ? YMColor.accent : YMColor.statusCancel)
+            }
+        }
+    }
+
     private var commentField: some View {
         HStack(spacing: YMSpace.sm) {
             Image(systemName: "square.and.pencil").font(.system(size: 15)).foregroundStyle(YMColor.muted)
@@ -477,6 +683,9 @@ struct CheckoutView: View {
             if promoDiscount > 0 {
                 totalRow("Скидка по акции", "−" + Money.format(promoDiscount), accent: true)
             }
+            if codeOff > 0 {
+                totalRow("Промокод", "−" + Money.format(codeOff), accent: true)
+            }
             if pointsSpent > 0 {
                 totalRow("Оплачено баллами", "−" + Money.format(pointsSpent), accent: true)
             }
@@ -566,19 +775,51 @@ struct CheckoutView: View {
         guard fulfillment == .delivery,
               let a = selectedAddress, let la = a.lat, let lo = a.lng,
               let sid = cart.shopId else {
-            await MainActor.run { quote = nil }
+            await MainActor.run { quote = nil; quoteError = nil }
             return
         }
-        let q: DeliveryQuote? = try? await API.shared.post(
-            "api/v1/delivery/quote",
-            body: QuoteBody(shopId: sid, lat: la, lng: lo, subtotal: cart.total)
-        )
-        // Пересчёт акций — ПОСЛЕ расчёта доставки: движок должен видеть её цену
-        // (иначе акция «бесплатная доставка от N» не сработает).
-        await MainActor.run { quote = q; refreshPromo() }
+        let goods = await MainActor.run { goodsForQuote }
+        await MainActor.run { quoteError = nil }
+        do {
+            let q: DeliveryQuote = try await API.shared.post(
+                "api/v1/delivery/quote",
+                body: QuoteBody(shopId: sid, lat: la, lng: lo, subtotal: goods)
+            )
+            // Пересчёт акций — ПОСЛЕ расчёта доставки: движок должен видеть её цену
+            // (иначе акция «бесплатная доставка от N» не сработает).
+            await MainActor.run { quote = q; quotedGoods = goods; quoteError = nil; refreshPromo() }
+        } catch {
+            await MainActor.run {
+                quote = nil
+                quoteError = error.localizedDescription
+            }
+        }
     }
 
-    // Полный адрес курьеру: город/улица/дом + доп. поля из выбранного адреса.
+    /// Что клиент платит за товары: корзина минус скидка и баллы (не меньше 0).
+    private var goodsForQuote: Double {
+        let paid = Money.parse(cart.total) - promoDiscount - codeOff - pointsSpent
+        let v = NSDecimalNumber(decimal: max(0, paid)).doubleValue
+        return (v * 100).rounded() / 100
+    }
+
+    /// Адрес доставки объектом — его читают и панель продавца, и курьер.
+    private func addressBody() -> OrderAddressBody? {
+        guard let a = selectedAddress else { return nil }
+        func clean(_ v: String?) -> String? {
+            guard let v, !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return v
+        }
+        return OrderAddressBody(
+            label: clean(a.label) ?? "Адрес",
+            city: clean(a.city), street: clean(a.street), house: clean(a.house),
+            apartment: clean(a.apartment), entrance: clean(a.entrance),
+            floor: clean(a.floor), intercom: clean(a.intercom),
+            lat: a.lat, lng: a.lng
+        )
+    }
+
+    // Полный адрес одной строкой — для экрана (в заказ уходит объект выше).
     private func composedAddress() -> String? {
         guard let a = selectedAddress else { return nil }
         var parts: [String] = []
@@ -619,13 +860,17 @@ struct CheckoutView: View {
         let body = OrderBody(
             shopId: shopId, items: items,
             deliveryType: fulfillment.apiValue,
-            paymentType: payment.apiValue,   // "cash" | "online" («Картой» → online)
-            address: fulfillment == .delivery ? composedAddress() : nil,
+            paymentType: payment.apiValue,   // "cash" | "card_courier" («Картой» — курьеру/на месте)
+            address: fulfillment == .delivery ? addressBody() : nil,
             comment: trimmed.isEmpty ? nil : trimmed,
             deliveryPrice: dp,
             lat: fulfillment == .delivery ? selectedAddress?.lat : nil,
             lng: fulfillment == .delivery ? selectedAddress?.lng : nil,
-            spendPointsAll: spendPoints
+            spendPointsAll: spendPoints,
+            idempotencyKey: idemKey,
+            tableNumber: fulfillment == .dineIn && !tableNumber.trimmingCharacters(in: .whitespaces).isEmpty
+                ? String(tableNumber.trimmingCharacters(in: .whitespaces).prefix(20)) : nil,
+            promoCode: appliedCode
         )
 
         Task {

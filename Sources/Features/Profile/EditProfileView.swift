@@ -24,7 +24,7 @@ private struct EditProfileBody: Encodable {
     let password: String?
 }
 
-/// Подтверждаемая смена данных. changes — только изменённые поля; method: "call" | "email".
+/// Подтверждаемая смена данных. changes — только изменённые поля; method: "email" (звонков и SMS нет).
 private struct ChangeRequestBody: Encodable {
     let changes: [String: String]
     let method: String
@@ -162,7 +162,7 @@ struct EditProfileView: View {
                 Text("Пароль минимум 6 символов")
                     .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
             } else {
-                Text("Смена телефона, почты или пароля требует подтверждения (звонок или код на почту).")
+                Text("Смена телефона, почты или пароля требует подтверждения (код на почту).")
                     .font(YMFont.caption).foregroundStyle(YMColor.muted)
             }
         }

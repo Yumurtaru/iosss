@@ -14,7 +14,7 @@ final class Push {
     /// Вместе с токеном уходит выбранный город: по нему приходят уведомления
     /// о новых заведениях в городе клиента.
     func registerIfPossible() async {
-        guard let token = fcmToken, UserDefaults.standard.string(forKey: "token") != nil else { return }
+        guard let token = fcmToken, TokenStore.access != nil else { return }
         let city = Session.shared.cityId
         try? await API.shared.postVoid(
             "api/v1/push/register",

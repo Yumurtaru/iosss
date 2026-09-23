@@ -59,7 +59,11 @@ final class NavCoordinator: ObservableObject {
     /// Удобные хелперы (читабельные точки вызова из экранов).
     func openCart() { showCart = true }
     func openLodging() { showLodging = true }
-    func openOrg(slug: String) { if !slug.isEmpty { pendingOrgSlug = slug } }
+    /// Слаг из ссылки или push идёт в путь запроса к API — только «правильные» символы.
+    func openOrg(slug: String) {
+        guard slug.range(of: "^[A-Za-z0-9_-]{1,120}$", options: .regularExpression) != nil else { return }
+        pendingOrgSlug = slug
+    }
     func openChat(orderId: Int) { chatOrderId = orderId }
     func openChatList() { chatOrderId = -1 }
     func closeChat() { chatOrderId = nil }

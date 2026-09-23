@@ -623,11 +623,18 @@ struct OrgView: View {
 
     // MARK: Derived
 
-    /// Открыто ли сейчас. Приоритет — расчёт по ShopDetail.hours (как на Android isOpenNow),
-    /// т.к. при входе по deep-link seed отсутствует. Фолбэк на seed.isOpen из списка, иначе «открыто».
+    /// Открыто ли сейчас.
+    ///
+    /// Приоритет — ответ СЕРВЕРА (`is_open` в карточке и в списке): часы работы
+    /// заданы временем заведения, а расчёт на телефоне идёт по его часовому
+    /// поясу. Покупатель из Владивостока видел «Закрыто» у работающего
+    /// московского заведения, а из Калининграда — «Открыто» у закрытого.
+    /// Локальный расчёт остаётся запасным путём для старого сервера.
     private var isOpen: Bool {
+        if let srv = vm.detail?.isOpen { return srv }
+        if let srv = vm.seed?.isOpen { return srv }
         if let d = vm.detail, let computed = OrgHours.isOpenNow(d.hours) { return computed }
-        return vm.seed?.isOpen ?? true
+        return true
     }
     private var rating: Double? { vm.detail?.rating ?? vm.seed?.rating }
     private var deliveryTime: String? { vm.detail?.deliveryTime ?? vm.seed?.deliveryTime }
@@ -712,17 +719,25 @@ struct DishRow: View {
                             .foregroundStyle(YMColor.muted)
                             .lineLimit(2)
                     }
-                    Text(Money.format(Money.dec(product.price)))
-                        .font(.system(size: 15, weight: .heavy))
-                        .foregroundStyle(YMColor.text)
-                        .padding(.top, 2)
+                    if product.stopped == true {
+                        Text("Нет в наличии")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(YMColor.muted)
+                            .padding(.top, 2)
+                    } else {
+                        Text(Money.format(Money.dec(product.price)))
+                            .font(.system(size: 15, weight: .heavy))
+                            .foregroundStyle(YMColor.text)
+                            .padding(.top, 2)
+                    }
                 }
                 Spacer(minLength: 8)
                 ZStack(alignment: .bottomTrailing) {
                     PhotoPlaceholder(url: API.imageURL(product.photo),
                                      label: "ФОТО", radius: YMRadius.control, tone: product.id)
                         .frame(width: 88, height: 88)
-                    // Круглая золотая «+» со свечением.
+                    // Круглая золотая «+» со свечением. У закончившейся позиции её нет.
+                    if product.stopped != true {
                     Button {
                         Haptics.light()
                         onAdd()
@@ -736,7 +751,9 @@ struct DishRow: View {
                     }
                     .buttonStyle(.plain)
                     .offset(x: 8, y: 8)
+                    }
                 }
+                .opacity(product.stopped == true ? 0.5 : 1)
             }
             .padding(12)
             .background(YMColor.surface, in: RoundedRectangle(cornerRadius: YMRadius.card, style: .continuous))

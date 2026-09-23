@@ -19,7 +19,9 @@ struct CartLine: Codable, Identifiable {
         (qtyPresets ?? "").split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 > 0 }.sorted()
     }
     var isFractional: Bool {
-        (qtyFractional ?? false) || presets.count >= 2 || ["кг", "г", "kg", "g", "л", "l", "мл", "ml"].contains((unit ?? "").trimmingCharacters(in: .whitespaces).lowercased())
+        // Как на сервере (snapOrderQty): только флаг товара/категории или ≥2 размера.
+        // Единица «кг» сама по себе не дробит: сервер округлил бы 0,9 кг до 1 кг.
+        (qtyFractional ?? false) || presets.count >= 2
     }
     var step: Double { presets.first ?? (isFractional ? 0.1 : 1.0) }
 }
@@ -50,7 +52,13 @@ final class Cart: ObservableObject {
     @Published private(set) var shopSlug: String?
 
     var count: Int { lines.reduce(0) { $0 + ($1.qty < 1 ? 1 : Int($1.qty.rounded())) } }
-    var total: Double { lines.reduce(0) { $0 + $1.unitPrice * $1.qty } }
+    /// Итог корзины. Округляем КАЖДУЮ строку до копеек и складываем
+    /// округлённые — ровно так считает сервер (round(unit*qty, 2) по строке).
+    /// Раньше складывались неокруглённые: на дробных количествах кнопка
+    /// обещала 150,65 ₽, а в заказе оказывалось 150,66 ₽.
+    var total: Double {
+        lines.reduce(0.0) { $0 + ((($1.unitPrice * $1.qty) * 100).rounded() / 100) }
+    }
     var isEmpty: Bool { lines.isEmpty }
     private var snapshotTask: Task<Void, Never>?
 

@@ -185,9 +185,13 @@ struct HomeView: View {
                     Text("город=\(session.cityId.map(String.init) ?? "нет") · раздел=\(vm.kind.rawValue) · пришло=\(vm.shops.count)\(vm.error.map { " · \($0)" } ?? "")")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.clear)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, YMSpace.xl)
-                        .padding(.top, 6)
+                        // Строка невидима глазом, но VoiceOver читал её вслух
+                        // («город=1 · раздел=all · пришло=12», а при сбое — и
+                        // текст ошибки). Скрываем из доступности и убираем из
+                        // раскладки, зависимость body от полей сохраняется.
+                        .accessibilityHidden(true)
+                        .frame(maxWidth: .infinity, maxHeight: 0, alignment: .leading)
+                        .clipped()
 
                     PromoBanner(action: { route = .about })
                         .padding(.top, 12)

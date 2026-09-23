@@ -78,6 +78,11 @@ struct ProfileView: View {
                 VStack(spacing: 0) {
                     if session.isLoggedIn {
                         header
+                        // Карта клиента: штрихкод для кассы магазина. Блок сам
+                        // ничего не рисует, если код не пришёл или невалиден.
+                        if let code = profile?.clientCode {
+                            ClientCardBlock(code: code)
+                        }
                         stats
                         themeSwitcher
                         menu
@@ -355,9 +360,23 @@ struct ProfileView: View {
     }
 
     private func logout() {
-        Task { try? await API.shared.postVoid("api/v1/auth/logout") }
-        session.signOut()
-        profile = nil
+        // Сначала запрос (с ещё живым токеном), потом локальный выход: раньше
+        // signOut() успевал стереть токен до отправки, и сервер не знал, КТО
+        // выходит, — сессия не закрывалась, push продолжали приходить сюда.
+        // push_token — чтобы уведомления прежнего аккаунта сюда больше не шли.
+        let body: [String: String] = Push.shared.fcmToken.map { ["push_token": $0] } ?? [:]
+        Task {
+            // Ждём ответ не дольше 3 секунд: без сети выход не должен «висеть».
+            let req = Task { try? await API.shared.postVoid("api/v1/auth/logout", body: body) }
+            await withTaskGroup(of: Void.self) { g in
+                g.addTask { await req.value }
+                g.addTask { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+                await g.next()
+                g.cancelAll()
+            }
+            session.signOut()
+            profile = nil
+        }
     }
 
     private func deleteAccount() {

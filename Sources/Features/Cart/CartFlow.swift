@@ -27,13 +27,18 @@ struct CartFlow: View {
     private enum Step: Hashable { case checkout, success }
 
     @State private var path: [Step] = []
+    /// Гость нажал «Оформить» — сначала вход: без токена оформление получало
+    /// 401 и «Сессия истекла», а войти из корзины было нельзя.
+    @State private var showAuth = false
     // Результат создания заказа — источник данных для SuccessView.
     @State private var result: OrderCreateResult?
 
     var body: some View {
         NavigationStack(path: $path) {
             CartView(
-                onCheckout: { path.append(.checkout) },
+                onCheckout: {
+                    if Session.shared.isLoggedIn { path.append(.checkout) } else { showAuth = true }
+                },
                 onClose: { onClose() }
             )
             .navigationDestination(for: Step.self) { step in
@@ -52,6 +57,15 @@ struct CartFlow: View {
                 }
             }
         }
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                AuthView(onAuthed: {
+                    showAuth = false
+                    path.append(.checkout)
+                })
+            }
+            .environmentObject(Session.shared)
+        }
     }
 
     @ViewBuilder private var successScreen: some View {
@@ -60,10 +74,21 @@ struct CartFlow: View {
                 order: r,
                 onTrack: {
                     let id = r.resolvedId ?? 0
+                    // Стек обязательно сбрасываем: вкладка «Корзина» живёт всё
+                    // время работы приложения, и без этого при возврате на неё
+                    // снова показывался экран «Заказ оформлен» от прошлого
+                    // заказа — выйти оттуда можно было только на другую вкладку,
+                    // а второй заказ через корзину не оформлялся вовсе.
+                    path.removeAll()
+                    result = nil
                     onClose()
                     onTrackOrder(id)
                 },
-                onHome: { onClose() }
+                onHome: {
+                    path.removeAll()
+                    result = nil
+                    onClose()
+                }
             )
         } else {
             // Теоретически недостижимо: success пушится только после onSuccess.

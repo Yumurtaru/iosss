@@ -77,12 +77,15 @@ final class API {
     }
 
     private func makeRequest(_ method: String, _ path: String, query: [String: String] = [:], body: Encodable? = nil) throws -> URLRequest {
-        var comps = URLComponents(string: API.base + "/" + path)!
+        // Без «!»: путь может содержать данные извне (слаг из ссылки), и кривой
+        // адрес должен давать ошибку запроса, а не падение приложения.
+        guard var comps = URLComponents(string: API.base + "/" + path) else { throw APIError.network }
         if !query.isEmpty { comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
-        var req = URLRequest(url: comps.url!)
+        guard let reqURL = comps.url else { throw APIError.network }
+        var req = URLRequest(url: reqURL)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token = UserDefaults.standard.string(forKey: "token") { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let token = TokenStore.access { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body = body { req.httpBody = try Self.encoder.encode(AnyEncodable(body)) }
         return req
     }
@@ -123,12 +126,20 @@ final class API {
         if status == 401 {
             // Тихое продление access-токена (security-аудит): refresh → один повтор запроса.
             // Позволяет серверу сократить JWT_EXPIRES до часов без массовых разлогинов.
-            if !isRetryAfterRefresh,
-               !(req.url?.path.hasSuffix("/auth/refresh") ?? false),
-               let newToken = await refreshAccessToken() {
-                var retry = req
-                retry.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
-                return try await perform(retry, as: type, isRetryAfterRefresh: true)
+            if !isRetryAfterRefresh, !(req.url?.path.hasSuffix("/auth/refresh") ?? false) {
+                switch await refreshAccessToken() {
+                case .token(let newToken):
+                    var retry = req
+                    retry.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+                    return try await perform(retry, as: type, isRetryAfterRefresh: true)
+                case .unavailable:
+                    // Продлить не удалось из-за СЕТИ (таймаут, нет связи, 5xx).
+                    // Раньше это считалось отказом, и человека разлогинивало со
+                    // стиранием ещё живого refresh-токена. Теперь — «нет связи».
+                    throw APIError.network
+                case .rejected:
+                    break
+                }
             }
             if let handler = onUnauthorized { await MainActor.run { handler() } }
             throw APIError.unauthorized
@@ -148,7 +159,16 @@ final class API {
                     message: env.error?.message ?? "Не хватает денег на кошельке"
                 )
             }
-            if env.success == false { throw APIError.server(env.error?.message ?? "Ошибка сервера") }
+            if env.success == false {
+                // Ошибки полей (details: {"title": "Слишком короткий заголовок"}) —
+                // добавляем первую к общему «Проверьте поля объявления», иначе
+                // человек не понимал, что именно исправить.
+                var msg = env.error?.message ?? "Ошибка сервера"
+                if status == 422, let first = env.error?.details?.values.sorted().first, !first.isEmpty, !msg.contains(first) {
+                    msg += ": " + first
+                }
+                throw APIError.server(msg)
+            }
             // Ошибочный статус с телом {ok:false,error:"..."} (Response::error): success отсутствует,
             // но текст есть — показываем его (иначе терялось «Минимальная сумма заказа…» → «Ошибка 422»).
             if status >= 400, let msg = env.error?.message, !msg.isEmpty { throw APIError.server(msg) }
@@ -165,26 +185,31 @@ final class API {
 
     // ── Тихое продление access-токена (security-аудит) ──────────────────────
     // Single-flight: параллельные 401 ждут один общий refresh-вызов.
-    private var refreshTask: Task<String?, Never>?
+    /// Итог продления: новый токен, отказ сервера (refresh недействителен →
+    /// выход) или «сервер недоступен» (сеть/5xx → токены НЕ трогаем).
+    enum RefreshOutcome { case token(String), rejected, unavailable }
+    private var refreshTask: Task<RefreshOutcome, Never>?
 
-    private func refreshAccessToken() async -> String? {
+    private func refreshAccessToken() async -> RefreshOutcome {
         if let running = refreshTask { return await running.value }
-        let task = Task<String?, Never> { [weak self] () -> String? in
+        let task = Task<RefreshOutcome, Never> { [weak self] () -> RefreshOutcome in
             guard let self = self,
-                  let refresh = UserDefaults.standard.string(forKey: "refresh_token"),
+                  let refresh = TokenStore.refresh,
                   !refresh.isEmpty,
-                  let url = URL(string: API.base + "/api/v1/auth/refresh") else { return nil }
+                  let url = URL(string: API.base + "/api/v1/auth/refresh") else { return .rejected }
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": refresh])
             struct RefreshResp: Decodable { let token: String? }
-            guard let (data, resp) = try? await self.session.data(for: req),
-                  (resp as? HTTPURLResponse)?.statusCode == 200,
+            guard let (data, resp) = try? await self.session.data(for: req) else { return .unavailable }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code >= 500 || code == 0 || code == 429 { return .unavailable }
+            guard code == 200,
                   let env = try? self.decoder.decode(APIEnvelope<RefreshResp>.self, from: data),
-                  let token = env.data?.token, !token.isEmpty else { return nil }
-            UserDefaults.standard.set(token, forKey: "token")
-            return token
+                  let token = env.data?.token, !token.isEmpty else { return .rejected }
+            TokenStore.access = token
+            return .token(token)
         }
         refreshTask = task
         let result = await task.value
@@ -212,7 +237,7 @@ final class API {
     /// например отклик на вакансию: POST api/v1/jobs/{id}/apply {name, phone}.
     /// Совпадает с Android @FormUrlEncoded — контракт 1:1.
     func postForm<T: Decodable>(_ path: String, form: [String: String]) async throws -> T {
-        let url = URLComponents(string: API.base + "/" + path)!.url!
+        guard let url = URLComponents(string: API.base + "/" + path)?.url else { throw APIError.network }
         // percent-кодирование значений (пробелы, кириллица, '+', '&', '=' и т.п.)
         var enc = CharacterSet.urlQueryAllowed
         enc.remove(charactersIn: "+&=")
@@ -222,7 +247,7 @@ final class API {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        if let token = UserDefaults.standard.string(forKey: "token") { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let token = TokenStore.access { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         req.httpBody = bodyStr.data(using: .utf8)
         return try await send(req, as: T.self)
     }
@@ -236,7 +261,7 @@ final class API {
         var req = URLRequest(url: URL(string: API.base + "/api/v1/orders/\(orderId)/chat/photo")!)
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        if let token = UserDefaults.standard.string(forKey: "token") { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let token = TokenStore.access { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         var body = Data()
         func field(_ name: String, _ value: String) {
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
@@ -282,6 +307,8 @@ final class API {
     func adCreate(_ body: AdSaveBody) async throws -> AdCreatedResponse { try await post("api/v1/ads", body: body) }
     func adUpdate(_ id: Int, _ body: AdSaveBody) async throws { try await putVoid("api/v1/ads/\(id)", body: body) }
     func adPublish(_ id: Int) async throws -> AdPublishResponse { try await post("api/v1/ads/\(id)/publish") }
+    /// Продлить действующее объявление заранее (последние 3 дня срока). Сервер продлевает только по явному renew=true.
+    func adRenew(_ id: Int) async throws -> AdPublishResponse { try await post("api/v1/ads/\(id)/publish", body: ["renew": true]) }
     func adArchive(_ id: Int) async throws { _ = try await post("api/v1/ads/\(id)/archive", body: [String: String]()) as EmptyResp }
     func adDelete(_ id: Int) async throws { try await deleteVoid("api/v1/ads/\(id)") }
     func adPhotoDelete(adId: Int, photoId: Int) async throws { try await deleteVoid("api/v1/ads/\(adId)/photos/\(photoId)") }
@@ -297,7 +324,7 @@ final class API {
         var req = URLRequest(url: URL(string: API.base + "/api/v1/ads/\(adId)/photos")!)
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        if let token = UserDefaults.standard.string(forKey: "token") { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let token = TokenStore.access { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         var body = Data()
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n".data(using: .utf8)!)

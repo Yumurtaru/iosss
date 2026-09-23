@@ -14,7 +14,7 @@
 //    • GET  api/v1/orders                                 → [Order]  (выбор заказа в форме)
 //    • GET  api/v1/orders/{id}/return-eligibility         → ReturnEligibility {eligible, window_hours, reason}
 //
-//  Статусы возврата сервера: pending / approved / rejected / refunded.
+//  Статусы возврата сервера: pending / approved / rejected / refunded / closed.
 //  Деньги — Decimal через Money.format(Money.parse(refundAmount)) (канон нового клиента).
 //  Токены YM.*, light+dark, Dynamic Type. Состояния: загрузка / пусто / ошибка+Повторить.
 //
@@ -33,13 +33,17 @@ enum ReturnStatus {
         case "approved": return "Одобрен"
         case "rejected": return "Отклонён"
         case "refunded": return "Возвращено"
+        // 'closed' — деньги покупателю фактически выплачены (наличными на кассе
+        // или переводом; продавец подтвердил выплату). Раньше это слово
+        // показывалось человеку как есть, латиницей.
+        case "closed":   return "Деньги выплачены"
         default:         return (s?.isEmpty ?? true) ? "—" : (s ?? "—")
         }
     }
     /// Kind для StatusPill (цвет по семантике).
     static func pillKind(_ s: String?) -> StatusPill.Kind {
         switch (s ?? "").lowercased() {
-        case "approved", "refunded": return .done
+        case "approved", "refunded", "closed": return .done
         case "rejected":             return .cancel
         default:                     return .pending
         }
@@ -264,17 +268,22 @@ struct ReturnCreateView: View {
     @State private var orders: [Order] = []
     @State private var loadingOrders = true
     @State private var selectedOrderId: Int?
-    @State private var type = "full"
+    /// Только полный возврат: выбора позиций в форме нет (см. комментарий ниже).
+    private let type = "full"
     @State private var reasonCode = returnReasons.first!.code
     @State private var comment = ""
     @State private var sending = false
     @State private var done = false
     @State private var error: String?
+    /// Можно ли вернуть выбранный заказ (GET orders/{id}/return-eligibility):
+    /// срок, активная заявка, всё ли уже возвращено. nil — ещё проверяем/не знаем.
+    @State private var eligibility: ReturnEligibility?
 
     private var eligibleOrders: [Order] {
-        orders.filter { OrderFlow.isDone($0.status) }
+        // Записи на услуги и брони — не возвращаются как товар.
+        orders.filter { OrderFlow.isDone($0.status) && $0.isAppointment != true }
     }
-    private var canSubmit: Bool { selectedOrderId != nil && !sending }
+    private var canSubmit: Bool { selectedOrderId != nil && !sending && eligibility?.eligible != false }
 
     var body: some View {
         NavigationStack {
@@ -314,18 +323,26 @@ struct ReturnCreateView: View {
                                     title: "Заказ №\(o.dailyNumber ?? o.id)" + (o.shopName.map { " · \($0)" } ?? ""),
                                     subtitle: "\(Money.format(Money.parse(o.total))) · \(OrderStatus.label(o.status, shopType: o.shopType))",
                                     selected: selectedOrderId == o.id
-                                ) { Haptics.light(); selectedOrderId = o.id }
+                                ) { Haptics.light(); selectedOrderId = o.id; Task { await checkEligibility(o.id) } }
                             }
+                        }
+                        // Раньше о сроке/активной заявке человек узнавал только
+                        // после отправки формы. Причину показываем сразу.
+                        if eligibility?.eligible == false {
+                            Text(eligibility?.reason ?? "Этот заказ вернуть нельзя")
+                                .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 }
 
-                // Тип возврата
-                section(title: "Тип") {
-                    YMSegmented(options: ["full", "partial"], selection: $type) {
-                        $0 == "full" ? "Полный" : "Частичный"
-                    }
-                }
+                // Тип возврата: только полный.
+                //
+                // Переключатель «Частичный» здесь был, а выбора позиций — нет:
+                // тело запроса не несло ни items, ни суммы, и сервер заводил
+                // заявку на 0 ₽. Человек видел «Заявка отправлена», в списке
+                // появлялось «К возврату: 0 ₽», продавец одобрял ноль.
+                // Вернуть переключатель можно вместе с выбором позиций заказа.
 
                 // Причина
                 section(title: "Причина") {
@@ -397,6 +414,14 @@ struct ReturnCreateView: View {
         orders = (try? await API.shared.list("api/v1/orders")) ?? []
         if selectedOrderId == nil { selectedOrderId = eligibleOrders.first?.id }
         loadingOrders = false
+        if let id = selectedOrderId { await checkEligibility(id) }
+    }
+
+    private func checkEligibility(_ id: Int) async {
+        eligibility = nil
+        let r: ReturnEligibility? = try? await API.shared.get("api/v1/orders/\(id)/return-eligibility")
+        // Пока ждали ответ, человек мог выбрать другой заказ — не перетираем.
+        if selectedOrderId == id { eligibility = r }
     }
 
     private func send() {

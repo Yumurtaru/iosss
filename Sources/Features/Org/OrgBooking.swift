@@ -377,7 +377,13 @@ struct OrgBookingSection: View {
     fileprivate static func nearestDays(_ count: Int) -> [DayOption] {
         var cal = Calendar(identifier: .gregorian)
         cal.locale = Locale(identifier: "ru_RU")
-        let api = DateFormatter(); api.calendar = cal; api.locale = Locale(identifier: "en_US_POSIX"); api.dateFormat = "yyyy-MM-dd"
+        // «Сегодня» считаем по времени ПЛОЩАДКИ, а не телефона: свободные окна
+        // сервер отсекает своим `date()`, и у покупателя восточнее/западнее
+        // Москвы чип «Сегодня» указывал на другой день — сегодняшние окна он не
+        // видел вовсе, а на «Сегодня» приходили окна следующих суток.
+        cal.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
+        let api = DateFormatter(); api.calendar = cal; api.timeZone = cal.timeZone
+        api.locale = Locale(identifier: "en_US_POSIX"); api.dateFormat = "yyyy-MM-dd"
         let weekdays = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"] // weekday: 1 = Вс
         let today = Date()
         return (0..<count).compactMap { i in

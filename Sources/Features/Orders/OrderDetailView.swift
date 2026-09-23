@@ -162,32 +162,80 @@ final class OrderDetailViewModel: ObservableObject {
 
     func stopTracking() { pollTimer?.invalidate(); pollTimer = nil }
 
+    /// Текст ошибки повтора заказа (раньше была только вибрация: кнопка молча
+    /// «не срабатывала», и человек не понимал почему).
+    @Published var reorderError: String?
+
     /// Повторить заказ: сервер возвращает состав → кладём в корзину (single-store cart).
+    ///
+    /// Если корзина занята ДРУГИМ заведением, состав не подменяем молча, а
+    /// отдаём его наружу через `pendingReorder` — экран спросит подтверждение
+    /// тем же диалогом, что и карточка товара. Раньше набранная корзина другого
+    /// заведения исчезала без предупреждения.
     func repeatOrder(cart: Cart) async {
-        reorderInFlight = true; defer { reorderInFlight = false }
+        reorderInFlight = true; reorderError = nil; defer { reorderInFlight = false }
         // GET api/v1/orders/{id}/reorder → ReorderData (как в старом клиенте: Reorder.perform).
         guard let data: ReorderData = try? await API.shared.get("api/v1/orders/\(id)/reorder"),
               let shopId = data.shopId, let items = data.items, !items.isEmpty else {
             // TODO(API): если эндпоинт reorder отсутствует/пуст — деградируем без падения (ниже баннер).
-            Haptics.warning(); return
+            Haptics.warning()
+            reorderError = "Не удалось повторить заказ. Проверьте соединение и попробуйте ещё раз."
+            return
         }
         // Конвертация ReorderItem → CartLine (single-store: одна корзина = один магазин).
-        let lines: [CartLine] = items.compactMap { it in
+        // Ключ строки — с индексом и модификаторами: две строки одного товара
+        // (разные добавки) раньше получали один ключ, и +/− меняли только первую.
+        let lines: [CartLine] = items.enumerated().compactMap { idx, it in
             guard let pid = it.productId else { return nil }
-            return CartLine(key: "reorder-\(pid)",
-                            productId: pid,
-                            name: it.name ?? "Товар",
-                            unitPrice: it.price ?? 0,
-                            qty: it.qty ?? 1,
-                            modifierIds: [],
-                            modsLabel: "",
-                            photo: it.photo)
+            let mods = it.modifierIds ?? []
+            var line = CartLine(key: "reorder-\(pid)-\(mods.map(String.init).joined(separator: "."))-\(idx)",
+                                productId: pid,
+                                name: it.name ?? "Товар",
+                                unitPrice: it.unitPrice ?? it.price ?? 0,
+                                qty: it.qty ?? 1,
+                                modifierIds: mods,
+                                modsLabel: it.modifiersLabel ?? "",
+                                photo: it.photo)
+            line.unit = it.unit
+            line.qtyFractional = it.qtyFractional
+            line.qtyPresets = it.qtyPresets
+            return line
         }
-        guard !lines.isEmpty else { Haptics.warning(); return }
-        cart.setLines(lines, shopId: shopId, shopName: data.shopName, shopSlug: data.shopSlug)
+        guard !lines.isEmpty else {
+            Haptics.warning()
+            reorderError = "Позиции этого заказа больше не продаются."
+            return
+        }
+        // Часть состава сервер отфильтровал (товар снят с продажи) — скажем об
+        // этом, но ПОСЛЕ применения: иначе текст «добавили остальные» висел бы
+        // под диалогом подтверждения, когда ещё ничего не добавлено.
+        let partial = lines.count < items.count
+        if let cur = cart.shopId, cur != shopId, !cart.isEmpty {
+            pendingReorder = (lines, shopId, data.shopName, data.shopSlug, partial)
+            conflictShopName = data.shopName
+            return
+        }
+        applyReorder(lines, shopId: shopId, shopName: data.shopName, shopSlug: data.shopSlug, partial: partial, cart: cart)
+    }
+
+    /// Состав, ожидающий подтверждения смены заведения корзины.
+    @Published var conflictShopName: String?
+    var pendingReorder: (lines: [CartLine], shopId: Int, shopName: String?, shopSlug: String?, partial: Bool)?
+
+    func applyReorder(_ lines: [CartLine], shopId: Int, shopName: String?, shopSlug: String?, partial: Bool, cart: Cart) {
+        cart.setLines(lines, shopId: shopId, shopName: shopName, shopSlug: shopSlug)
+        reorderError = partial ? "Часть позиций больше не продаётся — добавили остальные." : nil
         Haptics.success()
         reorderDone = true
     }
+
+    func confirmPendingReorder(cart: Cart) {
+        guard let p = pendingReorder else { return }
+        pendingReorder = nil; conflictShopName = nil
+        applyReorder(p.lines, shopId: p.shopId, shopName: p.shopName, shopSlug: p.shopSlug, partial: p.partial, cart: cart)
+    }
+
+    func cancelPendingReorder() { pendingReorder = nil; conflictShopName = nil }
 }
 
 // MARK: - OrderDetailView (screen: detail)
@@ -249,7 +297,7 @@ struct OrderDetailView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .task { await vm.load(); vm.startTrackingIfActive() }
+        .task { await vm.load(); if !Task.isCancelled { vm.startTrackingIfActive() } }   // экран успели закрыть — опрос не запускаем
         .onDisappear { vm.stopTracking() }
         .onChange(of: courierCoord?.latitude) { _ in recenter() }
         // Диалог подтверждения отмены заказа.
@@ -288,13 +336,11 @@ struct OrderDetailView: View {
     /// (сервер повторную оплату оплаченного заказа отклонит; UI аддитивен).
     private func canPay(_ o: OrderDetail) -> Bool {
         let pt = (o.paymentType ?? "").lowercased()
-        // ТОЛЬКО реальные онлайн-способы. Раньше здесь было ещё
-        // pt.contains("card") — под это подпадает card_courier, то есть «картой
-        // на месте по терминалу». Такому заказу баннер «Оплатить онлайн» не
-        // нужен: человек платит курьеру, а нажатие создало бы в ЮKassa платёж
-        // по заказу, который оплачивается при получении.
+        // Только онлайн-оплата. «card_courier» — картой при получении: раньше
+        // contains("card") показывал на таких заказах кнопку онлайн-оплаты.
         let isOnline = pt == "online" || pt == "online_card"
-        return isOnline && OrderFlow.isActive(o.status)
+        let paid = (o.paymentStatus ?? "").lowercased() == "paid"
+        return isOnline && !paid && OrderFlow.isActive(o.status)
     }
 
     /// Отзыв/NPS: только для доставленного заказа.
@@ -671,6 +717,11 @@ struct OrderDetailView: View {
             }
             .buttonStyle(YMPrimaryButtonStyle())
 
+            if let err = vm.reorderError {
+                Text(err)
+                    .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Button {
                 Task {
                     await vm.repeatOrder(cart: cart)
@@ -708,6 +759,26 @@ struct OrderDetailView: View {
                 .buttonStyle(.plain)
                 .disabled(vm.actionBusy)
             }
+        }
+        // Корзина занята другим заведением: спрашиваем, как в карточке товара,
+        // вместо молчаливой подмены состава. Алерт висит на ЭТОЙ вложенной вью,
+        // а не на общем ScrollView: два одноимённых презентационных модификатора
+        // на одной вью — известный способ получить «диалог не открывается».
+        .alert("Очистить корзину?", isPresented: Binding(
+            // ВАЖНО: в set гасим ТОЛЬКО флаг показа. Если чистить здесь и сам
+            // состав, то к моменту выполнения действия кнопки он уже пуст —
+            // SwiftUI сначала опускает isPresented и только потом зовёт action,
+            // и «Очистить и повторить» срабатывало бы вхолостую.
+            get: { vm.conflictShopName != nil },
+            set: { if !$0 { vm.conflictShopName = nil } }
+        )) {
+            Button("Отмена", role: .cancel) { vm.cancelPendingReorder() }
+            Button("Очистить и повторить", role: .destructive) {
+                vm.confirmPendingReorder(cart: cart)
+                if vm.reorderDone { router.requestedTab = 3 }
+            }
+        } message: {
+            Text("В корзине заказ из «\(cart.shopName ?? "другого заведения")». Повтор заменит его на заказ из «\(vm.conflictShopName ?? "этого заведения")».")
         }
     }
 
@@ -823,7 +894,10 @@ struct CourierPin: View {
 struct SafariSheet: UIViewControllerRepresentable {
     let url: URL
     func makeUIViewController(context: Context) -> SFSafariViewController {
-        let c = SFSafariViewController(url: url)
+        // SFSafariViewController падает на ссылке не http(s) — такую не открываем.
+        let scheme = url.scheme?.lowercased() ?? ""
+        let safe = (scheme == "https" || scheme == "http") ? url : (URL(string: API.base) ?? url)
+        let c = SFSafariViewController(url: safe)
         c.preferredControlTintColor = UIColor(YMColor.accent)
         return c
     }

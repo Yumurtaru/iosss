@@ -128,10 +128,12 @@ struct ProductView: View {
     @State private var photoIndex = 0
 
     // product state
-    @State private var selectedSize: Int?              // id выбранной радио-опции (Размер порции)
+    @State private var selectedRadio: [Int: Int] = [:] // группа → выбранная радио-опция (у каждой группы свой выбор)
     @State private var checkedAddons: Set<Int> = []    // id выбранных чекбоксов (Добавить к блюду)
     @State private var qty: Double = 1
     @State private var added = false
+    /// Гость нажал «Записаться» — сначала вход (запись требует аккаунта).
+    @State private var showAuth = false
     // Весовой/дробный товар: выбранный вес-пресет (0.3 / 0.5 / 1 кг). Для штучных не используется.
     @State private var selectedWeight: Double = 0
 
@@ -163,11 +165,26 @@ struct ProductView: View {
             topControls
         }
         .navigationBarHidden(true)
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                AuthView(onAuthed: { showAuth = false })
+            }
+            .environmentObject(Session.shared)
+        }
+        // Деталь может прийти не с первой попытки (кнопка «Повторить» в ошибке
+        // грузит её отдельно). Пресет веса и стартовое количество подбираем на
+        // КАЖДОЕ появление детали: иначе после повторной загрузки весовой товар
+        // оставался с нулевым весом, и в корзину уходило «× 0» по нулевой цене.
+        .onChange(of: vm.detail?.id) { _ in syncQtyDefaults() }
         .task {
             await vm.load()
-            // Весовой товар: предвыбираем первый пресет (наименьший вес).
-            if vm.mode == .product, let d = vm.detail, isWeighed(d) {
-                selectedWeight = weightPresets(d).first ?? 0
+            syncQtyDefaults()
+            // Обязательная радио-группа: предвыбираем первый вариант (как в Android).
+            if let d = vm.detail {
+                for g in d.modifierGroups ?? [] where g.isRequired == true
+                    && ((g.type ?? "") == "single" || (g.maxQty ?? 0) == 1) {
+                    if selectedRadio[g.id] == nil, let first = g.options?.first { selectedRadio[g.id] = first.id }
+                }
             }
             await loadFav()
         }
@@ -300,8 +317,9 @@ struct ProductView: View {
     // MARK: Product sections (Размер порции / Добавить к блюду)
 
     @ViewBuilder private var productSections: some View {
-        // Весовой/дробный товар: ряд чипов-пресетов (0.3 / 0.5 / 1 кг) с ценой за выбранный вес.
-        if let d = vm.detail, isWeighed(d) {
+        // Весовой товар с пресетами: ряд чипов (0.3 / 0.5 / 1 кг) с ценой за
+        // выбранный вес. Без пресетов чипов нет — количество набирается «+/−».
+        if let d = vm.detail, weightPresets(d).count >= 2 {
             weightSection(d)
         }
 
@@ -318,14 +336,14 @@ struct ProductView: View {
                         .font(.system(size: 16, weight: .heavy))
                         .foregroundStyle(YMColor.text)
                     Spacer()
-                    Text("Выберите 1".uppercased())
+                    Text((g.isRequired == true ? "Выберите 1" : "Не обязательно").uppercased())
                         .font(.system(size: 11, weight: .bold))
                         .tracking(0.5)
                         .foregroundStyle(YMColor.accent)
                 }
                 VStack(spacing: 8) {
                     ForEach(g.options ?? []) { opt in
-                        radioRow(opt, groupOptions: g.options ?? [])
+                        radioRow(opt, groupId: g.id, groupOptions: g.options ?? [])
                     }
                 }
             }
@@ -334,9 +352,19 @@ struct ProductView: View {
 
         ForEach(checkGroups) { g in
             VStack(alignment: .leading, spacing: 10) {
-                Text(g.name ?? "Добавить к блюду")
-                    .font(.system(size: 16, weight: .heavy))
-                    .foregroundStyle(YMColor.text)
+                HStack {
+                    Text(g.name ?? "Добавить к блюду")
+                        .font(.system(size: 16, weight: .heavy))
+                        .foregroundStyle(YMColor.text)
+                    Spacer()
+                    if g.isRequired == true {
+                        let need = max(1, g.minQty ?? 1)
+                        Text((need > 1 ? "Выберите от \(need)" : "Обязательно").uppercased())
+                            .font(.system(size: 11, weight: .bold))
+                            .tracking(0.5)
+                            .foregroundStyle(YMColor.accent)
+                    }
+                }
                 VStack(spacing: 8) {
                     ForEach(g.options ?? []) { opt in
                         checkRow(opt)
@@ -354,20 +382,25 @@ struct ProductView: View {
 
     // MARK: Весовые товары (чипы-пресеты + цена за вес)
 
-    /// Весовой/дробный товар: явный флаг qtyFractional, заданные qtyPresets, либо весовая единица.
-    private func isWeighed(_ d: ProductDetail) -> Bool {
-        if (d.qtyFractional ?? 0) == 1 { return true }
-        if !(d.qtyPresets ?? "").trimmingCharacters(in: .whitespaces).isEmpty { return true }
-        let u = (d.unit ?? "").trimmingCharacters(in: .whitespaces).lowercased()
-        return ["кг", "г", "kg", "g", "л", "l", "мл", "ml"].contains(u)
-    }
-
-    /// Пресеты веса из строки ("0.3,0.5,1"); если пусто — дефолт 0.3 / 0.5 / 1.
+    /// Пресеты веса из строки ("0.3,0.5,1"). Дефолтов НЕТ: если продавец
+    /// пресеты не задал, товар штучный (см. isWeighed).
     private func weightPresets(_ d: ProductDetail) -> [Double] {
-        let ps = (d.qtyPresets ?? "").split(separator: ",")
+        (d.qtyPresets ?? "").split(separator: ",")
             .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
             .filter { $0 > 0 }.sorted()
-        return ps.isEmpty ? [0.3, 0.5, 1.0] : ps
+    }
+
+    /// Весовой/дробный товар — РОВНО то же правило, что на сервере (snapOrderQty):
+    /// дробным товар считается, если у него стоит флаг qty_fractional либо задано
+    /// не меньше двух пресетов количества.
+    ///
+    /// Раньше сюда входила ещё и единица измерения («кг», «л»). Из-за этого
+    /// обычный штучный товар с единицей «кг» показывал чипы 0,3 / 0,5 / 1 кг,
+    /// по умолчанию выбирался 0,3, а сервер округлял количество до 1: на экране
+    /// 45 ₽, в заказе 149,90 ₽. Единица сама по себе товар не дробит.
+    private func isWeighed(_ d: ProductDetail) -> Bool {
+        if (d.qtyFractional ?? 0) == 1 { return true }
+        return weightPresets(d).count >= 2
     }
 
     /// Точный Decimal для веса из Double (через строку — без Double-погрешности).
@@ -462,11 +495,11 @@ struct ProductView: View {
     }
 
     /// Радио-строка: выбранная — золотая рамка + золотая точка.
-    private func radioRow(_ opt: ModifierOption, groupOptions: [ModifierOption]) -> some View {
-        let selected = selectedSize == opt.id
+    private func radioRow(_ opt: ModifierOption, groupId: Int, groupOptions: [ModifierOption]) -> some View {
+        let selected = selectedRadio[groupId] == opt.id
         return Button {
             Haptics.selection()
-            selectedSize = opt.id
+            selectedRadio[groupId] = opt.id
         } label: {
             HStack(spacing: 12) {
                 Text(opt.name ?? "—")
@@ -713,13 +746,22 @@ struct ProductView: View {
                 addToCart()
             } label: {
                 HStack(spacing: 8) {
-                    Text(added ? "Добавлено ✓" : "В корзину")
-                    Text("·").opacity(0.6)
-                    Text(Money.format(lineTotal))
+                    if isStopped {
+                        Text("Нет в наличии")
+                    } else {
+                        Text(added ? "Добавлено ✓" : "В корзину")
+                        Text("·").opacity(0.6)
+                        Text(Money.format(lineTotal))
+                    }
                 }
             }
             .buttonStyle(YMPrimaryButtonStyle())
-            .disabled(vm.detail == nil)
+            // `added` — окно закрывается через 0.7 с, второе нажатие за это время
+            // добавляло товар ещё раз.
+            // isStopped — позиция в стоп-листе или выключена продавцом: раньше
+            // кнопка работала, корзина набиралась, а отказ приходил только на
+            // оформлении («Часть товаров закончилась»), без указания позиции.
+            .disabled(vm.detail == nil || !requiredChosen || added || isStopped || effectiveQty <= 0)
         }
         .padding(.horizontal, YMSpace.xl)
         .padding(.top, 12)
@@ -803,30 +845,63 @@ struct ProductView: View {
 
     // MARK: Product logic
 
+    /// Шаг «+/−». Дробным шаг бывает только у дробного товара (правило сервера),
+    /// иначе сервер округлит количество и покупатель получит не то, что видел.
     private var stepValue: Double {
         guard let d = vm.detail else { return 1 }
-        let presets = (d.qtyPresets ?? "").split(separator: ",")
-            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 > 0 }.sorted()
-        if let f = presets.first { return f }
+        if !isWeighed(d) { return 1 }
+        if let f = weightPresets(d).first { return f }
         if (d.qtyStep ?? 0) > 0 { return d.qtyStep ?? 0.1 }
-        let weight = ["кг", "г", "kg", "g", "л", "l", "мл", "ml"].contains((d.unit ?? "").lowercased())
-        return ((d.qtyFractional ?? 0) == 1 || weight) ? 0.1 : 1
+        return 0.1
     }
     private var isFractional: Bool { stepValue != 1 }
     private var qtyLabel: String {
         isFractional ? fmtQty(qty, vm.detail?.unit) : String(Int(qty.rounded()))
     }
-    private func incQty() { Haptics.selection(); qty = ((qty + stepValue) * 1000).rounded() / 1000 }
+    /// Подставить стартовые значения по загруженной карточке: вес-пресет для
+    /// весового товара и количество, кратное шагу, — для остальных.
+    private func syncQtyDefaults() {
+        guard vm.mode == .product, let d = vm.detail else { return }
+        let ps = weightPresets(d)
+        if ps.count >= 2 {
+            if selectedWeight <= 0 || !ps.contains(where: { abs($0 - selectedWeight) < 0.0001 }) {
+                selectedWeight = ps.first ?? 0
+            }
+        } else {
+            // Дробный шаг: стартовое «1» не кратно шагу, и сервер пересчитал бы
+            // количество по своей сетке (1 кг при шаге 0,3 → 0,9). Ставим сам шаг.
+            let st = stepValue
+            if st != 1 { qty = st }
+        }
+    }
+
+    private func incQty() { Haptics.selection(); qty = snapQty(qty + stepValue) }
     private func decQty() {
         Haptics.selection()
-        let nq = ((qty - stepValue) * 1000).rounded() / 1000
+        let nq = snapQty(qty - stepValue)
         if nq >= stepValue { qty = nq }
     }
 
-    /// Весовой товар: количество задаёт выбранный чип-пресет, а не штучный степпер.
+    /// Количество по сетке шага — то же правило, что у сервера (snapOrderQty):
+    /// иначе экран показывает одну цену, а заказ считается по другой.
+    private func snapQty(_ q: Double) -> Double {
+        let st = stepValue
+        if st <= 0 { return q }
+        if st == 1 { return max(1, (q).rounded()) }
+        let snapped = max(st, (q / st).rounded() * st)
+        return (snapped * 1000).rounded() / 1000
+    }
+
+    /// Позиция закончилась: сервер отдаёт stopped в карточке товара.
+    private var isStopped: Bool { vm.detail?.stopped == true }
+
+    /// Количество задаётся чипами-пресетами, а не степпером. Чипы уместны
+    /// только когда пресетов хотя бы два: дробный товар без пресетов
+    /// (qty_fractional без списка весов) набирается обычными «+/−» с дробным
+    /// шагом — иначе выбирать было бы не из чего и в корзину ушёл бы ноль.
     private var isWeighedProduct: Bool {
-        if let d = vm.detail { return isWeighed(d) }
-        return false
+        guard let d = vm.detail else { return false }
+        return weightPresets(d).count >= 2
     }
 
     /// Кол-во, которое кладём в корзину: вес-пресет для весового, иначе штучное qty.
@@ -840,8 +915,8 @@ struct ProductView: View {
         let base = Money.dec(d.price)
         let allOptions = (d.modifierGroups ?? []).flatMap { $0.options ?? [] }
         var mods = Decimal(0)
-        if let size = selectedSize, let opt = allOptions.first(where: { $0.id == size }) {
-            mods += Money.dec(opt.price)
+        for id in selectedRadio.values {
+            if let opt = allOptions.first(where: { $0.id == id }) { mods += Money.dec(opt.price) }
         }
         for id in checkedAddons {
             if let opt = allOptions.first(where: { $0.id == id }) { mods += Money.dec(opt.price) }
@@ -852,8 +927,26 @@ struct ProductView: View {
 
     private var selectedModifierIds: [Int] {
         var ids = Array(checkedAddons)
-        if let size = selectedSize { ids.append(size) }
+        ids.append(contentsOf: selectedRadio.values)
         return ids
+    }
+
+    /// Все обязательные группы выбраны: радио — выбран вариант, чекбоксы — отмечено
+    /// не меньше min_qty (минимум 1). Группа без доступных вариантов не блокирует.
+    private var requiredChosen: Bool {
+        guard let d = vm.detail else { return false }
+        for g in d.modifierGroups ?? [] where g.isRequired == true {
+            let opts = g.options ?? []
+            if opts.isEmpty { continue }
+            let isRadio = (g.type ?? "") == "single" || (g.maxQty ?? 0) == 1
+            if isRadio {
+                if selectedRadio[g.id] == nil { return false }
+            } else {
+                let need = min(max(1, g.minQty ?? 1), opts.count)
+                if opts.filter({ checkedAddons.contains($0.id) }).count < need { return false }
+            }
+        }
+        return true
     }
 
     private func addToCart() {
@@ -923,6 +1016,9 @@ struct ProductView: View {
 
     private func book() {
         guard let slotId = selectedSlot, let slot = vm.slots.first(where: { $0.id == slotId }) else { return }
+        // Гость: раньше запрос уходил без токена и человек видел «Сессия
+        // истекла, войдите снова» без кнопки входа. Сначала — вход.
+        guard Session.shared.isLoggedIn else { showAuth = true; return }
         Task {
             let ok = await vm.book(slot: slot)
             if ok {

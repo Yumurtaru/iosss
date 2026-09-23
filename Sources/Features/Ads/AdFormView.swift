@@ -115,15 +115,33 @@ final class AdFormViewModel: ObservableObject {
         }
     }
 
+    /// Кнопка «Сохранить»: двойное нажатие (или нажатие во время загрузки фото)
+    /// раньше создавало два черновика — сервер повторы создания не склеивает.
+    func saveTapped() async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        await save(silent: false)
+    }
+
     func addPhotos(_ items: [PhotosPickerItem]) async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
         guard let cat = chosen else { toast = "Сначала выберите категорию"; return }
         // Фото цепляются к объявлению, поэтому черновик должен существовать.
         if adId == 0, await save(silent: true) == 0 { return }
         for item in items {
             if photos.count >= cat.photosLimit { toast = "Больше \(cat.photosLimit) фотографий нельзя"; break }
-            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-            if let p = try? await API.shared.uploadAdPhoto(adId: adId, jpeg: data) { photos.append(p) }
-            else { toast = "Не удалось загрузить фото"; break }
+            guard let raw = try? await item.loadTransferable(type: Data.self) else { continue }
+            // Камера iPhone снимает в HEIC — сервер его не принимает; шлём JPEG.
+            let data = ImageUpload.jpeg(from: raw) ?? raw
+            do {
+                if let ph = try await API.shared.uploadAdPhoto(adId: adId, jpeg: data) { photos.append(ph) }
+            } catch {
+                toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить фото"
+                break
+            }
         }
     }
 
@@ -136,6 +154,7 @@ final class AdFormViewModel: ObservableObject {
 
     /// Оплатить и опубликовать. onDone получает id опубликованного объявления.
     func publish(onDone: @escaping (Int) -> Void) async {
+        guard !busy else { return }
         busy = true
         defer { busy = false }
         let id = await save(silent: true)
@@ -308,7 +327,7 @@ struct AdFormView: View {
 
             Section {
                 Button {
-                    Task { await vm.save(silent: false) }
+                    Task { await vm.saveTapped() }
                 } label: {
                     HStack { Spacer(); Text("Сохранить"); Spacer() }
                 }

@@ -20,7 +20,7 @@ final class Session: ObservableObject {
     var isLoggedIn: Bool { token != nil }
 
     private init() {
-        token = UserDefaults.standard.string(forKey: "token")
+        token = TokenStore.access
         let c = UserDefaults.standard.integer(forKey: "cityId"); cityId = c == 0 ? nil : c
         cityName = UserDefaults.standard.string(forKey: "cityName")
         // При 401 (истёкший токен) аккуратно выходим из аккаунта.
@@ -29,8 +29,8 @@ final class Session: ObservableObject {
     /// refresh — токен продления (30 дней): API тихо обновляет access при 401 (security-аудит).
     func signIn(_ token: String, refresh: String? = nil) {
         self.token = token
-        UserDefaults.standard.set(token, forKey: "token")
-        if let r = refresh, !r.isEmpty { UserDefaults.standard.set(r, forKey: "refresh_token") }
+        TokenStore.access = token
+        if let r = refresh, !r.isEmpty { TokenStore.refresh = r }
         // После входа: спросить разрешение на push (если ещё не спрашивали) и отправить
         // device-токен на бэкенд — токен привязывается к вошедшему пользователю.
         Push.shared.requestAuthorization()
@@ -38,7 +38,6 @@ final class Session: ObservableObject {
     }
     func signOut() {
         token = nil
-        UserDefaults.standard.removeObject(forKey: "token")
-        UserDefaults.standard.removeObject(forKey: "refresh_token")
+        TokenStore.clear()
     }
 }

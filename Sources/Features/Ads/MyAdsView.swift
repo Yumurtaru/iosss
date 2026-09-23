@@ -45,7 +45,14 @@ final class MyAdsViewModel: ObservableObject {
         loading = false
     }
 
+    /// Идёт оплата/продление — второе нажатие игнорируем (сервер двойное
+    /// списание и так не допустит, но человек видел бы два сообщения).
+    private var paying = false
+
     func publish(_ ad: AdCard) async {
+        guard !paying else { return }
+        paying = true
+        defer { paying = false }
         do {
             let r = try await API.shared.adPublish(ad.stableId)
             let charged = r.charged ?? 0
@@ -57,6 +64,32 @@ final class MyAdsViewModel: ObservableObject {
             // доходит текст — показываем его и предлагаем пополнить кошелёк.
             if msg.contains("хватает") { shortage = msg } else { toast = msg }
         }
+    }
+
+    func renew(_ ad: AdCard) async {
+        guard !paying else { return }
+        paying = true
+        defer { paying = false }
+        do {
+            let r = try await API.shared.adRenew(ad.stableId)
+            let charged = r.charged ?? 0
+            toast = charged > 0 ? "Продлено, списано \(Money.format(charged))" : "Уже продлено"
+            await load()
+        } catch {
+            let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось продлить"
+            if msg.contains("хватает") { shortage = msg } else { toast = msg }
+        }
+    }
+
+    /// Срок кончается в ближайшие 3 дня (сервер пишет "Y-m-d H:i:s").
+    static func expiresSoon(_ s: String?) -> Bool {
+        guard let s, s.count >= 19 else { return false }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        guard let d = f.date(from: String(s.prefix(19))) else { return false }
+        let left = d.timeIntervalSinceNow
+        return left > 0 && left <= 3 * 86400
     }
 
     func archive(_ ad: AdCard) async {
@@ -174,6 +207,10 @@ struct MyAdsView: View {
                                 if let br = ad.blockReason, !br.isEmpty {
                                     Text(br).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
                                 }
+                                if ad.categoryOff == true {
+                                    Text("Раздел «\(ad.categoryName ?? "")» временно закрыт — объявление не показывается в ленте")
+                                        .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                                }
                             }
                             Spacer(minLength: 0)
                         }
@@ -185,6 +222,12 @@ struct MyAdsView: View {
                                 }
                                 Button("Снять") { Task { await vm.archive(ad) } }
                                     .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                                if MyAdsViewModel.expiresSoon(ad.expiresAt) {
+                                    Button { Task { await vm.renew(ad) } } label: {
+                                        Text("Продлить").font(YMFont.callout).fontWeight(.semibold)
+                                            .foregroundStyle(YMColor.accent)
+                                    }
+                                }
                             } else if ad.status == "blocked" {
                                 Text("Обратитесь в поддержку").font(YMFont.caption).foregroundStyle(YMColor.muted)
                             } else {

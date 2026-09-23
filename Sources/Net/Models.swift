@@ -62,7 +62,7 @@ struct Category: Codable, Identifiable, Hashable {
 
 struct Shop: Codable, Identifiable, Hashable {
     let id: Int; let slug: String?; let name: String?; let logo: String?; let cover: String?; let banner: String?
-    @LenientDouble var rating: Double?; let category: String?; let deliveryTime: String?; let isOpen: Bool?; let shopMode: String?; let address: String?
+    @LenientDouble var rating: Double?; let category: String?; let deliveryTime: String?; @LenientBool var isOpen: Bool?; let shopMode: String?; let address: String?
     @LenientInt var avgCookTime: Int?; @LenientInt var reviewsCount: Int?
     // Буст-продвижение (Фаза 3.1, аддитивно): 1 = показать бейдж «Реклама».
     @LenientInt var isPromoted: Int?
@@ -151,6 +151,15 @@ struct ShopDetail: Codable, Identifiable {
     /// Способы получения — те же коды и подпись, что в списке (аддитивно).
     let fulfillment: [String]?
     let fulfillmentLabel: String?
+    /// Открыто ли заведение ПРЯМО СЕЙЧАС и подпись статуса — считает сервер.
+    /// Считать это на телефоне нельзя: часы работы заданы временем заведения, а
+    /// у покупателя в другом часовом поясе «сейчас» своё, и карточка показывала
+    /// «Открыто» у закрытого заведения (и наоборот).
+    @LenientBool var isOpen: Bool?
+    let statusText: String?
+    /// Какие способы оплаты заведение принимает (cash / card_courier / sbp / online_card).
+    /// Без них экран рисовал все варианты, а сервер отказывал уже на последнем шаге.
+    let paymentMethods: [String]?
 }
 /// Зона доставки заведения. Сервер отдаёт массив `delivery_zones` в карточке магазина.
 struct DeliveryZone: Codable, Identifiable, Hashable {
@@ -200,6 +209,10 @@ struct Product: Codable, Identifiable, Hashable {
     let description: String?; let photo: String?; @LenientInt var categoryId: Int?; let hasMods: Bool?; @LenientInt var shopId: Int?
     let unit: String?
     @LenientBool var isHalal: Bool?
+    /// Позиция в стоп-листе (закончилась). Сервер отдаёт stopped в меню магазина;
+    /// раньше приложение его не знало — товар клали в корзину, а оформление
+    /// отклонялось «Часть товаров закончилась» без указания какой.
+    @LenientBool var stopped: Bool?
 }
 struct ComboItem: Codable {
     let name: String?; @LenientInt var qty: Int?; @LenientDouble var price: Double?; let photo: String?
@@ -210,6 +223,10 @@ struct ProductDetail: Codable, Identifiable {
     let comboItems: [ComboItem]?
     let unit: String?; @LenientInt var qtyFractional: Int?; @LenientDouble var qtyStep: Double?; let qtyPresets: String?
     @LenientBool var isHalal: Bool?
+    /// Позиция закончилась (стоп-лист) или выключена продавцом. Раньше карточка
+    /// этого не знала: кнопка «В корзину» работала, человек набирал корзину, а
+    /// отказ приходил только на оформлении и без указания позиции.
+    @LenientBool var stopped: Bool?
 }
 struct ModifierGroup: Codable, Identifiable {
     let id: Int; let name: String?; let type: String?; @LenientBool var isRequired: Bool?
@@ -218,7 +235,10 @@ struct ModifierGroup: Codable, Identifiable {
 struct ModifierOption: Codable, Identifiable, Hashable { let id: Int; let name: String?; @LenientDouble var price: Double?; let photoWebp: String? }
 struct MediaPhoto: Codable, Hashable { let pathWebp: String? }
 
-struct Profile: Codable { @LenientInt var id: Int?; let name: String?; let phone: String?; let email: String?; @LenientDouble var bonusBalance: Double? }
+// clientCode — карта клиента: личный штрихкод (EAN-13), который кассир
+// сканирует в магазине. Сервер выдаёт его при первом открытии профиля и больше
+// не меняет. Старый сервер поля не отдаёт — остаётся nil, блок не рисуется.
+struct Profile: Codable { @LenientInt var id: Int?; let name: String?; let phone: String?; let email: String?; @LenientDouble var bonusBalance: Double?; let clientCode: String? }
 struct Address: Codable, Identifiable {
     let id: Int; let label: String?; let city: String?; let street: String?; let house: String?
     let apartment: String?; let entrance: String?; let floor: String?; let intercom: String?
@@ -348,6 +368,8 @@ struct OrderChange: Codable, Identifiable {
 struct OrderDetail: Codable, Identifiable {
     let id: Int; @LenientInt var dailyNumber: Int?; let status: String?; @LenientDouble var total: Double?
     let deliveryType: String?; let paymentType: String?; let address: String?
+    /// pending | paid | … — чтобы не показывать «Оплатить» у оплаченного заказа.
+    let paymentStatus: String?
     let createdAt: String?; let shopName: String?; let items: [OrderItem]?
     @LenientDouble var subtotal: Double?; @LenientDouble var deliveryPrice: Double?; @LenientDouble var serviceFee: Double?
     @LenientDouble var tip: Double?; @LenientDouble var discount: Double?; let promoCode: String?
@@ -486,6 +508,8 @@ struct AdCard: Codable, Identifiable, Hashable {
     @LenientDecimal var renewPrice: Decimal?
     @LenientInt var renewDays: Int?
     var blockReason: String?
+    /// Раздел объявления выключили в админке: объявление активно, но в ленте его нет.
+    @LenientBool var categoryOff: Bool?
 
     var stableId: Int { id ?? 0 }
     var photoURL: String? { (photo?.isEmpty == false ? photo : nil) ?? (photoThumb?.isEmpty == false ? photoThumb : nil) }
@@ -561,6 +585,26 @@ struct AdSaveBody: Encodable {
     // профиля, и объявление о гараже в соседнем городе туда положить было
     // нельзя — при том что фильтр по городу в ленте есть.
     let cityId: Int?
+
+    // Явная запись полей: синтезированный Encodable выкидывает nil, а сервер
+    // меняет поле, только если ключ пришёл. Очищенный адрес и «состояние не
+    // указано» при правке раньше не сохранялись, хотя экран писал «Сохранено».
+    enum CodingKeys: String, CodingKey {
+        case categoryId, title, description, price, isNegotiable, conditionNew, address, contactPhone, hidePhone, cityId
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(categoryId, forKey: .categoryId)
+        try c.encode(title, forKey: .title)
+        try c.encode(description, forKey: .description)
+        try c.encode(price, forKey: .price)
+        try c.encode(isNegotiable, forKey: .isNegotiable)
+        try c.encode(conditionNew, forKey: .conditionNew)      // nil → null = «не указано»
+        try c.encode(address ?? "", forKey: .address)          // "" → сервер очистит
+        try c.encode(contactPhone, forKey: .contactPhone)
+        try c.encode(hidePhone, forKey: .hidePhone)
+        try c.encodeIfPresent(cityId, forKey: .cityId)
+    }
 }
 struct AdCreatedResponse: Codable {
     @LenientInt var adId: Int?
@@ -884,6 +928,13 @@ struct ReorderData: Decodable {
 }
 struct ReorderItem: Decodable {
     @LenientInt var productId: Int?; @LenientDouble var qty: Double?; let name: String?; @LenientDouble var price: Double?; let photo: String?
+    // Аддитивно (сервер 2026-09): модификаторы строки, цена с ними, единица и дробность.
+    let modifierIds: [Int]?
+    let modifiersLabel: String?
+    @LenientDouble var unitPrice: Double?
+    let unit: String?
+    @LenientBool var qtyFractional: Bool?
+    let qtyPresets: String?
 }
 struct PromoCheckBody: Encodable {
     let code: String; let subtotal: Double; let shopId: Int?
