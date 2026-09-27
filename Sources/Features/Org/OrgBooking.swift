@@ -170,7 +170,7 @@ struct OrgBookingSection: View {
                         CountStepper(
                             label: "Часов подряд", value: $hours,
                             min: 1, max: sv.maxSlotsValue,
-                            hint: "По \(sv.slotMinutes) мин"
+                            hint: "По \(Self.stepHint(sv, slots)) мин"
                         )
                     }
                     if sv.needsGuests || sv.needsHours {
@@ -179,7 +179,12 @@ struct OrgBookingSection: View {
                                 .font(.system(size: 13, weight: .bold))
                                 .foregroundStyle(YMColor.muted)
                             Spacer()
-                            Text(Money.format(sv.quote(guests: guests, slots: hours)))
+                            // Длину берём у первого доступного времени: сетка
+                            // могла остаться от прежней длительности услуги, и
+                            // цена «по услуге» расходилась бы с шагом
+                            // подтверждения и с чеком.
+                            Text(Money.format(sv.quote(guests: guests, slots: hours,
+                                minutesTotal: Self.previewMinutes(sv, slots, guests: guests, hours: hours))))
                                 .font(.system(size: 15, weight: .heavy))
                                 .foregroundStyle(YMColor.text)
                         }
@@ -204,7 +209,7 @@ struct OrgBookingSection: View {
 
     /// Окна, с которых можно начать бронь при текущем выборе человек/часов.
     private var startableSlots: [Slot] {
-        Self.bookableStarts(slots, guests: guests, hours: hours)
+        Self.bookableStarts(slots, guests: guests, hours: hours, buffer: selected?.bufferMinutes ?? 0)
     }
 
     @ViewBuilder
@@ -237,7 +242,9 @@ struct OrgBookingSection: View {
     private func confirmSheet(slot: Slot) -> some View {
         let atClient = selected?.isAtClient ?? false
         // Цена брони, а не цена услуги: у игрового зала это 150 ₽ × человек × часы.
-        let price = selected?.quote(guests: guests, slots: hours) ?? 0
+        // Длину берём у выбранных окон: 30 + 60 мин — это 1,5 часа, а не 2×30.
+        let chain = Self.chainMinutes(slots, from: slot, hours: hours, buffer: selected?.bufferMinutes ?? 0)
+        let price = selected?.quote(guests: guests, slots: hours, minutesTotal: chain) ?? 0
         let travel = atClient ? Money.dec(selected?.travelFee) : 0
         // Сервисный сбор считается от полной суммы, включая выезд, — ровно так
         // же, как на сервере. Иначе итог на экране разойдётся с чеком.
@@ -246,9 +253,9 @@ struct OrgBookingSection: View {
         return ConfirmBookingSheet(
             dateLabel: fmtDateHuman(selectedDate),
             // Интервал, а не одно время: бронь на 2 часа — это 19:00–21:00.
-            timeLabel: Self.slotRangeLabel(slot, slotMinutes: selected?.slotMinutes ?? 0, hours: hours),
+            timeLabel: Self.slotRangeLabel(slot, slotMinutes: selected?.slotMinutes ?? 0, hours: hours, chainMinutes: chain),
             serviceName: selected?.name ?? "",
-            composition: Self.bookingComposition(selected, guests: guests, hours: hours),
+            composition: Self.bookingComposition(selected, guests: guests, hours: hours, minutes: chain),
             price: price, travel: travel, fee: fee, total: total,
             atClient: atClient,
             address: $visitAddress,
@@ -400,12 +407,64 @@ struct OrgBookingSection: View {
 
     // MARK: Отбор окон и подписи брони (1:1 с Android OrgBooking.kt)
 
+    /// Суммарная длина `hours` окон подряд, начиная с `slot`. 0 — сервер длины
+    /// не прислал: тогда считаем по длительности услуги, как раньше.
+    fileprivate static func chainMinutes(_ slots: [Slot], from slot: Slot, hours: Int, buffer: Int = 0) -> Int {
+        guard let i = slots.firstIndex(where: { $0.id == slot.id }) else { return 0 }
+        var sum = 0
+        for k in 0..<max(1, hours) {
+            let idx = i + k
+            guard idx < slots.count else { return fallbackMinutes(slots[i], hours: hours) }
+            if slots[idx].minutesValue <= 0 { return fallbackMinutes(slots[i], hours: hours) }
+            if k > 0, !adjacent(slots[idx - 1], slots[idx], buffer: buffer) {
+                return fallbackMinutes(slots[i], hours: hours)
+            }
+            sum += slots[idx].minutesValue
+        }
+        return sum
+    }
+
+    /// Так же, как сервер, когда длину всей цепочки посчитать не удалось:
+    /// берём длину первого окна × число окон (serviceSlotMinutes × slotsCount).
+    private static func fallbackMinutes(_ first: Slot, hours: Int) -> Int {
+        first.minutesValue > 0 ? first.minutesValue * max(1, hours) : 0
+    }
+
+    /// Окна соседние, если следующее начинается сразу после предыдущего или
+    /// ровно через перерыв (buffer_min) — тот же допуск, что у serviceSlotChain.
+    fileprivate static func adjacent(_ prev: Slot, _ cur: Slot, buffer: Int) -> Bool {
+        let hhmm: (String?) -> Int = { t in
+            let p = String(t ?? "").split(separator: ":").map(String.init)
+            return (Int(p.first ?? "0") ?? 0) * 60 + (Int(p.count > 1 ? p[1] : "0") ?? 0)
+        }
+        let gap = hhmm(cur.timeStart) - hhmm(prev.timeEnd)
+        return gap == 0 || (buffer > 0 && gap == buffer)
+    }
+
+    /// Длина брони для предпросмотра ДО выбора времени: по первому окну, с
+    /// которого бронь можно начать. 0 — свободного времени нет или сервер длин
+    /// не прислал, тогда экран считает по длительности услуги, как раньше.
+    fileprivate static func previewMinutes(_ sv: ServiceItem, _ slots: [Slot], guests: Int, hours: Int) -> Int {
+        let starts = bookableStarts(slots, guests: guests, hours: hours, buffer: sv.bufferMinutes)
+        guard let first = starts.first else { return 0 }
+        return chainMinutes(slots, from: first, hours: hours, buffer: sv.bufferMinutes)
+    }
+
+    /// «По 30 мин» — длина окна для подсказки степпера: фактическая, если она
+    /// известна, иначе длительность услуги.
+    fileprivate static func stepHint(_ sv: ServiceItem, _ slots: [Slot]) -> Int {
+        let starts = bookableStarts(slots, guests: 1, hours: 1, buffer: sv.bufferMinutes)
+        let m = starts.first?.minutesValue ?? 0
+        return m > 0 ? m : sv.slotMinutes
+    }
+
     /// Окна, с которых можно НАЧАТЬ бронь: нужно `hours` окон подряд (следующее
-    /// начинается ровно там, где кончилось предыдущее) и в каждом хватает мест.
+    /// начинается сразу после предыдущего или ровно через перерыв `buffer`) и в
+    /// каждом хватает мест.
     ///
     /// Тот же отбор делает сервер под блокировкой (serviceSlotChain +
     /// serviceSlotsHaveRoom) — здесь он нужен, чтобы не предлагать занятое время.
-    fileprivate static func bookableStarts(_ slots: [Slot], guests: Int, hours: Int) -> [Slot] {
+    fileprivate static func bookableStarts(_ slots: [Slot], guests: Int, hours: Int, buffer: Int = 0) -> [Slot] {
         if hours <= 1 && guests <= 1 { return slots.filter { $0.freeValue >= 1 } }
         var out: [Slot] = []
         for i in slots.indices {
@@ -414,7 +473,7 @@ struct OrgBookingSection: View {
                 let idx = i + k
                 guard idx < slots.count else { ok = false; break }
                 if slots[idx].freeValue < guests { ok = false; break }
-                if k > 0, slots[idx].timeStart != slots[idx - 1].timeEnd { ok = false; break }
+                if k > 0, !adjacent(slots[idx - 1], slots[idx], buffer: buffer) { ok = false; break }
             }
             if ok { out.append(slots[i]) }
         }
@@ -422,23 +481,40 @@ struct OrgBookingSection: View {
     }
 
     /// «19:00» или «19:00–21:00» для брони на несколько окон.
-    fileprivate static func slotRangeLabel(_ slot: Slot, slotMinutes: Int, hours: Int) -> String {
+    fileprivate static func slotRangeLabel(_ slot: Slot, slotMinutes: Int, hours: Int, chainMinutes: Int = 0) -> String {
         let start = String((slot.timeStart ?? "").prefix(5))
-        guard hours > 1, slotMinutes > 0, start.count >= 4 else { return start }
+        let span = chainMinutes > 0 ? chainMinutes : slotMinutes * hours
+        guard hours > 1, span > 0, start.count >= 4 else { return start }
         let parts = start.split(separator: ":").map(String.init)
         let mins = (Int(parts.first ?? "0") ?? 0) * 60 + (Int(parts.count > 1 ? parts[1] : "0") ?? 0)
-            + slotMinutes * hours
+            + span
         let end = String(format: "%02d:%02d", (mins / 60) % 24, mins % 60)
         return "\(start)–\(end)"
     }
 
-    /// «3 чел. · 2 ч» — состав брони. nil, если выбирать было нечего.
-    fileprivate static func bookingComposition(_ service: ServiceItem?, guests: Int, hours: Int) -> String? {
+    /// «3 чел. · 1,5 ч» — состав брони. nil, если выбирать было нечего.
+    /// `minutes` — фактическая длина цепочки: два окна по 30 и 60 мин — это
+    /// 1,5 часа, и цена на том же экране считается именно так.
+    fileprivate static func bookingComposition(_ service: ServiceItem?, guests: Int, hours: Int, minutes: Int = 0) -> String? {
         guard let sv = service else { return nil }
         var parts: [String] = []
         if sv.needsGuests { parts.append("\(guests) чел.") }
-        if sv.needsHours { parts.append("\(hours) ч") }
+        if sv.needsHours {
+            let span = minutes > 0 ? minutes : sv.slotMinutes * max(1, hours)
+            parts.append(hoursLabel(span))
+        }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// «2 ч» / «1,5 ч» — часы по длине окон, запятая как в остальном интерфейсе.
+    fileprivate static func hoursLabel(_ minutes: Int) -> String {
+        let h = Double(max(0, minutes)) / 60
+        if h == h.rounded() { return "\(Int(h)) ч" }
+        // %.2f всегда пишет точку независимо от языка устройства: «1.50».
+        var s = String(format: "%.2f", h)
+        while s.hasSuffix("0") { s.removeLast() }
+        if s.hasSuffix(".") { s.removeLast() }
+        return s.replacingOccurrences(of: ".", with: ",") + " ч"
     }
 }
 

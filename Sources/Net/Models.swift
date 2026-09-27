@@ -731,6 +731,11 @@ struct ServiceItem: Codable, Identifiable {
     @LenientInt var maxSlots: Int?
     /// Длительность одного окна, мин. Дублирует durationMin — считает сервер.
     @LenientInt var slotMin: Int?
+    /// Перерыв между окнами, мин. Цепочку «N окон подряд» сервер собирает с
+    /// допуском на него, поэтому клиент обязан считать такие окна соседними —
+    /// иначе прячет время, которое сервер забронировал бы. Старый сервер поля
+    /// не отдаёт → nil → 0, как было.
+    @LenientInt var bufferMin: Int?
     /// Группа в списке: «Игровой зал», «Кинозал».
     let groupName: String?
 
@@ -750,6 +755,7 @@ struct ServiceItem: Codable, Identifiable {
     @LenientInt var sortOrder: Int?
 
     var capacityValue: Int { max(1, capacity ?? 1) }
+    var bufferMinutes: Int { max(0, bufferMin ?? 0) }
     var slotMinutes: Int { max(5, (slotMin ?? 0) > 0 ? (slotMin ?? 0) : (durationMin ?? 30)) }
     /// Максимум человек в ОДНОЙ брони.
     var guestsMax: Int {
@@ -765,11 +771,15 @@ struct ServiceItem: Codable, Identifiable {
 
     /// Предпросмотр стоимости. Повторяет serviceBookingQuote() из
     /// core/helpers.php; ИТОГ всегда считает сервер, здесь только экран.
-    func quote(guests: Int, slots: Int) -> Decimal {
+    /// `minutesTotal` — суммарная длина выбранных окон, если она известна с
+    /// сервера (Slot.minutes). Ноль/nil → считаем по длительности услуги, как
+    /// раньше: у старого сервера длины окон нет.
+    func quote(guests: Int, slots: Int, minutesTotal: Int? = nil) -> Decimal {
         let g = Decimal(max(1, guests))
         let s = Decimal(max(1, slots))
         let base = Money.dec(price)
-        let minutes = Decimal(slotMinutes * max(1, slots))
+        let mt = minutesTotal ?? 0
+        let minutes = Decimal(mt > 0 ? mt : slotMinutes * max(1, slots))
         var raw: Decimal
         switch pricingMode {
         case "per_person": raw = base * g * s
@@ -819,9 +829,16 @@ struct Slot: Codable, Identifiable {
     @LenientInt var capacity: Int?
     @LenientInt var booked: Int?
     @LenientInt var free: Int?
+    /// Фактическая длина ИМЕННО ЭТОГО окна, мин. Аддитивно: старый сервер поля
+    /// не отдаёт → nil, и экран считает по длительности услуги, как раньше.
+    /// Окна одной услуги могут быть разной длины (23:00–00:00 и 09:00–09:30),
+    /// поэтому предпросмотр цены берёт длину окна, а не услуги.
+    @LenientInt var minutes: Int?
 
     var capacityValue: Int { max(1, capacity ?? 1) }
     var freeValue: Int { max(0, free ?? 1) }
+    /// 0 — сервер длину не прислал.
+    var minutesValue: Int { max(0, minutes ?? 0) }
 }
 
 // ---- Подарочные карты ----
