@@ -66,6 +66,19 @@ struct OrgCard: View {
                             BlurInfoBadge(text: t).padding(12)
                         }
                     }
+                    // Платное продвижение обязано быть помечено — этого на iOS
+                    // не было вовсе: сервер отдаёт is_promoted, а бейджа не
+                    // рисовал никто (на Android и на сайте он есть).
+                    .overlay(alignment: .bottomLeading) {
+                        if (shop.isPromoted ?? 0) == 1 {
+                            Text("Реклама")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .background(Color.black.opacity(0.55), in: Capsule())
+                                .padding(12)
+                        }
+                    }
 
                 // ── Текстовый блок ──
                 VStack(alignment: .leading, spacing: 5) {

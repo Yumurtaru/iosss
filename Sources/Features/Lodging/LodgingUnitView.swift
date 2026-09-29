@@ -93,7 +93,10 @@ final class LodgingUnitVM: ObservableObject {
                                      guestName: name.isEmpty ? nil : name,
                                      guestPhone: phone.isEmpty ? nil : phone,
                                      guestComment: comment.isEmpty ? nil : comment,
-                                     payment: "on_arrival")
+                                     payment: "on_arrival",
+                                     // Сумма из расчёта: сервер не оформит бронь
+                                     // дороже той, что гость видел на экране.
+                                     expectedTotal: quote.map { "\($0.totalValue)" })
             )
             Haptics.success()
             // Даты после брони заняты — обновляем календарь, чтобы их нельзя
@@ -105,6 +108,11 @@ final class LodgingUnitVM: ObservableObject {
             // APIError — LocalizedError, поэтому тут уже текст сервера
             // («Минимальный срок…»), а не «Ошибка 422».
             message = error.localizedDescription
+            // ПЕРЕСЧИТЫВАЕМ. Отказ «цена изменилась» приходит вместе с новой
+            // суммой, и без пересчёта повторное нажатие отправляло прежнюю
+            // ожидаемую сумму и получало тот же отказ — экран становился
+            // тупиком. Так же поступает сайт.
+            await recalc(slug: slug, from: from, to: to, adults: adults, children: children, planId: planId)
             return nil
         }
     }

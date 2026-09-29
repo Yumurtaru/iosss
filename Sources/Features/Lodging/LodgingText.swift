@@ -223,9 +223,19 @@ enum LodgingText {
     static func cancelWarning(_ t: LodgingTrip, today: String = LodgingDate.today) -> String {
         let dates = range(t.dateFrom, t.dateTo)
         var s = (t.unit?.title ?? "Объект") + (dates.isEmpty ? "." : ", " + dates + ".")
+        // СУММУ удержания показываем ДО нажатия: её считает сервер и присылает в
+        // penalty_now. Раньше «часть суммы будет удержана» было единственным
+        // предупреждением, а сумму гость узнавал из ответа — то есть когда
+        // отмена уже произошла и обратного хода не было.
+        if t.penaltyNowValue > 0 {
+            s += " Объект вправе удержать " + money(t.penaltyNowValue)
+                + " — оплаты через площадку не было, счёт выставит объект."
+        } else {
+            s += " Удержания не будет."
+        }
         if let dl = t.cancelDeadline, !dl.isEmpty {
             s += today > dl
-                ? " Срок бесплатной отмены прошёл, часть суммы будет удержана."
+                ? " Срок бесплатной отмены прошёл."
                 : " Бесплатная отмена до " + LodgingDate.human(dl) + "."
         }
         return s

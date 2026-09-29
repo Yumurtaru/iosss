@@ -288,7 +288,9 @@ struct LodgingResultCard: View {
 
                 HStack(spacing: YMSpace.xs) {
                     if !item.isAvailable {
-                        Text("занято на эти даты")
+                        // Причина от сервера: «занято» писалось и на прошедшие
+                        // даты, и на закрытые, и на слишком короткий срок.
+                        Text(item.reasonText ?? "занято на эти даты")
                             .font(YMFont.caption2)
                             .foregroundStyle(.white)
                             .padding(.horizontal, 9).padding(.vertical, 4)

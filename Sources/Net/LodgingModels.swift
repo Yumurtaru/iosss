@@ -77,6 +77,10 @@ struct LodgingItem: Codable, Hashable, Identifiable {
     @LenientBool var available: Bool?
     /// Машинный код причины: no_rooms | closed | min_nights | cta | ctd …
     let reason: String?
+    /// Текст причины от сервера. Без него карточка писала «занято на эти даты»
+    /// на что угодно — на прошедшие даты, на закрытые и на слишком короткий
+    /// срок, то есть врала.
+    let reasonText: String?
 
     var id: String { unit?.slug ?? UUID().uuidString }
     var isAvailable: Bool { available ?? true }
@@ -330,6 +334,11 @@ struct LodgingBookReq: Encodable {
     let guestComment: String?
     /// "online" | "on_arrival"
     let payment: String
+    /// Сумма, которую показали гостю в расчёте. Сервер сверяет её с пересчётом
+    /// и при расхождении отвечает 409 reason=price_changed, НЕ создавая бронь:
+    /// между расчётом и подтверждением продавец мог поднять цену в календаре, и
+    /// бронь оформлялась дороже — новую сумму гость видел уже после факта.
+    let expectedTotal: String?
 }
 
 struct LodgingBookResp: Codable {
@@ -404,8 +413,14 @@ struct LodgingTrip: Codable, Hashable, Identifiable {
     let statusLabel: String?
     let cancelDeadline: String?
     @LenientBool var canCancel: Bool?
+    /// Правило отмены — снимок на момент брони: none | first_night | full.
+    let cancelPenalty: String?
+    /// Сколько объект вправе удержать, если отменить СЕЙЧАС. Раньше гость
+    /// узнавал сумму из ответа — когда отмена уже произошла.
+    @LenientDecimal var penaltyNow: Decimal?
 
     var identifier: Int { id ?? 0 }
+    var penaltyNowValue: Decimal { penaltyNow ?? 0 }
     var totalValue: Decimal { total ?? 0 }
     var nightsValue: Int { max(0, nights ?? 0) }
     var cancellable: Bool { canCancel ?? false }

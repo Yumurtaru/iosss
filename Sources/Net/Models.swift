@@ -213,6 +213,10 @@ struct Product: Codable, Identifiable, Hashable {
     /// раньше приложение его не знало — товар клали в корзину, а оформление
     /// отклонялось «Часть товаров закончилась» без указания какой.
     @LenientBool var stopped: Bool?
+    /// Платное продвижение товара (аддитивно, 1 = показать бейдж «Реклама»).
+    /// Сервер ставит продвинутые товары в начало выдачи поиска — подъём обязан
+    /// быть помечен, иначе это неотмеченная реклама.
+    @LenientInt var isPromoted: Int?
 }
 struct ComboItem: Codable {
     let name: String?; @LenientInt var qty: Int?; @LenientDouble var price: Double?; let photo: String?

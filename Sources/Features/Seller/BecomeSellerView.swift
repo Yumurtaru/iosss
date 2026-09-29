@@ -7,7 +7,7 @@
 //
 //  API: POST api/v1/organizations/apply  body {org_name, full_name, phone, type, city_id}
 //       → OrgApplyResult {registration_id, status:"pending"}. Заявка падает в shop_registrations
-//       (pending) → модерация в админке. Тип — канон API: store | restaurant | service.
+//       (pending) → модерация в админке. Тип — канон API: store | restaurant | service | lodging.
 //
 //  Токены — только YM. Light + dark. Русские литералы.
 //
@@ -89,7 +89,7 @@ struct BecomeSellerView: View {
         VStack(alignment: .leading, spacing: YMSpace.lg) {
             Text("Продавайте на Yumurta")
                 .font(YMFont.title).foregroundStyle(YMColor.text)
-            Text("Магазин, ресторан или услуги — разместите свою организацию в приложении и получайте заказы от клиентов вашего города.")
+            Text("Магазин, ресторан, услуги или жильё — разместите свою организацию в приложении и получайте заказы и брони от клиентов вашего города.")
                 .font(YMFont.body).foregroundStyle(YMColor.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -149,7 +149,12 @@ private struct ApplyOrgFormView: View {
     @State private var orgName = ""
     @State private var fullName = ""
     @State private var phone = ""
-    @State private var type = "store"          // store | restaurant | service
+    // store | restaurant | service | lodging
+    // «Жильё» (lodging) — четвёртый формат площадки: отели, гостевые дома,
+    // квартиры посуточно. На сайте он в заявке был с самого начала, сервер его
+    // принимает, а в приложении варианта не было — человек с гостевым домом
+    // выбирал «Услуги» и попадал в кабинет без календаря и броней.
+    @State private var type = "store"
     @State private var sending = false
     @State private var error: String?
 
@@ -169,8 +174,12 @@ private struct ApplyOrgFormView: View {
                         Text("Магазин").tag("store")
                         Text("Ресторан").tag("restaurant")
                         Text("Услуги").tag("service")
+                        Text("Жильё").tag("lodging")
                     }
-                    .pickerStyle(.segmented)
+                    // Обычный список вместо segmented: четыре подписи в одной
+                    // полосе на iPhone SE обрезаются до «Ресто…», и выбрать
+                    // формат становится гаданием.
+                    .pickerStyle(.automatic)
                 }
                 Section("Контакты") {
                     TextField("Ваше ФИО", text: $fullName)

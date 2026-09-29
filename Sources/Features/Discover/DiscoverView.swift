@@ -302,6 +302,16 @@ private struct SearchSection: View {
                     .overlay(alignment: .topTrailing) {
                         HeartButton(isFav: favProduct(p.id), size: 26, favColor: YMColor.statusCancel).padding(6)
                     }
+                    .overlay(alignment: .bottomLeading) {
+                        if (p.isPromoted ?? 0) == 1 {
+                            Text("Реклама")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 3)
+                                .background(Color.black.opacity(0.55), in: Capsule())
+                                .padding(6)
+                        }
+                    }
                 Text(p.name ?? "—")
                     .font(.system(size: 13.5, weight: .bold))
                     .foregroundStyle(YMColor.text).lineLimit(1)
