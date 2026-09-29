@@ -20,7 +20,15 @@ targets:
         # в settings, и публикация падала с 90062/90186.
         # Ключ обязан быть здесь: значения из info.properties перекрывают
         # умолчания XcodeGen.
-        CFBundleShortVersionString: "1.1"
+        #
+        # ВЕРСИЮ ПОДНИМАТЬ НА КАЖДУЮ ПОДАЧУ. Apple не принимает сборку с
+        # номером уже одобренной версии: «1.1» была одобрена, и повторная
+        # загрузка 1.1 отбивается сразу двумя ошибками —
+        #   90062 «версия должна быть выше уже одобренной 1.1»
+        #   90186 «ветка 1.1 закрыта для новых сборок».
+        # Поднимать нужно ИМЕННО этот ключ (и MARKETING_VERSION ниже, чтобы
+        # локальная сборка в Xcode не расходилась).
+        CFBundleShortVersionString: "1.2"
         NSLocationWhenInUseUsageDescription: "Нужно, чтобы определить ваш город и показать курьера на карте во время доставки"
         UILaunchScreen:
           UIColorName: LaunchBG
@@ -41,7 +49,7 @@ targets:
         # Держим в том же значении, что CFBundleShortVersionString выше —
         # для локальной сборки в Xcode. На публикацию влияет именно ключ
         # в info.properties, а не эта настройка.
-        MARKETING_VERSION: "1.1"
+        MARKETING_VERSION: "1.2"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: 1
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

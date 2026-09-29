@@ -47,15 +47,57 @@ workflows:
           echo "  Уйдёт в App Store: версия $FINAL_V, сборка $FINAL_B"
           echo "─────────────────────────────────────────"
 
-          # Ранняя проверка: лучше упасть здесь за секунду, чем собирать
-          # четыре минуты и получить отказ на публикации.
-          if [ -z "$FINAL_V" ] || [ "$FINAL_V" = "1.0" ]; then
-            echo "ОШИБКА: версия '$FINAL_V' не годится. Apple не примет 1.0 —"
-            echo "эта ветка уже одобрена и закрыта для новых сборок."
-            echo "Поправьте CFBundleShortVersionString в project.yml"
-            echo "или задайте переменную APP_VERSION в настройках workflow."
+          # Ранняя проверка формата: лучше упасть здесь за секунду, чем
+          # собирать четыре минуты и получить отказ на публикации.
+          case "$FINAL_V" in
+            ''|*[!0-9.]*) echo "ОШИБКА: версия '$FINAL_V' не похожа на номер (нужно вида 1.2 или 1.2.3)."; exit 1;;
+          esac
+
+      # ПРОВЕРКА, ЧТО ВЕРСИЯ ЕЩЁ СВОБОДНА — до сборки, а не после.
+      #
+      # Apple отбивает загрузку с номером уже одобренной версии:
+      #   90062 «версия должна быть выше уже одобренной»
+      #   90186 «ветка <версия> закрыта для новых сборок»
+      # Узнать об этом на публикации — значит потерять четыре минуты сборки и
+      # разбираться в чужих кодах ошибок. Спрашиваем App Store Connect заранее
+      # и называем свободный номер.
+      #
+      # Шаг НЕ роняет сборку, если сам не смог разобраться (нет ключей, API не
+      # ответил, неожиданный JSON): падаем только когда точно знаем, что номер
+      # занят. Иначе обслуживающая проверка блокировала бы выпуск на пустом месте.
+      - name: Версия свободна в App Store Connect
+        script: |
+          cd "$CM_BUILD_DIR"
+          APP_ID="6787053938"
+          V=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "Generated/Info.plist" 2>/dev/null || true)
+          if [ -z "$V" ]; then echo "Не смог прочитать версию из Info.plist — проверку пропускаю."; exit 0; fi
+          if ! OUT=$(app-store-connect apps app-store-versions "$APP_ID" --platform IOS --json 2>/tmp/asc_err.txt); then
+            echo "App Store Connect не ответил — проверку пропускаю. Начало ответа:"
+            head -c 500 /tmp/asc_err.txt || true
+            exit 0
+          fi
+          printf '%s' "$OUT" > /tmp/asc_versions.json
+          # Разбор устойчив к трём формам ответа: массив, {"data": [...]}, один объект.
+          RES=$(V="$V" python3 -c "import json,os,sys;d=json.load(open('/tmp/asc_versions.json'));d=d.get('data',d) if isinstance(d,dict) else d;d=[d] if isinstance(d,dict) else (d or []);a=[i.get('attributes') or {} for i in d if isinstance(i,dict)];closed={'READY_FOR_SALE','APPROVED','PENDING_DEVELOPER_RELEASE','PENDING_APPLE_RELEASE','PROCESSING_FOR_APP_STORE','REPLACED_BY_NEW_VERSION'};mine=os.environ['V'];busy=any(x.get('versionString')==mine and (x.get('appStoreState') or x.get('state')) in closed for x in a);nums=[tuple(int(p) for p in (x.get('versionString') or '0').split('.')) for x in a if (x.get('versionString') or '').replace('.','').isdigit()];top=max(nums) if nums else (0,0);nxt='%d.%d' % (top[0], top[1]+1) if len(top)>1 else '%d.1' % top[0];print(('busy' if busy else 'free')+' '+nxt)" 2>/tmp/asc_parse_err.txt || true)
+          if [ -z "$RES" ]; then
+            echo "Не разобрал ответ App Store Connect — проверку пропускаю. Начало ответа:"
+            head -c 300 /tmp/asc_versions.json || true
+            head -c 200 /tmp/asc_parse_err.txt || true
+            exit 0
+          fi
+          STATE=$(printf '%s' "$RES" | awk '{print $1}')
+          NEXTV=$(printf '%s' "$RES" | awk '{print $2}')
+          if [ "$STATE" = "busy" ]; then
+            echo "─────────────────────────────────────────"
+            echo "  ОШИБКА: версия $V в App Store уже закрыта для новых сборок."
+            echo "  Apple ответит 90062/90186 на публикации."
+            echo "  Поставьте свободный номер: $NEXTV"
+            echo "  Где: project.yml → CFBundleShortVersionString и MARKETING_VERSION"
+            echo "  (или переменная APP_VERSION в настройках workflow)."
+            echo "─────────────────────────────────────────"
             exit 1
           fi
+          echo "Версия $V в App Store Connect свободна — продолжаем."
 
       - name: Применить профиль
         script: |
