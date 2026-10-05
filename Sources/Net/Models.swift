@@ -188,6 +188,9 @@ struct DeliveryQuote: Codable {
     @LenientInt var timeMin: Int?
     @LenientInt var timeMax: Int?
     let reason: String?
+    // Аддитивно: true — цена не по зоне, а единая по городу заведения.
+    let flat: Bool?
+    let city: String?
 }
 
 // Подсказка адреса с сервера (GET /api/address/suggest?q=…) — прокси Dadata, токен на сервере.

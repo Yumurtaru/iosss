@@ -80,8 +80,18 @@ private struct PromoCheckResult: Decodable {
     let freeDelivery: Bool?
 }
 // Тело расчёта доставки (совпадает со старым клиентом).
+// `address` нужен заведениям БЕЗ зон доставки: у них цена одна на весь город,
+// и сервер по городу из адреса решает, возят ли туда. Координат у такого адреса
+// может не быть вовсе. Поле опциональное — для заведений с зонами запрос тот же.
+private struct QuoteAddressBody: Encodable {
+    let value: String?
+    let city: String?
+    let street: String?
+    let house: String?
+}
 private struct QuoteBody: Encodable { let shopId: Int; let lat: Double; let lng: Double; let subtotal: Double
-    enum CodingKeys: String, CodingKey { case shopId = "shop_id", lat, lng, subtotal } }
+    var address: QuoteAddressBody? = nil
+    enum CodingKeys: String, CodingKey { case shopId = "shop_id", lat, lng, subtotal, address } }
 
 // Тело создания адреса (POST api/v1/profile/addresses). camelCase → snake_case автоматически.
 // Совпадает 1:1 с AddressBody профиля и AddressReq Android.
@@ -263,10 +273,19 @@ struct CheckoutView: View {
     private var outOfZone: Bool {
         fulfillment == .delivery && quote != nil && quote?.available == false
     }
-    // Для доставки обязателен выбранный адрес с координатами.
+    /// У заведения нет ни одной зоны доставки → цена единая по его городу, и
+    /// координаты адреса не нужны: определять по ним нечего. Раньше их требовали
+    /// всегда, и в малом городе доставку было не оформить вовсе — подсказки
+    /// адресов часто не знают ни улицы, ни дома. Карточка ещё не пришла
+    /// (`deliveryZones == nil`) → считаем, что зоны есть: безопасный откат.
+    private var shopNoZones: Bool { shop?.deliveryZones?.isEmpty == true }
+    // Для доставки обязателен выбранный адрес. Координаты — только там, где по
+    // ним определяется зона; у заведения без зон адреса строкой достаточно.
     private var noAddress: Bool {
-        fulfillment == .delivery &&
-        (selectedAddress == nil || selectedAddress?.lat == nil || selectedAddress?.lng == nil)
+        guard fulfillment == .delivery else { return false }
+        if selectedAddress == nil { return true }
+        if shopNoZones { return false }
+        return selectedAddress?.lat == nil || selectedAddress?.lng == nil
     }
     // Минимальная сумма не набрана.
     private var belowMin: Bool {
@@ -773,17 +792,32 @@ struct CheckoutView: View {
     // Серверный расчёт доставки по координатам адреса. shop_id — из корзины.
     private func quoteDelivery() async {
         guard fulfillment == .delivery,
-              let a = selectedAddress, let la = a.lat, let lo = a.lng,
+              let a = selectedAddress,
               let sid = cart.shopId else {
             await MainActor.run { quote = nil; quoteError = nil }
             return
         }
+        // Без зон расчёт нужен ТЕМ ЖЕ порядком, даже без координат: иначе экран
+        // показал бы доставку нулевой, а сервер добавил бы к заказу единый
+        // тариф — человек заплатил бы больше, чем видел.
+        let noZones = await MainActor.run { shopNoZones }
+        guard (a.lat != nil && a.lng != nil) || noZones else {
+            await MainActor.run { quote = nil; quoteError = nil }
+            return
+        }
+        let la = a.lat ?? 0
+        let lo = a.lng ?? 0
         let goods = await MainActor.run { goodsForQuote }
         await MainActor.run { quoteError = nil }
         do {
             let q: DeliveryQuote = try await API.shared.post(
                 "api/v1/delivery/quote",
-                body: QuoteBody(shopId: sid, lat: la, lng: lo, subtotal: goods)
+                body: QuoteBody(
+                    shopId: sid, lat: la, lng: lo, subtotal: goods,
+                    address: QuoteAddressBody(
+                        value: a.display, city: a.city, street: a.street, house: a.house
+                    )
+                )
             )
             // Пересчёт акций — ПОСЛЕ расчёта доставки: движок должен видеть её цену
             // (иначе акция «бесплатная доставка от N» не сработает).
