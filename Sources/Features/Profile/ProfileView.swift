@@ -68,6 +68,7 @@ struct ProfileView: View {
 
     @State private var showLogoutConfirm = false
     @State private var showDeleteConfirm = false
+    @State private var deleteError: String?
 
     private var displayName: String { profile?.name?.isEmpty == false ? profile!.name! : "Профиль" }
     private var avatarLetter: String { String((profile?.name ?? "U").prefix(1)).uppercased() }
@@ -116,6 +117,13 @@ struct ProfileView: View {
                             isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Удалить аккаунт", role: .destructive) { deleteAccount() }
             Button("Отмена", role: .cancel) {}
+        }
+        .alert("Аккаунт не удалён", isPresented: Binding(
+            get: { deleteError != nil }, set: { if !$0 { deleteError = nil } }
+        )) {
+            Button("Понятно", role: .cancel) { deleteError = nil }
+        } message: {
+            Text(deleteError ?? "")
         }
     }
 
@@ -374,7 +382,7 @@ struct ProfileView: View {
                 await g.next()
                 g.cancelAll()
             }
-            session.signOut()
+            session.signOut(clearLocalData: true)
             profile = nil
         }
     }
@@ -388,8 +396,16 @@ struct ProfileView: View {
             // нет, ошибка гасилась `try?`, и человека просто разлогинивало —
             // аккаунт и данные оставались на сервере. Для App Store это ещё и
             // невыполненное обещание «удалить аккаунт».
-            try? await API.shared.deleteVoid("api/v1/account")
-            await MainActor.run { session.signOut(); profile = nil }
+            // Ошибку больше не гасим: сервер отказывает (409 — активные заказы,
+            // деньги на балансе) или нет сети, а человека молча разлогинивало,
+            // и он считал аккаунт удалённым.
+            do {
+                try await API.shared.deleteVoid("api/v1/account")
+                await MainActor.run { session.signOut(clearLocalData: true); profile = nil }
+            } catch {
+                let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось удалить аккаунт"
+                await MainActor.run { deleteError = msg }
+            }
         }
     }
 
@@ -406,8 +422,10 @@ struct ProfileView: View {
         favCount = favShops.count + favProducts.count
         let appts: [Appointment] = (try? await API.shared.list("api/v1/appointments")) ?? []
         bookingsCount = appts.count
-        let notifs: [AppNotification] = (try? await API.shared.list("api/v1/notifications")) ?? []
-        unreadNotifs = notifs.filter { !$0.read }.count
+        // meta.unread — непрочитанные ВСЕГО (волна А3); на странице их максимум 20.
+        // Старый сервер unread не присылает — считаем по первой странице, как раньше.
+        let notifPage: Page<AppNotification>? = try? await API.shared.page("api/v1/notifications")
+        unreadNotifs = notifPage.map { p in p.meta?.unread ?? p.items.filter { !$0.read }.count } ?? 0
     }
 
     private func pluralOrders(_ n: Int) -> String {

@@ -125,7 +125,11 @@ final class OrgViewModel: ObservableObject {
             if on { try await API.shared.postVoid("api/v1/favorites/\(shopId)") }
             else  { try await API.shared.deleteVoid("api/v1/favorites/\(shopId)") }
         } catch {
+            // Откат — программной установкой: иначе onChange(of: vm.isFav) снова
+            // вызывал toggleFav, и у гостя/без сети запросы шли по кругу.
+            favSyncing = true
             isFav.toggle()   // откат
+            DispatchQueue.main.async { self.favSyncing = false }
         }
     }
 

@@ -58,6 +58,15 @@ final class ListingViewModel: ObservableObject {
     @Published var orgs: [Shop] = []
     @Published var products: [Product] = []
     @Published var loading = true
+    // Догрузка заведений (волна А3): сервер отдаёт по 100 и meta.has_more.
+    @Published var orgsHasMore = false
+    @Published var orgsMoreFailed = false
+    @Published private(set) var orgsPage = 1
+    private var loadingMore = false
+    /// Номер выборки: сменили фильтр/сортировку во время догрузки — её ответ выбрасывается.
+    private var orgsGen = 0
+    private var orgsPath = "api/v1/shops"
+    private var orgsQuery: [String: String] = [:]
     @Published var error: String?
     @Published var sort: ListingSort = .rating
     // Фильтры-чипы: индекс → активность (по набору для контекста).
@@ -130,6 +139,9 @@ final class ListingViewModel: ObservableObject {
         loading = true; error = nil
         switch screen {
         case .category:
+            orgsGen += 1
+            let myGen = orgsGen
+            orgsPage = 1; orgsHasMore = false; orgsMoreFailed = false; loadingMore = false
             do {
                 var q: [String: String] = [:]
                 if let cid = cityId { q["city_id"] = String(cid) }
@@ -141,14 +153,22 @@ final class ListingViewModel: ObservableObject {
                 if activeFilters.contains("Открыто") { q["open"] = "1" }
                 if activeFilters.contains("Бесплатная доставка") { q["free_delivery"] = "1" }
                 if orgType == "all" {
-                    orgs = try await API.shared.list("api/v1/shops", query: q)
+                    orgsPath = "api/v1/shops"
                 } else {
                     q["type"] = orgType
                     if let catId = pickedCategoryId { q["category_id"] = String(catId) }
-                    orgs = try await API.shared.list("api/v1/organizations", query: q)
+                    orgsPath = "api/v1/organizations"
                 }
+                orgsQuery = q
+                let gen = orgsGen
+                let first: Page<Shop> = try await API.shared.page(orgsPath, query: q)
+                guard gen == orgsGen else { return }
+                orgs = first.items
+                orgsHasMore = first.hasMore
             } catch is CancellationError {
             } catch {
+                // Ошибку устаревшего запроса не показываем поверх свежей выборки.
+                guard myGen == orgsGen else { return }
                 self.error = error.localizedDescription
             }
         case .shop:
@@ -161,6 +181,26 @@ final class ListingViewModel: ObservableObject {
             }
         }
         loading = false
+    }
+
+    /// Следующая страница заведений. Зовёт подвал списка, когда он виден.
+    func loadMore() async {
+        guard screen == .category, orgsHasMore, !loadingMore, !loading else { return }
+        loadingMore = true; orgsMoreFailed = false
+        let gen = orgsGen, next = orgsPage + 1
+        var q = orgsQuery; q["page"] = String(next)
+        do {
+            let p: Page<Shop> = try await API.shared.page(orgsPath, query: q)
+            guard gen == orgsGen else { return }
+            let known = Set(orgs.map(\.id))
+            orgs += p.items.filter { !known.contains($0.id) }
+            orgsPage = next
+            orgsHasMore = p.hasMore && !p.items.isEmpty
+        } catch {
+            // Уже показанное не трогаем; подвал покажет «Показать ещё».
+            if gen == orgsGen && !(error is CancellationError) { orgsMoreFailed = true }
+        }
+        if gen == orgsGen { loadingMore = false }
     }
 
     /// Тот же фильтр и та же сортировка, что уже применил сервер. Проход
@@ -207,6 +247,10 @@ struct ListingView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var showSort = false
+    // .task срабатывает и при возврате назад из карточки (NavigationStack):
+    // раньше список каждый раз грузился заново — скелетон, страница 1, позиция
+    // прокрутки потеряна.
+    @State private var didLoad = false
     // ОДНО состояние перехода на экран. Пока их было два (организация и товар),
     // закрытие гасило только одно: второе оставалось заполненным после «назад»,
     // и следующая же перерисовка (смена режима списка, сортировка, обновление)
@@ -239,6 +283,8 @@ struct ListingView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationBarHidden(true)
         .task {
+            guard !didLoad else { return }
+            didLoad = true
             await vm.loadCategories()
             // Координаты адреса доставки — до первой загрузки, чтобы сервер сразу
             // вернул distance_km и сортировка «Ближе ко мне» работала с первого раза.
@@ -396,6 +442,9 @@ struct ListingView: View {
                         }
                     }
                     if vm.sortedOrgs.isEmpty { emptyState }
+                    if vm.orgsHasMore {
+                        LoadMoreFooter(page: vm.orgsPage, failed: vm.orgsMoreFailed) { await vm.loadMore() }
+                    }
                 }
                 .padding(.horizontal, YMSpace.xl)
                 .padding(.bottom, 24)

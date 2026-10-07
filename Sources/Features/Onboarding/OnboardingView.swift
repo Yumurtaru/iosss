@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// Определение города по геолокации ещё не реализовано.
+private let onboardingGeoEnabled = false
+
 /// Онбординг premium-клиента (1:1 с OnboardingPhone.dc.html): welcome → city.
 /// По завершении вызывает onFinish (в YumurtaApp он выставляет @AppStorage onboarded).
 /// Выбранный город сохраняется в Session (cityId/cityName) — единый фильтр по городу
@@ -139,6 +142,11 @@ private struct CityStep: View {
     @State private var query = ""
     @State private var selectedName: String = ""
     @State private var selectedId: Int? = nil
+    // Список городов не загрузился (первый запуск без сети): раньше «Продолжить»
+    // оставалась выключенной навсегда, повтора не было — человек застревал на
+    // онбординге до перезапуска. Теперь можно продолжить без города: Главная
+    // сама возьмёт первый город, когда появится связь.
+    @State private var citiesFailed = false
 
     // Список для отображения: только города, где есть заведения (+ поиск по ним).
     private var shownNames: [String] {
@@ -165,6 +173,10 @@ private struct CityStep: View {
             .padding(.horizontal, YMSpace.xxl)
             .padding(.top, 14)
 
+            // Определить автоматически (гео). Кнопка пока ничего не делает
+            // (определение по CLLocation не сделано) — скрыта, чтобы не выглядеть
+            // сломанной (и не ловить отказ App Review за нерабочий элемент).
+            if onboardingGeoEnabled {
             // Определить автоматически (гео).
             Button {
                 Haptics.light()
@@ -197,6 +209,7 @@ private struct CityStep: View {
             .buttonStyle(.plain)
             .padding(.horizontal, YMSpace.xxl)
             .padding(.top, 14)
+            }
 
             // Поиск города.
             SearchField(placeholder: "Поиск города", text: $query)
@@ -232,7 +245,7 @@ private struct CityStep: View {
                 onContinue()
             }
             .buttonStyle(YMPrimaryButtonStyle())
-            .disabled(selectedName.isEmpty)
+            .disabled(selectedName.isEmpty && !citiesFailed)
             .padding(.horizontal, YMSpace.xxl)
             .padding(.top, 14)
             .padding(.bottom, 30)
@@ -273,20 +286,24 @@ private struct CityStep: View {
 
     private func loadCities() async {
         // Только города, где есть активные организации.
-        if let list: [City] = try? await API.shared.list("api/v1/cities", query: ["with_orgs": "1"]) {
-            cities = list
-            // Если текущий выбор пуст/не среди доступных — выбираем первый доступный город.
-            if let match = list.first(where: { $0.name == selectedName }) {
-                selectedId = match.id
-            } else if let first = list.first {
-                selectedName = first.name ?? ""
-                selectedId = first.id
-            }
+        citiesFailed = false
+        guard let list: [City] = try? await API.shared.list("api/v1/cities", query: ["with_orgs": "1"]) else {
+            citiesFailed = true
+            return
+        }
+        cities = list
+        // Если текущий выбор пуст/не среди доступных — выбираем первый доступный город.
+        if let match = list.first(where: { $0.name == selectedName }) {
+            selectedId = match.id
+        } else if let first = list.first {
+            selectedName = first.name ?? ""
+            selectedId = first.id
         }
     }
 
     private func commitSelection() {
-        session.cityName = selectedName
+        // Пустое имя не пишем: иначе Главная показала бы город без названия.
+        if !selectedName.isEmpty { session.cityName = selectedName }
         // id может отсутствовать (сеть недоступна) — Home тогда возьмёт первый город из /cities.
         if let id = selectedId ?? cities.first(where: { $0.name == selectedName })?.id {
             session.cityId = id

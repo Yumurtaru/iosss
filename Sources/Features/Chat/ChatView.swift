@@ -47,13 +47,21 @@ struct ChatView: View {
 private final class ChatListViewModel: ObservableObject {
     @Published var dialogs: [ChatDialog] = []
     @Published var loading = true
+    /// Не загрузилось — раньше без сети писали «Чатов пока нет».
+    @Published var failed = false
     private var didLoad = false
 
     func firstLoad() async { guard !didLoad else { return }; didLoad = true; await load() }
     func load() async {
         loading = true
         // Реальный список диалогов: заказы с перепиской + последнее сообщение + непрочитанные.
-        dialogs = (try? await API.shared.list("api/v1/chats")) ?? []
+        do {
+            dialogs = try await API.shared.list("api/v1/chats")
+            failed = false
+        } catch is CancellationError {
+        } catch {
+            failed = true
+        }
         loading = false
     }
 }
@@ -69,8 +77,10 @@ private struct ChatListScreen: View {
         return vm.dialogs.filter { ($0.shopName ?? "").lowercased().contains(q) }
     }
 
+    // Без своего NavigationStack: список показывается в шторке, которая уже
+    // обёрнута в NavigationStack (RootTabView). Стек в стеке ломал переход в
+    // переписку и раздваивал панель навигации.
     var body: some View {
-        NavigationStack {
             ScrollView {
                 VStack(spacing: YMSpace.md) {
                     SearchField(placeholder: "Поиск по чатам", text: $query, active: !query.isEmpty)
@@ -87,7 +97,6 @@ private struct ChatListScreen: View {
             .refreshable { await vm.load() }
             .task { if session.isLoggedIn { await vm.firstLoad() } }
             .navigationDestination(for: Int.self) { ChatThreadScreen(orderId: $0) }
-        }
     }
 
     @ViewBuilder private var content: some View {
@@ -100,6 +109,10 @@ private struct ChatListScreen: View {
                 ForEach(0..<4, id: \.self) { _ in SkeletonBox().frame(height: 72) }
             }
             .padding(.horizontal, YMSpace.xl)
+        } else if vm.failed && vm.dialogs.isEmpty {
+            emptyState(icon: "wifi.exclamationmark",
+                       title: "Не удалось загрузить чаты",
+                       hint: "Проверьте интернет и потяните список вниз, чтобы обновить.")
         } else if filtered.isEmpty {
             emptyState(icon: "bubble.left.and.bubble.right",
                        title: query.isEmpty ? "Чатов пока нет" : "Ничего не найдено",
@@ -220,7 +233,15 @@ private final class ChatThreadViewModel: ObservableObject {
             ? "api/v1/orders/\(orderId)/chat?after_id=\(lastChatId)"
             : "api/v1/orders/\(orderId)/chat"
         guard let batch: [ChatMessage] = try? await API.shared.list(path), !batch.isEmpty else { return }
-        if lastChatId == 0 { messages = batch } else { messages.append(contentsOf: batch) }
+        if lastChatId == 0 {
+            messages = batch
+        } else {
+            // Опрос раз в 6 с и дозапрос после отправки могут уйти с одним и тем
+            // же after_id — без фильтра сообщение задваивалось (и одинаковые id
+            // ломали ForEach). Так уже сделано в Android-клиенте и iOS-продавце.
+            let known = Set(messages.compactMap { $0.id })
+            messages.append(contentsOf: batch.filter { m in m.id.map { !known.contains($0) } ?? true })
+        }
         lastChatId = max(lastChatId, batch.compactMap { $0.id }.max() ?? 0)
     }
 

@@ -218,7 +218,14 @@ struct ProductView: View {
                 if on { try await API.shared.postVoid("api/v1/product-favorites/\(id)") }
                 else  { try await API.shared.deleteVoid("api/v1/product-favorites/\(id)") }
             } catch {
-                await MainActor.run { isFav.toggle() }   // откат
+                // Откат — программной установкой (favSyncing), как в loadFav. Раньше
+                // откат снова срабатывал в onChange(of: isFav) и слал обратный запрос:
+                // у гостя (401) или без сети сердечко мигало, а запросы шли без конца.
+                await MainActor.run {
+                    favSyncing = true
+                    isFav.toggle()
+                    DispatchQueue.main.async { favSyncing = false }
+                }
             }
         }
     }
@@ -871,7 +878,13 @@ struct ProductView: View {
             // Дробный шаг: стартовое «1» не кратно шагу, и сервер пересчитал бы
             // количество по своей сетке (1 кг при шаге 0,3 → 0,9). Ставим сам шаг.
             let st = stepValue
-            if st != 1 { qty = st }
+            // Только если текущее количество не по сетке шага: экран
+            // перерисовывается и при возврате с соседнего товара, и раньше
+            // выбранные 1,5 кг сбрасывались на 0,3.
+            if st != 1 {
+                let ratio = qty / st
+                if qty < st || abs(ratio - ratio.rounded()) > 0.0001 { qty = st }
+            }
         }
     }
 

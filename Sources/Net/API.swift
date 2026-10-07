@@ -52,8 +52,22 @@ final class API {
         cfg.timeoutIntervalForResource = 40      // суммарный лимит на ресурс
         cfg.waitsForConnectivity = true          // подождать сеть вместо мгновенной ошибки
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // Без cookie — как Android-клиент (у его OkHttp нет CookieJar). Вход
+        // держится только на Bearer. Сервер может ставить cookie с токенами
+        // (у продавца так делает ответ продления), а общее хранилище отправляло
+        // их с каждым запросом — в том числе после выхода из аккаунта.
+        cfg.httpCookieStorage = nil
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
         return URLSession(configuration: cfg)
     }()
+
+    /// Удалить cookie сайта из общего хранилища (их туда клали прежние версии).
+    static func clearCookies() {
+        guard let url = URL(string: base) else { return }
+        let store = HTTPCookieStorage.shared
+        for c in store.cookies(for: url) ?? [] { store.deleteCookie(c) }
+    }
 
     private let maxRetries = 2                    // доп. попытки (итого до 3) для GET
 
@@ -71,9 +85,15 @@ final class API {
     /// сайте и не видно в приложении.
     static func imageURL(_ path: String?) -> URL? {
         guard let p = path, !p.isEmpty else { return nil }
-        if p.hasPrefix("http") { return URL(string: p) }
-        if p.hasPrefix("/") { return URL(string: base + p) }
-        return URL(string: base + "/assets/uploads/" + p)
+        // Пробел или кириллица в имени файла (старые загрузки, импорт): на iOS 16
+        // URL(string:) даёт nil, и картинки не было. Кодируем, только если
+        // без кодирования адрес не собирается — уже закодированный не трогаем.
+        func url(_ s: String) -> URL? {
+            URL(string: s) ?? s.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed).flatMap(URL.init(string:))
+        }
+        if p.hasPrefix("http") { return url(p) }
+        if p.hasPrefix("/") { return url(base + p) }
+        return url(base + "/assets/uploads/" + p)
     }
 
     private func makeRequest(_ method: String, _ path: String, query: [String: String] = [:], body: Encodable? = nil) throws -> URLRequest {
@@ -172,7 +192,15 @@ final class API {
             // Ошибочный статус с телом {ok:false,error:"..."} (Response::error): success отсутствует,
             // но текст есть — показываем его (иначе терялось «Минимальная сумма заказа…» → «Ошибка 422»).
             if status >= 400, let msg = env.error?.message, !msg.isEmpty { throw APIError.server(msg) }
+            // Действие без полезной нагрузки (отмена заказа, удаление…) сервер
+            // может закрыть ответом {"success":true,"data":null} — это успех,
+            // а не «Не удалось обработать ответ».
+            // Только для 2xx: ошибка сервера без success:false / error.message
+            // (например {"message":"Server Error"}) не должна стать «успехом».
+            if (200..<300).contains(status), env.data == nil, T.self == EmptyResp.self,
+               let empty = EmptyResp() as? T { return empty }
             guard let payload = env.data else { throw APIError.decoding }
+            (payload as? PageMetaReceiving)?.receive(meta: env.meta)   // Page<T>: has_more из meta
             return payload
         } catch let e as APIError {
             throw e
@@ -188,11 +216,14 @@ final class API {
     /// Итог продления: новый токен, отказ сервера (refresh недействителен →
     /// выход) или «сервер недоступен» (сеть/5xx → токены НЕ трогаем).
     enum RefreshOutcome { case token(String), rejected, unavailable }
-    private var refreshTask: Task<RefreshOutcome, Never>?
+    /// Очередь продления живёт в actor: раньше `refreshTask` был обычным полем
+    /// класса, и два 401 с разных потоков могли одновременно увидеть nil и
+    /// отправить два refresh (гонка данных + лишний вызов, который при ротации
+    /// refresh-токена на сервере разлогинил бы человека).
+    private let refreshGate = RefreshGate()
 
     private func refreshAccessToken() async -> RefreshOutcome {
-        if let running = refreshTask { return await running.value }
-        let task = Task<RefreshOutcome, Never> { [weak self] () -> RefreshOutcome in
+        await refreshGate.run { [weak self] () -> RefreshOutcome in
             guard let self = self,
                   let refresh = TokenStore.refresh,
                   !refresh.isEmpty,
@@ -211,10 +242,6 @@ final class API {
             TokenStore.access = token
             return .token(token)
         }
-        refreshTask = task
-        let result = await task.value
-        refreshTask = nil
-        return result
     }
 
     func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {
@@ -229,6 +256,12 @@ final class API {
     func list<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> [T] {
         let p: ListPayload<T> = try await send(try makeRequest("GET", path, query: query), as: ListPayload<T>.self)
         return p.items
+    }
+    /// Страница списка с meta (has_more, per_page). Пример: заказы —
+    /// `let p: Page<OrderSummary> = try await API.shared.page("api/v1/orders", query: ["page": "2"])`,
+    /// дальше `p.items`, а `p.hasMore` решает, просить ли page+1.
+    func page<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> Page<T> {
+        try await send(try makeRequest("GET", path, query: query), as: Page<T>.self)
     }
     func postVoid(_ path: String, body: Encodable? = nil) async throws { _ = try await send(try makeRequest("POST", path, body: body), as: EmptyResp.self) }
 
@@ -367,4 +400,18 @@ struct PushBody: Encodable {
     /// может прислать «новое заведение в вашем городе». Поле аддитивное:
     /// nil не кодируется, старый сервер его игнорирует.
     var cityId: Int? = nil
+}
+
+/// Single-flight для продления токена: все параллельные 401 ждут один вызов.
+private actor RefreshGate {
+    private var running: Task<API.RefreshOutcome, Never>?
+
+    func run(_ work: @escaping () async -> API.RefreshOutcome) async -> API.RefreshOutcome {
+        if let r = running { return await r.value }
+        let t = Task { await work() }
+        running = t
+        let v = await t.value
+        running = nil
+        return v
+    }
 }

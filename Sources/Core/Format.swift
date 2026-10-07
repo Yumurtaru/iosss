@@ -17,7 +17,9 @@ enum DateFmt {
     /// одно и то же время в карточке заказа и в чате по этому же заказу
     /// показывалось по-разному: чат пояс задаёт, а этот форматтер — нет.
     private static let iso: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss"; f.locale = Locale(identifier: "ru_RU")
+        // en_US_POSIX: разбор фиксированного формата не зависит от настройки
+        // «24-часовой формат» на телефоне (Apple QA1480).
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss"; f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
         return f
     }()
@@ -28,7 +30,7 @@ enum DateFmt {
     }
     static func time(_ s: String?) -> String {
         guard let s = s, let date = iso.date(from: s) else { return "" }
-        let out = DateFormatter(); out.dateFormat = "HH:mm"; return out.string(from: date)
+        let out = DateFormatter(); out.locale = Locale(identifier: "en_US_POSIX"); out.dateFormat = "HH:mm"; return out.string(from: date)
     }
 }
 

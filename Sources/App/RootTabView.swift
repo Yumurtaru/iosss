@@ -19,6 +19,10 @@ struct RootTabView: View {
     @EnvironmentObject private var router: DeepLinkRouter
     @EnvironmentObject private var coord: NavCoordinator
     @State private var tab = 0
+    /// Организация из пуша РЕАЛЬНО на экране. Раньше корневые окна отключались
+    /// по pendingOrgSlug: если шторка организации не смогла открыться, корзина
+    /// и чат не работали до перезапуска приложения.
+    @State private var orgShown = false
 
     init() {
         // Фон таб-бара — системный материал (blur), тонкая золотая линия сверху.
@@ -103,17 +107,20 @@ struct RootTabView: View {
         .onChange(of: coord.pendingOrderDetail) { pending in
             if pending != nil { tab = 3 }
         }
-        // ── Глобальный флоу корзины (Корзина → Оформление → Успех) ──
-        .fullScreenCover(isPresented: $coord.showCart) {
-            CartFlow(
-                onClose: { coord.showCart = false },
-                onTrackOrder: { id in coord.pendingOrderDetail = id }
-            )
-            .environmentObject(cart)
-            .environmentObject(router)
-            .environmentObject(coord)
-            .environmentObject(Session.shared)
-        }
+        // Холодный старт из пуша о заказе: значение выставлено до появления
+        // экрана, onChange на него не срабатывает.
+        .onAppear { if coord.pendingOrderDetail != nil { tab = 3 } }
+        // ── Корзина, конфликт корзины и чат ──
+        // Пока открыта организация из пуша/ссылки (cover ниже), эти окна
+        // показывает сам cover: SwiftUI не открывает второй cover/sheet с той
+        // вьюхи, которая уже что-то показывает. Раньше в такой организации
+        // плашка корзины и кнопка чата не делали ничего, а диалог «очистить
+        // корзину?» рисовался под шторкой и всплывал уже после её закрытия.
+        .modifier(GlobalPresenters(
+            coord: coord, cart: cart, router: router,
+            enabled: !orgShown,
+            onTrackOrder: { id in coord.pendingOrderDetail = id }
+        ))
         // ── Организация из уведомления «новое заведение в городе» ──
         // Отдельный cover, а не маршрут внутри таба: у табов по одному
         // navigationDestination, второй в SwiftUI просто не срабатывает.
@@ -135,38 +142,78 @@ struct RootTabView: View {
                     }
                 }
             }
+            .onAppear { orgShown = true }
+            .onDisappear { orgShown = false }
+            .modifier(GlobalPresenters(
+                coord: coord, cart: cart, router: router,
+                enabled: true,
+                // «Следить за заказом»: закрываем организацию, таб «Заказы» откроет деталь.
+                onTrackOrder: { id in coord.pendingOrgSlug = nil; coord.pendingOrderDetail = id }
+            ))
             .environmentObject(cart)
             .environmentObject(router)
             .environmentObject(coord)
             .environmentObject(Session.shared)
         }
-        // ── Глобальный диалог конфликта корзины (single-store) ──
-        .cartConflictDialog(
-            isPresented: $coord.cartConflict,
-            currentShop: coord.conflictCurrentShop,
-            newShop: coord.conflictNewShop,
-            onConfirm: { coord.conflictConfirm?(); coord.conflictConfirm = nil }
-        )
-        // ── Глобальный чат (из Org-FAB и из деталей заказа) ──
-        .sheet(isPresented: Binding(
-            get: { coord.chatOrderId != nil },
-            set: { if !$0 { coord.chatOrderId = nil } }
-        )) {
-            NavigationStack {
-                Group {
-                    if let id = coord.chatOrderId, id > 0 {
-                        ChatView(orderId: id)
-                    } else {
-                        ChatView.list          // id == -1 → общий список чатов
-                    }
-                }
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Закрыть") { coord.chatOrderId = nil }
-                    }
-                }
+    }
+}
+
+/// Корзина (Корзина → Оформление → Успех), диалог конфликта корзины и чат —
+/// окна, которые открываются из любого экрана через NavCoordinator.
+/// enabled = false — сейчас их показывает другой уровень (cover организации).
+private struct GlobalPresenters: ViewModifier {
+    @ObservedObject var coord: NavCoordinator
+    let cart: Cart
+    let router: DeepLinkRouter
+    let enabled: Bool
+    let onTrackOrder: (Int) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            // ── Глобальный флоу корзины ──
+            .fullScreenCover(isPresented: Binding(
+                get: { enabled && coord.showCart },
+                set: { if !$0 { coord.showCart = false } }
+            )) {
+                CartFlow(
+                    onClose: { coord.showCart = false },
+                    onTrackOrder: onTrackOrder
+                )
+                .environmentObject(cart)
+                .environmentObject(router)
+                .environmentObject(coord)
+                .environmentObject(Session.shared)
             }
-            .environmentObject(Session.shared)
-        }
+            // ── Глобальный диалог конфликта корзины (single-store) ──
+            .cartConflictDialog(
+                isPresented: Binding(
+                    get: { enabled && coord.cartConflict },
+                    set: { coord.cartConflict = $0 }
+                ),
+                currentShop: coord.conflictCurrentShop,
+                newShop: coord.conflictNewShop,
+                onConfirm: { coord.conflictConfirm?(); coord.conflictConfirm = nil }
+            )
+            // ── Глобальный чат (из Org-FAB и из деталей заказа) ──
+            .sheet(isPresented: Binding(
+                get: { enabled && coord.chatOrderId != nil },
+                set: { if !$0 { coord.chatOrderId = nil } }
+            )) {
+                NavigationStack {
+                    Group {
+                        if let id = coord.chatOrderId, id > 0 {
+                            ChatView(orderId: id)
+                        } else {
+                            ChatView.list          // id == -1 → общий список чатов
+                        }
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Закрыть") { coord.chatOrderId = nil }
+                        }
+                    }
+                }
+                .environmentObject(Session.shared)
+            }
     }
 }

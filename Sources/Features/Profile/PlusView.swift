@@ -47,7 +47,20 @@ struct PlusView: View {
     @State private var error: String?
     @State private var busy = false
     @State private var message: String?
-    @State private var pendingPaymentId: String?
+    // Номер платежа храним и на диске: пока человек платит в приложении банка,
+    // iOS может выгрузить наше, а активация подписки идёт только по этому номеру.
+    // Раньше после такого возврата деньги были списаны, а «Оформить» висело снова.
+    @State private var pendingPaymentId: String? = UserDefaults.standard.string(forKey: PlusView.pendingKey)
+    /// Прошлый платёж не подтвердился — следующее нажатие создаёт новый.
+    @State private var payAgainAllowed = false
+    @State private var activating = false
+    static let pendingKey = "plus_pending_payment_id"
+
+    private func setPending(_ id: String?) {
+        pendingPaymentId = id
+        if let id { UserDefaults.standard.set(id, forKey: Self.pendingKey) }
+        else { UserDefaults.standard.removeObject(forKey: Self.pendingKey) }
+    }
 
     var body: some View {
         Group {
@@ -64,7 +77,10 @@ struct PlusView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle("Yumurta Plus")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        .task {
+            await load()
+            if pendingPaymentId != nil { await tryActivate() }
+        }
         // Возврат из браузера оплаты → пробуем активировать подписку.
         .onChange(of: scenePhase) { phase in
             if phase == .active, pendingPaymentId != nil { Task { await tryActivate() } }
@@ -193,12 +209,26 @@ struct PlusView: View {
     }
 
     private func subscribe() {
+        guard !busy else { return }
         busy = true; message = nil
         Task {
             defer { busy = false }
+            // Есть неподтверждённый платёж — сначала проверяем его. Раньше каждое
+            // нажатие создавало новый платёж ЮKassa, и после возврата из банка
+            // («оплата ещё не подтверждена») человек платил второй раз.
+            if pendingPaymentId != nil && !payAgainAllowed {
+                // Проверка уже идёт (вернулись из банка) — дождёмся её, а не
+                // разрешаем новый платёж без проверки.
+                if activating { return }
+                if await tryActivate() { return }
+                payAgainAllowed = true
+                message = "Прошлая оплата ещё не подтверждена. Если вы её не завершили — нажмите ещё раз, чтобы оплатить заново."
+                return
+            }
             do {
                 let r: PayOnlineResp = try await API.shared.post("api/v1/plus/subscribe")
-                pendingPaymentId = r.paymentId
+                payAgainAllowed = false
+                setPending(r.paymentId)
                 if let link = r.confirmationUrl, let url = URL(string: link) {
                     Haptics.light()
                     openURL(url)
@@ -211,22 +241,30 @@ struct PlusView: View {
         }
     }
 
-    private func tryActivate() async {
-        guard let pid = pendingPaymentId else { return }
+    /// true — подписка активирована. Параллельные проверки (каждый возврат в
+    /// приложение) не запускаем.
+    @discardableResult
+    private func tryActivate() async -> Bool {
+        guard let pid = pendingPaymentId, !activating else { return false }
+        activating = true
+        defer { activating = false }
         do {
             let r: PlusActivateResp = try await API.shared.post("api/v1/plus/activate",
                                                                 body: PlusActivateBody(paymentId: pid))
             if r.active == true {
-                pendingPaymentId = nil
+                setPending(nil)
+                payAgainAllowed = false
                 message = "Yumurta Plus активна ✨"
                 Haptics.success()
                 await load()
+                return true
             } else {
                 message = "Оплата ещё не подтверждена — проверим при следующем открытии"
             }
         } catch {
             // оплата ещё не прошла — оставляем pendingPaymentId, проверим при следующем возврате
         }
+        return false
     }
 
     private func formatCashback(_ v: Double) -> String {

@@ -195,6 +195,13 @@ final class OrdersViewModel: ObservableObject {
     @Published var loading = true
     @Published var loadFailed = false
     private var didLoad = false
+    // Догрузка (волна А3): по 100 заказов на страницу, meta.has_more. Активные
+    // заказы — свежие и всегда на первой странице; догрузка нужна «Истории».
+    @Published var hasMore = false
+    @Published var moreFailed = false
+    @Published private(set) var page = 1
+    private var loadingMore = false
+    private var gen = 0
 
     /// Первый вход в таб — грузим со скелетоном. Возврат в таб (в т.ч. после
     /// оформления заказа) — тихо обновляем список, чтобы новый заказ появился
@@ -212,12 +219,50 @@ final class OrdersViewModel: ObservableObject {
             // Их место — раздел «Мои записи» (BookingsView, GET api/v1/appointments),
             // поэтому здесь они отфильтровываются по аддитивному признаку is_appointment.
             // Старый сервер этого поля не присылает → nil ≠ true → список как раньше.
-            let all: [Order] = try await API.shared.list("api/v1/orders")
-            orders = all.filter { $0.isAppointment != true }
+            let first: Page<Order> = try await API.shared.page("api/v1/orders")
+            let fresh = first.items.filter { $0.isAppointment != true }
+            if page > 1 {
+                // Уже листали дальше первой страницы (возврат в таб, pull-to-refresh):
+                // обновляем первую, а догруженное ниже не выбрасываем.
+                let ids = Set(fresh.map(\.id))
+                orders = fresh + orders.filter { !ids.contains($0.id) }
+            } else {
+                orders = fresh
+                hasMore = first.hasMore
+            }
+        } catch is CancellationError {
+            // Обновление жестом отменяется самим SwiftUI, когда список
+            // перерисовывается. Раньше это показывало экран ошибки вместо
+            // уже загруженных заказов.
         } catch {
             loadFailed = true
         }
         loading = false
+    }
+
+    /// Сброс при входе/выходе: догруженные страницы прошлого аккаунта не должны
+    /// «приклеиться» к списку следующего при обновлении первой страницы.
+    func reset() {
+        gen += 1
+        orders = []; page = 1; hasMore = false; moreFailed = false; loadingMore = false
+    }
+
+    /// Следующая страница. Зовёт подвал «Истории», когда он виден.
+    func loadMore() async {
+        guard hasMore, !loadingMore, !loading else { return }
+        loadingMore = true; moreFailed = false
+        let myGen = gen, next = page + 1
+        do {
+            let p: Page<Order> = try await API.shared.page("api/v1/orders", query: ["page": String(next)])
+            guard myGen == gen else { return }
+            let known = Set(orders.map(\.id))
+            orders += p.items.filter { $0.isAppointment != true && !known.contains($0.id) }
+            page = next
+            hasMore = p.hasMore && !p.items.isEmpty
+        } catch {
+            if myGen == gen && !(error is CancellationError) { moreFailed = true }
+        }
+        if myGen == gen { loadingMore = false }
     }
 
     var active: [Order]  { orders.filter { OrderFlow.isActive($0.status) } }
@@ -259,14 +304,17 @@ struct OrdersView: View {
             .navigationBarTitleDisplayMode(.large)
             .refreshable { await vm.load() }
             .task { if session.isLoggedIn { await vm.firstLoad() } }
-            .onChange(of: session.isLoggedIn) { logged in if logged { Task { await vm.load() } } }
+            .onChange(of: session.isLoggedIn) { logged in vm.reset(); if logged { Task { await vm.load() } } }
             // Деталь заказа → чат уходит в глобальный координатор.
             .navigationDestination(isPresented: Binding(
                 get: { pushedOrder != nil },
                 set: { if !$0 { pushedOrder = nil } }
             )) {
                 if let id = pushedOrder {
+                    // .id: при смене заказа (была открыта деталь A, пришёл пуш о B)
+                    // экран должен пересоздаться — иначе @StateObject показывал A.
                     OrderDetailView(id: id, onChat: { orderId in coord.openChat(orderId: orderId) })
+                        .id(id)
                 }
             }
         }
@@ -274,13 +322,19 @@ struct OrdersView: View {
         // здесь ПЕРЕЗАГРУЖАЕМ список (новый заказ должен появиться в «Активных»),
         // открываем деталь и сбрасываем сигнал.
         .onChange(of: coord.pendingOrderDetail) { pending in
-            if let id = pending {
-                tab = .active            // новый заказ активен — показываем нужный таб
-                pushedOrder = id
-                coord.pendingOrderDetail = nil
-                Task { await vm.load() } // всегда свежий список после оформления
-            }
+            if let id = pending { consumePending(id) }
         }
+        // Вкладка «Заказы» создаётся лениво: если её ещё не открывали, а заказ
+        // уже оформили («Следить за заказом») или приложение запустили из пуша,
+        // значение выставлено ДО появления экрана, и onChange не срабатывает.
+        .onAppear { if let id = coord.pendingOrderDetail { consumePending(id) } }
+    }
+
+    private func consumePending(_ id: Int) {
+        tab = .active            // новый заказ активен — показываем нужный таб
+        pushedOrder = id
+        coord.pendingOrderDetail = nil
+        Task { await vm.load() } // всегда свежий список после оформления
     }
 
     /// Открыть деталь заказа (внутренний пуш + внешний колбэк для совместимости).
@@ -318,6 +372,9 @@ struct OrdersView: View {
                 ForEach(list) { order in
                     OrderCard(order: order) { openDetail(order.id) }
                         .padding(.horizontal, YMSpace.xl)
+                }
+                if tab == .history && vm.hasMore {
+                    LoadMoreFooter(page: vm.page, failed: vm.moreFailed) { await vm.loadMore() }
                 }
             }
         }

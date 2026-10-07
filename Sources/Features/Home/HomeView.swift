@@ -35,7 +35,15 @@ final class HomeViewModel: ObservableObject {
     }
 
     /// Полная загрузка (первый вход и pull-to-refresh).
+    /// Номер выборки. Запросы не отменяются: «Рестораны» → сразу «Магазины»,
+    /// и ответ по ресторанам, пришедший последним, оставался на экране под
+    /// чипом «Магазины», а первый закончившийся запрос раньше времени гасил
+    /// скелетон. Теперь применяется только ответ последней выборки.
+    private var gen = 0
+
     func load(session: Session) async {
+        gen += 1
+        let myGen = gen
         loading = true; error = nil
         // Города: если город ещё не выбран (нет id) — берём первый как в старом клиенте.
         if session.cityId == nil,
@@ -47,9 +55,9 @@ final class HomeViewModel: ObservableObject {
         async let bannersTask: [Banner] = (try? await API.shared.list("api/v1/banners")) ?? []
         banners = await bannersTask
         await loadRecommendations(session: session)
-        await loadSections(session: session)
-        await loadShops(session: session)
-        loading = false
+        await loadSections(session: session, myGen: myGen)
+        await loadShops(session: session, myGen: myGen)
+        if myGen == gen { loading = false }
     }
 
     /// «Рекомендуем вам» — персональные товары: GET api/v1/recommendations?city_id=
@@ -65,48 +73,53 @@ final class HomeViewModel: ObservableObject {
     /// Смена типа-чипа: перегружаем только зависящие от типа секции/список.
     func changeKind(_ k: OrgKind, session: Session) async {
         kind = k
+        gen += 1
+        let myGen = gen
         loading = true; error = nil
-        await loadSections(session: session)
-        await loadShops(session: session)
-        loading = false
+        await loadSections(session: session, myGen: myGen)
+        await loadShops(session: session, myGen: myGen)
+        if myGen == gen { loading = false }
     }
 
     // «Популярное в городе» — /api/v1/popular (как в старом клиенте), фильтр по type/city.
-    private func loadSections(session: Session) async {
+    private func loadSections(session: Session, myGen: Int) async {
         var q: [String: String] = [:]
         if let cid = session.cityId { q["city_id"] = String(cid) }
         if kind != .all { q["type"] = typeParam(kind) }
-        popular = (try? await API.shared.list("api/v1/popular", query: q)) ?? []
+        let list: [CatalogItem] = (try? await API.shared.list("api/v1/popular", query: q)) ?? []
+        guard myGen == gen else { return }
+        popular = list
     }
 
     // Список организаций. Рестораны/магазины/услуги → /organizations; «Все» → /shops.
-    private func loadShops(session: Session) async {
+    private func loadShops(session: Session, myGen: Int) async {
         do {
             var q: [String: String] = [:]
             if let cid = session.cityId { q["city_id"] = String(cid) }
+            var path = "api/v1/organizations"
             switch kind {
             case .all:
-                shops = try await API.shared.list("api/v1/shops", query: q)
+                path = "api/v1/shops"
             case .restaurants:
                 q["type"] = "restaurant"
-                shops = try await API.shared.list("api/v1/organizations", query: q)
             case .shops:
                 q["type"] = "store"
-                shops = try await API.shared.list("api/v1/organizations", query: q)
             case .services:
                 q["type"] = "service"
-                shops = try await API.shared.list("api/v1/organizations", query: q)
             case .lodging:
                 // Сюда мы в норме не попадаем: чип «Жильё» открывает раздел и
                 // возвращается на место (см. ChipRow ниже). Ветка нужна, чтобы
                 // switch был полным, и на всякий случай отдаёт согласованный
                 // список — отели/квартиры, а не чужие организации.
                 q["type"] = "lodging"
-                shops = try await API.shared.list("api/v1/organizations", query: q)
             }
+            let list: [Shop] = try await API.shared.list(path, query: q)
+            guard myGen == gen else { return }
+            shops = list
         } catch is CancellationError {
             // отмена (быстрый повторный запрос) — молча
         } catch {
+            guard myGen == gen else { return }
             self.error = error.localizedDescription
         }
     }

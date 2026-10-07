@@ -29,7 +29,8 @@ struct AddressesView: View {
     @State private var items: [Address] = []
     @State private var loading = true
     @State private var showAdd = false
-    @State private var editItem: Address?
+    /// Удаление не прошло — раньше ошибка глоталась, и адрес просто оставался.
+    @State private var deleteError: String?
 
     var body: some View {
         ScrollView {
@@ -40,8 +41,9 @@ struct AddressesView: View {
                     emptyState
                 } else {
                     ForEach(Array(items.enumerated()), id: \.element.id) { _, a in
+                        // «Изменить» убран: у пункта не было экрана правки, нажатие
+                        // ничего не делало. Поменять адрес — удалить и добавить.
                         AddressCard(address: a,
-                                    onEdit: { editItem = a },
                                     onDelete: { Task { await remove(a) } })
                     }
                 }
@@ -56,6 +58,11 @@ struct AddressesView: View {
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showAdd, onDismiss: { Task { await load() } }) { AddAddressView() }
         .task { await load() }
+        .alert("Адрес не удалён", isPresented: Binding(
+            get: { deleteError != nil }, set: { if !$0 { deleteError = nil } }
+        )) {
+            Button("Понятно", role: .cancel) { deleteError = nil }
+        } message: { Text(deleteError ?? "") }
     }
 
     private var addButton: some View {
@@ -98,14 +105,17 @@ struct AddressesView: View {
         do {
             try await API.shared.deleteVoid("api/v1/profile/addresses/\(a.id)")
             await MainActor.run { items.removeAll { $0.id == a.id } }
-        } catch {}
+        } catch {
+            let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось удалить адрес"
+            await MainActor.run { deleteError = msg }
+        }
     }
 }
 
 /// Карточка адреса: иконка по типу, название, «Основной»-бейдж, адрес, свайп-удаление.
 private struct AddressCard: View {
     let address: Address
-    var onEdit: () -> Void = {}
+    var onEdit: (() -> Void)? = nil
     var onDelete: () -> Void = {}
 
     private var isMain: Bool { address.isDefaultBool }
@@ -143,7 +153,9 @@ private struct AddressCard: View {
             }
             Spacer(minLength: 8)
             Menu {
-                Button { onEdit() } label: { Label("Изменить", systemImage: "pencil") }
+                if let onEdit {
+                    Button { onEdit() } label: { Label("Изменить", systemImage: "pencil") }
+                }
                 Button(role: .destructive) { onDelete() } label: { Label("Удалить", systemImage: "trash") }
             } label: {
                 Image(systemName: "ellipsis")
@@ -243,6 +255,10 @@ private struct AddAddressView: View {
     private func scheduleSuggest(_ text: String) {
         suggestTask?.cancel()
         if suppress { suppress = false; suggestions = []; return }
+        // Улицу правят руками — координаты прежней подсказки больше не её.
+        // Раньше адрес сохранялся с новой улицей и старой точкой: зона, цена
+        // доставки и точка для курьера были от другого адреса.
+        lat = nil; lng = nil
         let q = text.trimmingCharacters(in: .whitespaces)
         guard q.count >= 3 else { suggestions = []; return }
         let query = cityName.isEmpty ? q : "\(cityName), \(q)"

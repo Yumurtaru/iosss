@@ -60,6 +60,7 @@ struct EditProfileView: View {
     @State private var pendingChanges: [String: String] = [:]
     @State private var confirmTarget: String?
     @State private var code = ""
+    @State private var didLoad = false
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
     private var emailValid: Bool {
@@ -67,7 +68,12 @@ struct EditProfileView: View {
         if e.isEmpty { return true }  // email опционален
         return e.contains("@") && e.contains(".") && !e.hasSuffix("@")
     }
-    private var phoneValid: Bool { (10...11).contains(phone.filter(\.isNumber).count) }
+    // Пустой телефон — допустим (вход через соцсеть, старый аккаунт): раньше
+    // без телефона нельзя было сохранить даже имя. Пустое поле на сервер не уходит.
+    private var phoneValid: Bool {
+        let d = phone.filter(\.isNumber).count
+        return d == 0 || (10...11).contains(d)
+    }
     private var passwordValid: Bool { password.isEmpty || password.count >= 6 }  // пустой = не меняем
     private var canSave: Bool { !trimmedName.isEmpty && emailValid && phoneValid && passwordValid && !saving }
 
@@ -123,7 +129,9 @@ struct EditProfileView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle("Редактировать профиль")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        // Только первый раз: .task срабатывает и при возврате на экран (смена
+        // вкладки), и перезагрузка затирала несохранённые правки.
+        .task { if !didLoad { didLoad = true; await load() } }
         .sheet(isPresented: $showCodeSheet) { codeSheet }
         .sheet(isPresented: $showSupportSheet) { supportSheet }
     }
@@ -233,6 +241,9 @@ struct EditProfileView: View {
                 loading = false
             }
         } catch is CancellationError {
+            // Ушли с экрана посреди загрузки — при следующем появлении грузим
+            // снова, иначе скелетон оставался навсегда.
+            await MainActor.run { didLoad = false }
         } catch {
             await MainActor.run {
                 loadError = (error as? APIError)?.errorDescription ?? "Не удалось загрузить профиль"

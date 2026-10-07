@@ -82,6 +82,8 @@ final class ReturnsViewModel: ObservableObject {
         loading = true; loadFailed = false
         do {
             items = try await API.shared.list("api/v1/returns")
+        } catch is CancellationError {
+            // Отмену обновления жестом не показываем как ошибку (см. OrdersView).
         } catch {
             loadFailed = true
         }
@@ -267,6 +269,7 @@ struct ReturnCreateView: View {
 
     @State private var orders: [Order] = []
     @State private var loadingOrders = true
+    @State private var ordersError: String?
     @State private var selectedOrderId: Int?
     /// Только полный возврат: выбора позиций в форме нет (см. комментарий ниже).
     private let type = "full"
@@ -313,6 +316,13 @@ struct ReturnCreateView: View {
                 section(title: "Заказ") {
                     if loadingOrders {
                         HStack(spacing: 8) { ProgressView().tint(YMColor.accent); Text("Загружаем заказы…").font(YMFont.callout).foregroundStyle(YMColor.muted) }
+                    } else if eligibleOrders.isEmpty, let e = ordersError {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Не удалось загрузить заказы: \(e)")
+                                .font(YMFont.callout).foregroundStyle(YMColor.statusCancel)
+                            Button("Повторить") { Task { await loadOrders() } }
+                                .font(YMFont.callout.weight(.semibold)).foregroundStyle(YMColor.accent)
+                        }
                     } else if eligibleOrders.isEmpty {
                         Text("Нет выполненных заказов, доступных для возврата.")
                             .font(YMFont.callout).foregroundStyle(YMColor.muted)
@@ -410,8 +420,26 @@ struct ReturnCreateView: View {
     }
 
     private func loadOrders() async {
-        loadingOrders = true
-        orders = (try? await API.shared.list("api/v1/orders")) ?? []
+        loadingOrders = true; ordersError = nil
+        // Раньше бралась только первая страница заказов: у постоянного
+        // покупателя более старый, но ещё возвращаемый заказ был недоступен.
+        // А сбой сети выглядел как «нет выполненных заказов» без повтора.
+        var all: [Order] = []
+        do {
+            var page = 1
+            while page <= 5 {
+                let p: Page<Order> = try await API.shared.page("api/v1/orders", query: ["page": String(page)])
+                all += p.items
+                if !p.hasMore || p.items.isEmpty { break }
+                page += 1
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            if all.isEmpty { ordersError = error.localizedDescription }
+        }
+        var seen = Set<Int>()
+        orders = all.filter { seen.insert($0.id).inserted }
         if selectedOrderId == nil { selectedOrderId = eligibleOrders.first?.id }
         loadingOrders = false
         if let id = selectedOrderId { await checkEligibility(id) }

@@ -254,6 +254,9 @@ struct CheckoutView: View {
             try? await Task.sleep(nanoseconds: 350_000_000)
             if Task.isCancelled { return }
             let r: PromoPreview? = try? await API.shared.post("api/v1/cart/promo-preview", body: body)
+            // Отменённый запрос (его сменил следующий пересчёт) через try? даёт nil —
+            // раньше это гасило тумблер «Оплатить баллами» и мигало карточкой акции.
+            if Task.isCancelled { return }
             await MainActor.run {
                 promo = r
                 // Списывать нечего — тумблер сам гаснет.
@@ -354,6 +357,10 @@ struct CheckoutView: View {
                     let ps = allowedPayments
                     if !ps.contains(payment), let first = ps.first { payment = first }
                 }
+                // Адреса считались до загрузки карточки заведения — тогда ещё не было
+                // известно, что зон нет. Пересчитываем: иначе у заведения без зон и
+                // адреса без координат висело «Считаем стоимость…», а кнопка молчала.
+                await quoteDelivery()
             }
             refreshPromo()
         }
@@ -819,10 +826,16 @@ struct CheckoutView: View {
                     )
                 )
             )
+            // Пока считали, могли выбрать другой адрес или самовывоз: опоздавший
+            // ответ клал цену и зону прежнего адреса на новый.
+            let current = await MainActor.run { selectedAddress?.id == a.id && fulfillment == .delivery }
+            guard current else { return }
             // Пересчёт акций — ПОСЛЕ расчёта доставки: движок должен видеть её цену
             // (иначе акция «бесплатная доставка от N» не сработает).
             await MainActor.run { quote = q; quotedGoods = goods; quoteError = nil; refreshPromo() }
         } catch {
+            let current = await MainActor.run { selectedAddress?.id == a.id && fulfillment == .delivery }
+            guard current else { return }
             await MainActor.run {
                 quote = nil
                 quoteError = error.localizedDescription

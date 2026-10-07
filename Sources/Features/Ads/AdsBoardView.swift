@@ -30,6 +30,9 @@ final class AdsBoardViewModel: ObservableObject {
     private var page = 1
     private var pages = 1
     private var searchTask: Task<Void, Never>?
+    /// Номер последней перезагрузки: ответ на старый фильтр (или «ещё» от
+    /// старого списка) после смены категории не должен попасть в новый список.
+    private var gen = 0
 
     /// Выбранная корневая категория — чтобы показать её подкатегории.
     var activeRoot: AdCategory? {
@@ -46,12 +49,17 @@ final class AdsBoardViewModel: ObservableObject {
     }
 
     func load(reset: Bool) async {
-        if reset { loading = items.isEmpty; page = 1 } else { loadingMore = true }
+        // Двойной тап «Показать ещё» раньше грузил одну страницу дважды:
+        // дубли id в ForEach и пропуск следующей страницы.
+        if !reset && loadingMore { return }
+        if reset { gen += 1; loadingMore = false; loading = items.isEmpty; page = 1 } else { loadingMore = true }
+        let my = gen
         do {
             let next = reset ? 1 : page + 1
             let r = favOnly
                 ? try await API.shared.adFavorites(page: next)
                 : try await API.shared.ads(categoryId: categoryId, q: query, page: next)
+            guard my == gen else { return }
             enabled = r.enabled ?? true
             total = r.total ?? 0
             pages = max(1, r.pages ?? 1)
@@ -61,8 +69,10 @@ final class AdsBoardViewModel: ObservableObject {
             error = nil
         } catch is CancellationError {
         } catch {
+            guard my == gen else { return }
             self.error = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить"
         }
+        guard my == gen else { return }
         loading = false
         loadingMore = false
     }

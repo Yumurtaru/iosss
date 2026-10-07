@@ -162,6 +162,26 @@ final class OrderDetailViewModel: ObservableObject {
 
     func stopTracking() { pollTimer?.invalidate(); pollTimer = nil }
 
+    /// Закрыли страницу оплаты — перечитываем заказ. Раньше экран продолжал
+    /// показывать «Оплатить», и человек мог заплатить второй раз. Уведомление
+    /// ЮKassa доходит до сервера с задержкой, поэтому смотрим ещё раз через 3 с.
+    /// Уведомление ЮKassa бывает и через 10–20 с: проверяем до ~30 с, а кнопка
+    /// «Оплатить» всё это время заблокирована. Раньше после двух проверок она
+    /// снова становилась активной, и можно было создать второй платёж.
+    @Published var checkingPayment = false
+    func refreshAfterPayment() async {
+        checkingPayment = true
+        defer { checkingPayment = false }
+        for attempt in 0..<10 {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+            if Task.isCancelled { return }
+            if let o: OrderDetail = try? await API.shared.get("api/v1/orders/\(id)") {
+                order = o
+                if (o.paymentStatus ?? "").lowercased() == "paid" { return }
+            }
+        }
+    }
+
     /// Текст ошибки повтора заказа (раньше была только вибрация: кнопка молча
     /// «не срабатывала», и человек не понимал почему).
     @Published var reorderError: String?
@@ -308,7 +328,7 @@ struct OrderDetailView: View {
             Text("Заказ №\(navNumber) будет отменён. Действие необратимо.")
         }
         // Ссылка YooKassa — открываем во внешнем браузере (SafariView-эквивалент).
-        .sheet(item: $vm.payLink) { link in SafariSheet(url: link.url) }
+        .sheet(item: $vm.payLink, onDismiss: { Task { await vm.refreshAfterPayment() } }) { link in SafariSheet(url: link.url) }
         // Тост-результат действия (отмена / оплата / отзыв / NPS).
         .overlay(alignment: .bottom) { toastOverlay }
     }
@@ -606,11 +626,12 @@ struct OrderDetailView: View {
             } label: {
                 HStack {
                     if vm.actionBusy { ProgressView().tint(YMColor.onAccent) }
+                    else if vm.checkingPayment { Text("Проверяем оплату…") }
                     else { Label("Оплатить картой", systemImage: "creditcard.fill") }
                 }
             }
             .buttonStyle(YMPrimaryButtonStyle())
-            .disabled(vm.actionBusy)
+            .disabled(vm.actionBusy || vm.checkingPayment)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(YMSpace.lg)
@@ -725,7 +746,7 @@ struct OrderDetailView: View {
             Button {
                 Task {
                     await vm.repeatOrder(cart: cart)
-                    if vm.reorderDone { router.requestedTab = 3 }  // открыть таб «Заказы»/корзину
+                    if vm.reorderDone { router.requestedTab = 2 }  // открыть корзину (таб 2; 3 — «Заказы», где мы и так)
                 }
             } label: {
                 HStack {
@@ -775,7 +796,7 @@ struct OrderDetailView: View {
             Button("Отмена", role: .cancel) { vm.cancelPendingReorder() }
             Button("Очистить и повторить", role: .destructive) {
                 vm.confirmPendingReorder(cart: cart)
-                if vm.reorderDone { router.requestedTab = 3 }
+                if vm.reorderDone { router.requestedTab = 2 }
             }
         } message: {
             Text("В корзине заказ из «\(cart.shopName ?? "другого заведения")». Повтор заменит его на заказ из «\(vm.conflictShopName ?? "этого заведения")».")

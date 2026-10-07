@@ -198,7 +198,11 @@ struct OrgBookingSection: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .onChange(of: selected?.id) { _ in
+        .onChange(of: selected?.id) { newId in
+            // Обработчик висит на КАЖДОЙ строке услуги: раньше одно нажатие
+            // запускало столько загрузок окон, сколько услуг в списке.
+            // Реагирует только строка выбранной услуги.
+            guard newId == sv.id else { return }
             // Пределы у новой услуги свои — сбрасываем выбор.
             guests = selected?.guestsMin ?? 1
             hours = 1
@@ -309,17 +313,27 @@ struct OrgBookingSection: View {
 
     private func loadSlots() async {
         guard let sel = selected, !selectedDate.isEmpty else { return }
+        let date = selectedDate
         loadingSlots = true; slotsError = nil; slots = []
+        // Ответ применяем, только если услуга и день не сменились, пока он шёл.
+        // Раньше «Сегодня» → «Завтра» (или услуга А → Б) и опоздавший ответ
+        // подменял список: в подтверждении — завтра и услуга Б, а бронировалось
+        // окно сегодняшнего дня или услуги А.
+        var still: Bool { selected?.id == sel.id && selectedDate == date }
         do {
-            slots = try await API.shared.list("api/v1/services/\(sel.id)/slots", query: ["date": selectedDate])
+            let list: [Slot] = try await API.shared.list("api/v1/services/\(sel.id)/slots", query: ["date": date])
+            guard still else { return }
+            slots = list
         } catch is CancellationError {
         } catch {
+            guard still else { return }
             slotsError = error.localizedDescription
         }
-        loadingSlots = false
+        if still { loadingSlots = false }
     }
 
     private func book(slot: Slot) {
+        guard !confirming else { return }   // двойной тап не создаёт вторую запись
         confirming = true
         Task {
             do {

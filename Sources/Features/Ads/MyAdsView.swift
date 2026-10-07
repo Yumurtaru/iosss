@@ -81,6 +81,17 @@ final class MyAdsViewModel: ObservableObject {
         }
     }
 
+    /// Срок уже прошёл. Снятое объявление с оплаченным сроком раньше
+    /// подписывалось «срок вышел» с будущей датой.
+    static func expired(_ s: String?) -> Bool {
+        guard let s, s.count >= 19 else { return true }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        guard let d = f.date(from: String(s.prefix(19))) else { return true }
+        return d.timeIntervalSinceNow <= 0
+    }
+
     /// Срок кончается в ближайшие 3 дня (сервер пишет "Y-m-d H:i:s").
     static func expiresSoon(_ s: String?) -> Bool {
         guard let s, s.count >= 19 else { return false }
@@ -108,6 +119,9 @@ struct MyAdsView: View {
     @State private var editId: Int?
     @State private var showNew = false
     @State private var confirmDelete: AdCard?
+    /// Открытое объявление. Свой переход, а не AdsRoute: экран открывают и из
+    /// профиля, где AdsRoute не зарегистрирован, — «Открыть» там не работало.
+    @State private var openAdId: Int?
 
     var body: some View {
         Group {
@@ -130,11 +144,19 @@ struct MyAdsView: View {
             }
         }
         .task { await vm.load() }
-        .sheet(isPresented: $showNew) {
+        .navigationDestination(isPresented: Binding(
+            get: { openAdId != nil }, set: { if !$0 { openAdId = nil } }
+        )) {
+            if let id = openAdId { AdDetailView(adId: id) }
+        }
+        // Черновик или правка, сохранённые без публикации, тоже должны
+        // появиться в списке сразу, а не после обновления жестом.
+        .sheet(isPresented: $showNew, onDismiss: { Task { await vm.load() } }) {
             AdFormView(editAdId: 0) { _ in showNew = false; Task { await vm.load() } }
         }
         .sheet(item: Binding(get: { editId.map { AdEditTarget(id: $0) } },
-                             set: { editId = $0?.id })) { target in
+                             set: { editId = $0?.id }),
+               onDismiss: { Task { await vm.load() } }) { target in
             AdFormView(editAdId: target.id) { _ in editId = nil; Task { await vm.load() } }
         }
         .alert("Удалить объявление?", isPresented: Binding(
@@ -201,7 +223,7 @@ struct MyAdsView: View {
                                 Text(ad.priceText ?? "").font(YMFont.body).foregroundStyle(YMColor.text)
                                 Text("Просмотров: \(ad.viewsCount ?? 0)"
                                      + (ad.expiresAt?.isEmpty == false
-                                        ? " · " + ((ad.status == "active") ? "до " : "срок вышел ") + String((ad.expiresAt ?? "").prefix(10))
+                                        ? " · " + ((ad.status == "active" || !MyAdsViewModel.expired(ad.expiresAt)) ? "до " : "срок вышел ") + String((ad.expiresAt ?? "").prefix(10))
                                         : ""))
                                     .font(YMFont.caption).foregroundStyle(YMColor.muted)
                                 if let br = ad.blockReason, !br.isEmpty {
@@ -217,7 +239,7 @@ struct MyAdsView: View {
 
                         HStack(spacing: YMSpace.md) {
                             if ad.status == "active" {
-                                NavigationLink(value: AdsRoute.detail(ad.stableId)) {
+                                Button { openAdId = ad.stableId } label: {
                                     Text("Открыть").font(YMFont.callout).foregroundStyle(YMColor.accent)
                                 }
                                 Button("Снять") { Task { await vm.archive(ad) } }

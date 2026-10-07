@@ -62,7 +62,17 @@ final class NavCoordinator: ObservableObject {
     /// Слаг из ссылки или push идёт в путь запроса к API — только «правильные» символы.
     func openOrg(slug: String) {
         guard slug.range(of: "^[A-Za-z0-9_-]{1,120}$", options: .regularExpression) != nil else { return }
-        pendingOrgSlug = slug
+        // Открыты корзина или чат — сначала закрываем их: с одной вьюхи SwiftUI
+        // не покажет вторую шторку, и организация из пуша не открылась бы.
+        if showCart || chatOrderId != nil {
+            showCart = false
+            chatOrderId = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.pendingOrgSlug = slug
+            }
+        } else {
+            pendingOrgSlug = slug
+        }
     }
     func openChat(orderId: Int) { chatOrderId = orderId }
     func openChatList() { chatOrderId = -1 }

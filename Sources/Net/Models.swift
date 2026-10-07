@@ -1,7 +1,48 @@
 import Foundation
+import os
 
 // Конверт ответа v1: {success, data, meta, error}
-struct APIEnvelope<T: Decodable>: Decodable { let success: Bool?; let data: T?; let error: APIErr? }
+struct APIEnvelope<T: Decodable>: Decodable { let success: Bool?; let data: T?; let meta: PageMeta?; let error: APIErr? }
+
+/// meta постраничных списков v1 (контракт, волна А3): page, per_page, has_more.
+/// Так отвечают GET api/v1/shops и api/v1/organizations (по 100), api/v1/orders
+/// (по 100), api/v1/notifications (по 20). has_more = true — есть следующая
+/// страница, просите page+1. Сервер per_page НЕ принимает, размер страницы его.
+/// Разбор никогда не бросает: meta бывает null, другой формы или пустым — тогда
+/// все поля nil, и ответ целиком не теряется из-за служебного поля.
+struct PageMeta: Decodable {
+    let page: Int?
+    let perPage: Int?
+    let hasMore: Bool?
+    /// Только у api/v1/notifications: непрочитанных ВСЕГО, а не на странице.
+    let unread: Int?
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            page = nil; perPage = nil; hasMore = nil; unread = nil; return
+        }
+        unread = (try? c.decode(Int.self, forKey: .unread)) ?? (try? c.decode(String.self, forKey: .unread)).flatMap { Int($0) }
+        page = (try? c.decode(Int.self, forKey: .page)) ?? (try? c.decode(String.self, forKey: .page)).flatMap { Int($0) }
+        perPage = (try? c.decode(Int.self, forKey: .perPage)) ?? (try? c.decode(String.self, forKey: .perPage)).flatMap { Int($0) }
+        hasMore = (try? c.decode(Bool.self, forKey: .hasMore)) ?? (try? c.decode(Int.self, forKey: .hasMore)).map { $0 != 0 }
+    }
+    // Ключи в camelCase: декодер API переводит snake_case сам (per_page → perPage).
+    enum CodingKeys: String, CodingKey { case page, perPage, hasMore, unread }
+}
+
+/// Получатель meta: API.perform передаёт ему meta конверта после разбора data.
+protocol PageMetaReceiving: AnyObject { func receive(meta: PageMeta?) }
+
+/// Страница списка вместе с признаком «есть ещё». Берётся через API.shared.page(...).
+final class Page<T: Decodable>: Decodable, PageMetaReceiving {
+    let items: [T]
+    private(set) var meta: PageMeta?
+    /// Есть ли следующая страница. Старый сервер признака не присылал — тогда false.
+    var hasMore: Bool { meta?.hasMore ?? false }
+    init(from decoder: Decoder) throws {
+        items = try ListPayload<T>(from: decoder).items
+    }
+    func receive(meta: PageMeta?) { self.meta = meta }
+}
 
 // error приходит по-разному: строкой ("текст") — core/Response.php (Response::error),
 // ИЛИ объектом {message} — часть эндпоинтов. Толерантно принимаем обе формы,
@@ -32,14 +73,53 @@ struct APIErr: Decodable {
     private enum CodingKeys: String, CodingKey { case message, details }
 }
 
-// Список: массив или {items:[...], has_more}
+/// Журнал ошибок разбора ответа: Console.app / Xcode, категория «decode».
+/// Пишет тип и путь поля — видно, какое именно поле разошлось с сервером.
+enum DecodeLog {
+    static let logger = Logger(subsystem: "ru.marketplace.client.premium", category: "decode")
+    static func report(_ error: Error, _ type: Any.Type) {
+        let what = String(describing: type)
+        let why = describe(error)
+        logger.error("Не разобран \(what, privacy: .public): \(why, privacy: .public)")
+    }
+    static func describe(_ error: Error) -> String {
+        guard let e = error as? DecodingError else { return String(describing: error) }
+        func path(_ keys: [CodingKey]) -> String {
+            keys.reduce("") { acc, key in
+                if let i = key.intValue { return acc + "[\(i)]" }
+                return acc.isEmpty ? key.stringValue : acc + "." + key.stringValue
+            }
+        }
+        switch e {
+        case .typeMismatch(let t, let ctx):  return "тип \(t) в \(path(ctx.codingPath))"
+        case .valueNotFound(let t, let ctx): return "нет значения \(t) в \(path(ctx.codingPath))"
+        case .keyNotFound(let k, let ctx):   return "нет ключа \(k.stringValue) в \(path(ctx.codingPath))"
+        case .dataCorrupted(let ctx):        return "битые данные в \(path(ctx.codingPath))"
+        @unknown default:                    return String(describing: e)
+        }
+    }
+}
+
+/// Элемент списка, который не роняет весь список: не разобрался — nil и запись в журнал.
+struct LossyElement<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws {
+        do { value = try T(from: decoder) } catch { value = nil; DecodeLog.report(error, T.self) }
+    }
+}
+
+// Список: массив или {items:[...], has_more}.
+// Битую запись пропускаем (и пишем в журнал), а не теряем весь список: раньше одна
+// запись с неожиданным типом поля давала пустой экран без единой ошибки.
 struct ListPayload<T: Decodable>: Decodable {
     let items: [T]; let hasMore: Bool
     init(from decoder: Decoder) throws {
-        if let arr = try? [T](from: decoder) { items = arr; hasMore = false; return }
+        if let arr = try? [LossyElement<T>](from: decoder) {
+            items = arr.compactMap { $0.value }; hasMore = false; return
+        }
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        items = (try? c.decode([T].self, forKey: .items)) ?? []
-        hasMore = (try? c.decode(Bool.self, forKey: .hasMore)) ?? false
+        items = ((try? c.decode([LossyElement<T>].self, forKey: .items)) ?? []).compactMap { $0.value }
+        hasMore = (try? c.decode(LenientBool.self, forKey: .hasMore))?.wrappedValue ?? false
     }
     enum CodingKeys: String, CodingKey { case items, hasMore }
 }
@@ -557,7 +637,9 @@ struct AdDetail: Codable, Identifiable {
     var expiresAt: String?
     var favorite: Bool?
     var description: String?
-    var conditionNew: Bool?
+    // true — новое, false — б/у, nil — не указано. Толерантно к 0/1 и строкам:
+    // строгий Bool не открыл бы карточку, если сервер пришлёт число.
+    @LenientBool var conditionNew: Bool?
     var address: String?
     var contactName: String?
     // nil — владелец спрятал номер, он придёт по POST .../contact

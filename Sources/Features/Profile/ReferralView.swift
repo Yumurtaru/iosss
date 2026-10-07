@@ -25,6 +25,7 @@ struct ReferralView: View {
 
     // Применение чужого кода.
     @State private var friendCode = ""
+    @State private var didPrefill = false
     @State private var applying = false
     @State private var applyMsg: String?
     @State private var applyOk = false
@@ -50,7 +51,11 @@ struct ReferralView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await load()
-            if let p = prefillCode?.trimmingCharacters(in: .whitespaces), !p.isEmpty, friendCode.isEmpty {
+            // Код из ссылки применяем один раз. После «Код принят» поле очищается,
+            // и при возврате на экран (.task снова) код уходил повторно — ответ
+            // «код уже применён» затирал сообщение об успехе.
+            if !didPrefill, let p = prefillCode?.trimmingCharacters(in: .whitespaces), !p.isEmpty, friendCode.isEmpty {
+                didPrefill = true
                 friendCode = p.uppercased()
                 await apply()
             }

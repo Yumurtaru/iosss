@@ -16,14 +16,25 @@ final class LodgingTripsVM: ObservableObject {
     @Published var loading = true
     @Published var message: String?
     @Published var cancelling = false
+    /// Ошибка загрузки. Раньше без сети писали «Поездок пока нет», а неудачное
+    /// обновление жестом стирало уже показанный список.
+    @Published var loadError: String?
 
     func load() async {
         loading = true
-        trips = (try? await API.shared.lodgingTrips()) ?? []
+        // Отмена обновления жестом раньше опустошала список поездок (try? → []).
+        do {
+            trips = try await API.shared.lodgingTrips()
+            loadError = nil
+        } catch is CancellationError {
+        } catch {
+            loadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить поездки"
+        }
         loading = false
     }
 
     func cancel(_ trip: LodgingTrip) async {
+        guard !cancelling else { return }
         cancelling = true
         defer { cancelling = false }
         do {
@@ -62,7 +73,7 @@ struct LodgingTripsView: View {
                                 route = .unit(s)
                             }
                         },
-                        onCancel: { toCancel = t }
+                        onCancel: { if !vm.cancelling { toCancel = t } }
                     )
                 }
 
@@ -84,6 +95,12 @@ struct LodgingTripsView: View {
                     ForEach(0..<2, id: \.self) { _ in
                         SkeletonBox(radius: YMRadius.card).frame(height: 150)
                     }
+                } else if !vm.loading && vm.trips.isEmpty, let e = vm.loadError {
+                    Text(e + ". Потяните вниз, чтобы обновить.")
+                        .font(YMFont.callout)
+                        .foregroundStyle(YMColor.statusCancel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, YMSpace.md)
                 } else if !vm.loading && vm.trips.isEmpty {
                     Text("Поездок пока нет. Загляните в раздел «Жильё» на главной.")
                         .font(YMFont.callout)

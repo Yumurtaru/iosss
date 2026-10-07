@@ -115,18 +115,35 @@ struct LodgingMonthGrid: View {
                     // поиска остатки ещё неизвестны, их проверит сервер.
                     let free = info?.canStay ?? true
                     let past = iso < LodgingDate.today
+                    // Выбираем выезд: день выезда ночь не занимает и может быть
+                    // занят (кто-то в этот день заезжает). Раньше такой день был
+                    // серым, и бронь «10–12, а 12-го заезд другого гостя» сделать
+                    // было нельзя. Зато все ночи до выезда должны быть свободны.
+                    let pickingCheckout = from != nil && to == nil && iso > from!
+                    let checkoutOk = pickingCheckout && !(info?.noDeparture ?? false)
+                        && (firstBlocked == nil || iso <= firstBlocked!)
+                    // Свободный день за занятой ночью остаётся активным: нажатие
+                    // по нему начинает новый выбор с этого дня (см. pick).
+                    let canPick = checkoutOk || free
                     let selected = iso == from || iso == to
                     let inRange = from != nil && to != nil && iso >= from! && iso <= to!
                     LodgingDayCell(
                         dayNum: day,
                         priceText: info.flatMap { LodgingText.shortPrice($0.priceValue) },
-                        enabled: free && !past,
+                        enabled: canPick && !past,
                         selected: selected,
                         inRange: inRange
                     ) { onPick(iso) }
                 }
             }
         }
+    }
+
+    /// Первая занятая ночь после дня заезда — один раз на месяц, а не перебор
+    /// дат для каждой клетки (раньше — десятки тысяч разборов дат на кадр).
+    private var firstBlocked: String? {
+        guard let f = from, to == nil else { return nil }
+        return days.filter { $0.key >= f && !$0.value.canStay }.keys.min()
     }
 
     private func isoFor(_ day: Int) -> String {
@@ -242,6 +259,15 @@ struct LodgingDatesSheet: View {
     private func pick(_ iso: String) {
         if pickFrom == nil || pickTo != nil { pickFrom = iso; pickTo = nil }
         else if let f = pickFrom, iso <= f { pickFrom = iso; pickTo = nil }
+        // Между заездом и этим днём есть занятая ночь — такой выезд невозможен:
+        // начинаем выбор заново с этого дня.
+        else if let f = pickFrom, !lodgingNightsFree(days, f, iso) { pickFrom = iso; pickTo = nil }
         else { pickTo = iso }
     }
+}
+
+/// Все ночи с from (включительно) до to (не включая) можно занять. Без
+/// календаря объекта (экран поиска) не знаем — проверит сервер.
+func lodgingNightsFree(_ days: [String: LodgingDay], _ from: String, _ to: String) -> Bool {
+    !days.contains { $0.key >= from && $0.key < to && !$0.value.canStay }
 }

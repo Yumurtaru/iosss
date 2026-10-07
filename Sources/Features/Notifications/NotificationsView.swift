@@ -20,10 +20,16 @@ struct NotificationsView: View {
     @State private var items: [AppNotification] = []
     @State private var loading = true
     @State private var error: String?
+    // Догрузка (волна А3): уведомлений по 20 на страницу, meta.has_more.
+    @State private var page = 1
+    @State private var hasMore = false
+    @State private var moreFailed = false
+    @State private var loadingMore = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: YMSpace.md) {
+            // Lazy: подвал догрузки должен «появляться» при прокрутке, а не сразу.
+            LazyVStack(alignment: .leading, spacing: YMSpace.md) {
                 if loading {
                     ForEach(0..<5, id: \.self) { _ in SkeletonBox(radius: 18).frame(height: 74) }
                 } else if let error {
@@ -32,6 +38,9 @@ struct NotificationsView: View {
                     NotifEmptyState()
                 } else {
                     ForEach(items) { n in NotifRow(item: n) }
+                    if hasMore {
+                        LoadMoreFooter(page: page, failed: moreFailed) { await loadMore() }
+                    }
                 }
             }
             .padding(.horizontal, YMSpace.xl)
@@ -47,9 +56,11 @@ struct NotificationsView: View {
     private func load() async {
         loading = true
         error = nil
+        page = 1; hasMore = false; moreFailed = false; loadingMore = false
         do {
-            let list: [AppNotification] = try await API.shared.list("api/v1/notifications")
-            await MainActor.run { items = list; loading = false }
+            let first: Page<AppNotification> = try await API.shared.page("api/v1/notifications")
+            let list = first.items
+            await MainActor.run { items = list; hasMore = first.hasMore; loading = false }
             // Отметить непрочитанные прочитанными (тихо, ошибки не показываем).
             let unread = list.filter { !$0.read }.map { $0.id }
             if !unread.isEmpty {
@@ -63,6 +74,30 @@ struct NotificationsView: View {
                 loading = false
             }
         }
+    }
+}
+
+extension NotificationsView {
+    /// Следующая страница. Зовёт подвал списка, когда он виден.
+    fileprivate func loadMore() async {
+        guard hasMore, !loadingMore, !loading else { return }
+        loadingMore = true; moreFailed = false
+        let next = page + 1
+        do {
+            let p: Page<AppNotification> = try await API.shared.page("api/v1/notifications", query: ["page": String(next)])
+            let known = Set(items.map(\.id))
+            items += p.items.filter { !known.contains($0.id) }
+            page = next
+            hasMore = p.hasMore && !p.items.isEmpty
+            // Догруженные непрочитанные — тоже прочитаны: человек до них долистал.
+            let unread = p.items.filter { !$0.read }.map { $0.id }
+            if !unread.isEmpty {
+                try? await API.shared.postVoid("api/v1/notifications/read", body: NotifReadBody(ids: unread))
+            }
+        } catch {
+            if !(error is CancellationError) { moreFailed = true }
+        }
+        loadingMore = false
     }
 }
 

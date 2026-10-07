@@ -83,6 +83,7 @@ final class LodgingUnitVM: ObservableObject {
     /// на экран — состоянием владеет вьюха, а не модель).
     func book(slug: String, from: String, to: String, adults: Int, children: Int,
               planId: Int?, name: String, phone: String, comment: String) async -> LodgingBookResp? {
+        guard !sending else { return nil }   // двойной тап не создаёт вторую бронь
         sending = true
         defer { sending = false }
         do {
@@ -93,7 +94,6 @@ final class LodgingUnitVM: ObservableObject {
                                      guestName: name.isEmpty ? nil : name,
                                      guestPhone: phone.isEmpty ? nil : phone,
                                      guestComment: comment.isEmpty ? nil : comment,
-                                     payment: "on_arrival",
                                      // Сумма из расчёта: сервер не оформит бронь
                                      // дороже той, что гость видел на экране.
                                      expectedTotal: quote.map { "\($0.totalValue)" })
@@ -222,7 +222,12 @@ struct LodgingUnitView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle(vm.data?.unit?.title ?? "Жильё")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await vm.load(slug: slug) }
+        .task {
+            await vm.load(slug: slug)
+            // Объект на одного гостя открывался с «2 взрослых»: «+» выключен,
+            // первый расчёт отвечал «нельзя». Не больше вместимости.
+            if let u = vm.data?.unit, adults > u.maxGuestsValue { adults = u.maxGuestsValue }
+        }
         .task(id: quoteKey) {
             await vm.recalc(slug: slug, from: from, to: to,
                             adults: adults, children: children, planId: planId)

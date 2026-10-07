@@ -36,8 +36,26 @@ final class Session: ObservableObject {
         Push.shared.requestAuthorization()
         Task { await Push.shared.registerIfPossible() }
     }
-    func signOut() {
+    /// clearLocalData — только для явного выхода и удаления аккаунта. При
+    /// истёкшей сессии (401) корзина и номер неподтверждённой оплаты Plus
+    /// остаются: человек просто войдёт снова.
+    func signOut(clearLocalData: Bool = false) {
+        let wasLoggedIn = token != nil
         token = nil
         TokenStore.clear()
+        API.clearCookies()   // cookie прежних версий не должны пережить выход
+        // Корзина, история поиска и «недавно смотрели» лежат на телефоне. Раньше
+        // следующий вошедший видел всё это от прежнего владельца, а первая правка
+        // корзины уходила на сервер «брошенной корзиной» уже от его имени.
+        // Только для настоящего выхода: onUnauthorized зовёт signOut и у гостя,
+        // и случайный 401 не должен стирать гостю корзину.
+        if wasLoggedIn && clearLocalData {
+            Task { @MainActor in
+                Cart.shared.clear()
+                SearchHistoryStore.clear()
+                RecentStore.clear()
+                UserDefaults.standard.removeObject(forKey: "plus_pending_payment_id")
+            }
+        }
     }
 }

@@ -44,11 +44,24 @@ final class LodgingSearchVM: ObservableObject {
     @Published var total = 0
     @Published var loading = true
     @Published var failed = false
+    // Догрузка. Сервер отдаёт результаты страницами, а экран раньше брал
+    // только первую: «Найдено: 45», а карточек — одна страница и никакой
+    // «следующей». gen — номер выборки: догрузка по старым фильтрам выбрасывается.
+    @Published var page = 1
+    @Published var moreFailed = false
+    private var loadingMore = false
+    private var gen = 0
+    private var lastQuery: (cityId: Int?, rentLong: Bool, subtype: String, from: String?, to: String?, guests: Int)?
+
+    var hasMore: Bool { !loading && !items.isEmpty && items.count < total }
 
     func search(cityId: Int?, rentLong: Bool, subtype: String,
                 from: String?, to: String?, guests: Int) async {
         loading = true
         failed = false
+        gen += 1
+        page = 1; moreFailed = false; loadingMore = false
+        lastQuery = (cityId, rentLong, subtype, from, to, guests)
         do {
             let resp = try await API.shared.lodgingSearch(
                 cityId: cityId,
@@ -70,6 +83,35 @@ final class LodgingSearchVM: ObservableObject {
             failed = true
         }
         loading = false
+    }
+
+    func loadMore() async {
+        guard hasMore, !loadingMore, let q = lastQuery else { return }
+        loadingMore = true; moreFailed = false
+        let myGen = gen, next = page + 1
+        do {
+            let resp = try await API.shared.lodgingSearch(
+                cityId: q.cityId,
+                dateFrom: q.rentLong ? nil : q.from,
+                dateTo: q.rentLong ? nil : q.to,
+                guests: q.guests,
+                subtype: q.subtype == "all" ? nil : q.subtype,
+                rent: q.rentLong ? "long" : "daily",
+                page: next
+            )
+            guard myGen == gen else { return }
+            let fresh = resp.itemsList
+            let known = Set(items.map(\.id))
+            items += fresh.filter { !known.contains($0.id) }
+            page = next
+            total = resp.totalValue
+            // Пустая страница — дальше идти некуда, иначе подвал крутился бы вечно.
+            if fresh.isEmpty { total = items.count }
+        } catch is CancellationError {
+        } catch {
+            if myGen == gen { moreFailed = true }
+        }
+        if myGen == gen { loadingMore = false }
     }
 }
 
@@ -141,6 +183,10 @@ struct LodgingSearchView: View {
                     }
                     .buttonStyle(CardPressStyle())
                     .padding(.horizontal, YMSpace.xl)
+                }
+
+                if vm.hasMore {
+                    LoadMoreFooter(page: vm.page, failed: vm.moreFailed) { await vm.loadMore() }
                 }
 
                 if vm.loading && vm.items.isEmpty {

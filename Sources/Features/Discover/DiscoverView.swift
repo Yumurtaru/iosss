@@ -155,6 +155,10 @@ private struct SearchSection: View {
             }
         }
         .task { await loadFavIds() }
+        // Экран поиска живёт всю сессию: историю и «недавно смотрели» читаем
+        // при каждом появлении, иначе они не обновлялись (и после смены
+        // аккаунта показывали чужие).
+        .onAppear { history = SearchHistoryStore.load(); recent = RecentStore.load() }
         .onChange(of: q) { _ in scheduleSearch() }
     }
 
@@ -381,14 +385,14 @@ private struct SearchSection: View {
 
     /// Текст с выделенным вхождением запроса (bold).
     private func highlighted(_ s: String) -> Text {
-        let ql = trimmed.lowercased()
-        guard !ql.isEmpty, let r = s.lowercased().range(of: ql) else { return Text(s) }
-        let start = s.distance(from: s.startIndex, to: r.lowerBound)
-        let idxLo = s.index(s.startIndex, offsetBy: start)
-        let idxHi = s.index(idxLo, offsetBy: ql.count)
-        let pre = String(s[s.startIndex..<idxLo])
-        let mid = String(s[idxLo..<idxHi])
-        let post = String(s[idxHi..<s.endIndex])
+        // Ищем прямо в s без учёта регистра — диапазон тогда принадлежит самой s.
+        // Раньше искали в s.lowercased() и переносили индексы на s: у «İ»
+        // строчная форма длиннее, и на названии вроде «İstanbul Kebap» с
+        // запросом «bul» индекс уходил за конец строки — вылет при поиске.
+        guard !trimmed.isEmpty, let r = s.range(of: trimmed, options: .caseInsensitive) else { return Text(s) }
+        let pre = String(s[s.startIndex..<r.lowerBound])
+        let mid = String(s[r])
+        let post = String(s[r.upperBound..<s.endIndex])
         return Text(pre) + Text(mid).fontWeight(.heavy) + Text(post)
     }
 
@@ -417,7 +421,11 @@ private struct SearchSection: View {
         do {
             let r: SearchSmartResult = try await API.shared.get("api/v1/search/smart", query: params)
             shops = r.shops ?? []; products = r.products ?? []
-        } catch { shops = []; products = [] }
+        } catch {
+            // Отмена (набрали следующую букву) — не «ничего не найдено».
+            if Task.isCancelled { return }
+            shops = []; products = []
+        }
         loading = false
     }
 
@@ -432,6 +440,8 @@ private struct SearchSection: View {
     private func clearResults() { shops = []; products = []; loading = false }
 
     private func loadFavIds() async {
+        // Гость: сердечки прошлого аккаунта не показываем.
+        guard session.isLoggedIn else { favProducts = []; favShops = []; return }
         if let ids: [Int] = try? await API.shared.list("api/v1/product-favorites/ids") {
             favProducts = Set(ids)
         }

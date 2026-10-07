@@ -43,7 +43,13 @@ final class WalletViewModel: ObservableObject {
         loading = false
     }
 
+    /// Платёж создаётся — второе «Пополнить» в это время создавало второй платёж.
+    @Published var creating = false
+
     func topup(amount: Decimal, method: String) async {
+        guard !creating else { return }
+        creating = true
+        defer { creating = false }
         notice = nil
         do {
             let body = WalletTopupBody(amount: Money.wire(amount), method: method)
@@ -116,6 +122,7 @@ final class WalletViewModel: ObservableObject {
 struct WalletView: View {
     @StateObject private var vm = WalletViewModel()
     @State private var showTopup = false
+    @State private var pendingTopup: (amount: Decimal, method: String)?
 
     var body: some View {
         Group {
@@ -134,10 +141,19 @@ struct WalletView: View {
         .sheet(item: $vm.payLink, onDismiss: { Task { await vm.checkNow() } }) { link in
             SafariSheet(url: link.url)
         }
-        .sheet(isPresented: $showTopup) {
+        // Платёж создаём ПОСЛЕ того, как лист пополнения закрылся: иначе на
+        // быстрой сети payLink приходил, пока лист ещё уезжал, SwiftUI не мог
+        // показать второй лист поверх первого — страница ЮKassa не открывалась,
+        // а экран 5 минут писал «Ожидаем оплату».
+        .sheet(isPresented: $showTopup, onDismiss: {
+            if let p = pendingTopup {
+                pendingTopup = nil
+                Task { await vm.topup(amount: p.amount, method: p.method) }
+            }
+        }) {
             TopupSheet(min: vm.minTopup, max: vm.maxTopup) { amount, method in
+                pendingTopup = (amount, method)
                 showTopup = false
-                Task { await vm.topup(amount: amount, method: method) }
             }
         }
     }
@@ -160,9 +176,9 @@ struct WalletView: View {
 
                 if vm.info?.enabled == true {
                     Button {
-                        showTopup = true
+                        if !vm.creating { showTopup = true }
                     } label: {
-                        Text("Пополнить")
+                        Text(vm.creating ? "Создаём платёж…" : "Пополнить")
                             .font(YMFont.headline)
                             .foregroundStyle(YMColor.onAccent)
                             .frame(maxWidth: .infinity)

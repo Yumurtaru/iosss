@@ -94,7 +94,11 @@ struct SupportView: View {
             sectionTitle("Связаться с нами")
             HStack(spacing: YMSpace.md) {
                 contactCard(icon: "envelope.fill", title: "Написать", subtitle: supportEmail) {
-                    if let url = URL(string: "mailto:\(supportEmail)?subject=Обращение%20в%20поддержку%20Yumurta") {
+                    // Кириллицу кодируем сами: на iOS 16 URL(string:) с ней даёт nil,
+                    // и кнопка «Написать» не делала ничего.
+                    let subject = "Обращение в поддержку Yumurta"
+                        .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                    if let url = URL(string: "mailto:\(supportEmail)?subject=\(subject)") {
                         openURL(url)
                     }
                 }

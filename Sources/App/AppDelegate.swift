@@ -10,6 +10,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Кэш картинок. AsyncImage ходит через общий URLCache, а у него по
+        // умолчанию ~0,5 МБ памяти и 10 МБ диска: фото каталога вытесняли друг
+        // друга, и при прокрутке те же картинки качались заново. API-запросы
+        // этот кэш не используют (.reloadIgnoringLocalCacheData).
+        URLCache.shared = URLCache(memoryCapacity: 50 * 1024 * 1024, diskCapacity: 200 * 1024 * 1024)
         // Сбрасываем бейдж на иконке при запуске.
         application.applicationIconBadgeNumber = 0
         // Запрос разрешения на пуш — ГАРАНТИРОВАННО при старте (не зависит от .task/онбординга,

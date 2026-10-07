@@ -88,7 +88,9 @@ struct GiftCardView: View {
                     if loading {
                         ProgressView().tint(YMColor.onAccent)
                     } else {
-                        Text("Проверить и активировать").font(YMFont.headline)
+                        // Экран только проверяет баланс (GET), активации нет —
+                        // «и активировать» обещало то, чего не происходит.
+                        Text("Проверить баланс").font(YMFont.headline)
                     }
                 }
                 .foregroundStyle(canCheck ? YMColor.onAccent : YMColor.muted)

@@ -37,6 +37,9 @@ final class AdFormViewModel: ObservableObject {
     @Published var busy = false
     @Published var toast: String?
     @Published var shortage: String?
+    /// Правка: объявление не загрузилось. Сохранять нельзя — иначе пустая форма
+    /// затёрла бы объявление (или, как раньше, создала бы дубль-черновик).
+    @Published var loadFailed = false
 
     /// Плоский список выбираемых категорий: листья, а у корней без детей — сам корень.
     private func leaves(_ list: [AdCategory]) -> [(AdCategory, String)] {
@@ -56,8 +59,12 @@ final class AdFormViewModel: ObservableObject {
         if let w: WalletInfo = try? await API.shared.get("api/v1/wallet") { balance = w.balance ?? 0 }
         if let list: [City] = try? await API.shared.list("api/v1/cities") { cities = list }
         if (cityId ?? 0) <= 0 { cityId = nil }
-        if editAdId > 0, let r = try? await API.shared.ad(editAdId), let a = r.ad {
+        if editAdId > 0 {
             adId = editAdId
+            loadFailed = true
+        }
+        if editAdId > 0, let r = try? await API.shared.ad(editAdId), let a = r.ad {
+            loadFailed = false
             title = a.title ?? ""
             desc = a.description ?? ""
             price = a.price.map { Money.wire($0) } ?? ""
@@ -71,7 +78,20 @@ final class AdFormViewModel: ObservableObject {
             canChangeCategory = (a.status ?? "draft") == "draft"
             chosen = cats.first { $0.cat.stableId == (a.categoryId ?? 0) }?.cat
         }
+        if loadFailed { toast = "Не удалось загрузить объявление. Закройте форму и откройте снова" }
         loading = false
+    }
+
+    /// Цена строго целиком: «1 500» раньше превращалось в 1 ₽ (Decimal читает
+    /// только начало строки), а «abc» молча стирало цену.
+    private var parsedPrice: Decimal? {
+        let t = price
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\u{00A0}", with: "")
+            .replacingOccurrences(of: "\u{202F}", with: "")
+            .replacingOccurrences(of: ",", with: ".")
+        guard t.range(of: #"^\d+(\.\d{1,2})?$"#, options: .regularExpression) != nil else { return nil }
+        return Decimal(string: t)
     }
 
     private func body(for cat: AdCategory) -> AdSaveBody {
@@ -81,7 +101,7 @@ final class AdFormViewModel: ObservableObject {
             description: desc.trimmingCharacters(in: .whitespacesAndNewlines),
             // Цену нормализуем: запятую в точку, и только если категория её просит.
             price: cat.priceAllowed
-                ? (Decimal(string: price.replacingOccurrences(of: ",", with: ".")).map { Money.wire($0) } ?? "")
+                ? (parsedPrice.map { Money.wire($0) } ?? "")
                 : "",
             isNegotiable: negotiable,
             conditionNew: condition == 1 ? true : (condition == 0 ? false : nil),
@@ -96,6 +116,11 @@ final class AdFormViewModel: ObservableObject {
     @discardableResult
     func save(silent: Bool) async -> Int {
         guard let cat = chosen else { toast = "Выберите категорию"; return 0 }
+        if loadFailed { toast = "Объявление не загрузилось — откройте форму заново"; return 0 }
+        if cat.priceAllowed, !price.trimmingCharacters(in: .whitespaces).isEmpty, parsedPrice == nil {
+            toast = "Проверьте цену: только цифры, например 1500"
+            return 0
+        }
         do {
             if adId > 0 {
                 try await API.shared.adUpdate(adId, body(for: cat))
@@ -129,6 +154,8 @@ final class AdFormViewModel: ObservableObject {
         busy = true
         defer { busy = false }
         guard let cat = chosen else { toast = "Сначала выберите категорию"; return }
+        // Объявление не загрузилось — фото к нему не добавляем вслепую.
+        if loadFailed { toast = "Объявление не загрузилось — откройте форму заново"; return }
         // Фото цепляются к объявлению, поэтому черновик должен существовать.
         if adId == 0, await save(silent: true) == 0 { return }
         for item in items {
@@ -311,7 +338,8 @@ struct AdFormView: View {
                         Text("Размещение в «\(cat.name ?? "")»").font(YMFont.caption).foregroundStyle(YMColor.muted)
                         Text(cat.priceValue > 0 ? Money.format(cat.priceValue) : "Бесплатно")
                             .font(YMFont.title3).foregroundStyle(YMColor.text)
-                        Text("на \(cat.daysValue) дней").font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        // «на 1 день», «на 3 дня», «на 30 дней» — раньше всегда «дней».
+                        Text("на " + LodgingDate.plural(cat.daysValue, "день", "дня", "дней")).font(YMFont.caption).foregroundStyle(YMColor.muted)
                         if cat.priceValue > 0 {
                             let enough = vm.balance >= cat.priceValue
                             Text("Кошелёк: \(Money.format(vm.balance))" + (enough ? "" : " — не хватает"))
