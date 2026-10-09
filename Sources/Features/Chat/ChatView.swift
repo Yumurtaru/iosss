@@ -555,7 +555,7 @@ private struct ChatBubble: View {
             if let data = message.localImage, let ui = UIImage(data: data) {
                 Image(uiImage: ui).resizable().scaledToFill()
             } else if let url = API.imageURL(message.attachment) {
-                AsyncImage(url: url) { phase in
+                CachedAsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let img): img.resizable().scaledToFill()
                     case .failure:          ZStack { Color(.secondarySystemBackground); Image(systemName: "photo").foregroundStyle(YMColor.muted) }

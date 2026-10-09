@@ -203,7 +203,7 @@ struct MyAdsView: View {
                             ZStack {
                                 Rectangle().fill(YMColor.surface2)
                                 if let u = API.imageURL(ad.photoURL) {
-                                    AsyncImage(url: u) { phase in
+                                    CachedAsyncImage(url: u) { phase in
                                         if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
                                         else { Image(systemName: "photo").foregroundStyle(YMColor.muted) }
                                     }

@@ -142,7 +142,7 @@ private struct StoriesPlayer: View {
             Color.black.ignoresSafeArea()
 
             if let b = current {
-                AsyncImage(url: API.imageURL(b.image)) { phase in
+                CachedAsyncImage(url: API.imageURL(b.image)) { phase in
                     switch phase {
                     case .success(let img):
                         img.resizable().scaledToFit()

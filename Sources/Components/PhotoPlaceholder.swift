@@ -24,7 +24,7 @@ struct PhotoPlaceholder: View {
         }
         .overlay {
             if let url {
-                AsyncImage(url: url) { phase in
+                CachedAsyncImage(url: url) { phase in
                     if case let .success(image) = phase {
                         image.resizable().scaledToFill()
                     }

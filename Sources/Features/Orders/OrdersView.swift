@@ -516,7 +516,7 @@ struct LogoBadge: View {
                 .font(.system(size: size * 0.42, weight: .heavy))
                 .foregroundStyle(YMPalette.goldInk)
             if let url {
-                AsyncImage(url: url) { phase in
+                CachedAsyncImage(url: url) { phase in
                     if case let .success(img) = phase { img.resizable().scaledToFill() }
                 }
             }

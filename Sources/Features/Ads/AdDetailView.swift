@@ -114,7 +114,7 @@ struct AdDetailView: View {
                     Rectangle().fill(YMColor.surface2)
                     let shown = bigPhoto ?? photos.first?.full ?? photos.first?.card
                     if let u = API.imageURL(shown) {
-                        AsyncImage(url: u) { phase in
+                        CachedAsyncImage(url: u) { phase in
                             if let img = phase.image { img.resizable().aspectRatio(contentMode: .fit) }
                             else { ProgressView() }
                         }
@@ -130,7 +130,7 @@ struct AdDetailView: View {
                         HStack(spacing: YMSpace.sm) {
                             ForEach(photos) { p in
                                 if let u = API.imageURL(p.thumb ?? p.card) {
-                                    AsyncImage(url: u) { phase in
+                                    CachedAsyncImage(url: u) { phase in
                                         if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
                                         else { Rectangle().fill(YMColor.surface2) }
                                     }

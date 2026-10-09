@@ -369,7 +369,7 @@ struct AdGridCard: View {
                 Rectangle().fill(YMColor.surface2)
                 // API.imageURL — сервер отдаёт путь от корня сайта, нужна база.
                 if let u = API.imageURL(ad.photoURL) {
-                    AsyncImage(url: u) { phase in
+                    CachedAsyncImage(url: u) { phase in
                         if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
                         else { Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(YMColor.muted) }
                     }

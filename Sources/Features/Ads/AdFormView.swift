@@ -304,7 +304,7 @@ struct AdFormView: View {
                             ForEach(vm.photos) { p in
                                 ZStack(alignment: .topTrailing) {
                                     if let u = API.imageURL(p.thumb ?? p.card) {
-                                        AsyncImage(url: u) { phase in
+                                        CachedAsyncImage(url: u) { phase in
                                             if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
                                             else { Rectangle().fill(YMColor.surface2) }
                                         }
