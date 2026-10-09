@@ -57,10 +57,18 @@ final class Cart: ObservableObject {
     /// Раньше складывались неокруглённые: на дробных количествах кнопка
     /// обещала 150,65 ₽, а в заказе оказывалось 150,66 ₽.
     var total: Double {
-        lines.reduce(0.0) { $0 + ((($1.unitPrice * $1.qty) * 100).rounded() / 100) }
+        // В Decimal: 289,90 × 0,25 в Double = 72,474999… → 72,47, а сервер берёт 72,48.
+        let s = lines.reduce(Decimal(0)) { acc, l in
+            var v = Money.parse(l.unitPrice) * (Decimal(string: String(l.qty)) ?? 0)
+            var r = Decimal(); NSDecimalRound(&r, &v, 2, .plain); return acc + r
+        }
+        return NSDecimalNumber(decimal: s).doubleValue
     }
     var isEmpty: Bool { lines.isEmpty }
     private var snapshotTask: Task<Void, Never>?
+    /// Ключ повтора оформления: один, пока корзина не меняется.
+    private(set) var checkoutKey = Cart.makeKey()
+    private static func makeKey() -> String { UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
 
     private init() { load() }
 
@@ -103,6 +111,7 @@ final class Cart: ObservableObject {
     func clear() { lines = []; shopId = nil; shopName = nil; shopSlug = nil; save() }
 
     private func save() {
+        checkoutKey = Cart.makeKey()
         if let d = try? JSONEncoder().encode(lines) { UserDefaults.standard.set(d, forKey: "cart_lines") }
         UserDefaults.standard.set(shopId ?? 0, forKey: "cart_shop")
         UserDefaults.standard.set(shopName, forKey: "cart_shop_name")
@@ -143,7 +152,9 @@ enum Fees {
     static func service(subtotal: Double, shop: ShopDetail?) -> Double {
         guard let shop, (shop.serviceFeePayer ?? "") == "client" else { return 0 }
         if (shop.serviceFeeType ?? "percent") == "fixed" { return shop.serviceFeeFixed ?? 0 }
-        let v = subtotal * (shop.serviceFeePercent ?? 0) / 100
-        return (v * 100).rounded() / 100
+        // В Decimal: 1234,50 × 3 % в Double = 37,0349… → 37,03, сервер — 37,04.
+        var v = Money.parse(subtotal) * Money.parse(shop.serviceFeePercent ?? 0) / 100
+        var r = Decimal(); NSDecimalRound(&r, &v, 2, .plain)
+        return NSDecimalNumber(decimal: r).doubleValue
     }
 }

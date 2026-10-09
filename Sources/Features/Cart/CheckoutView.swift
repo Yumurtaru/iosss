@@ -145,12 +145,14 @@ struct CheckoutView: View {
     @State private var addresses: [Address] = []
     @State private var selectedAddress: Address?
     @State private var shop: ShopDetail?
+    /// Карточка заведения не загрузилась: сбор, способы и «открыто» неизвестны —
+    /// раньше оформление шло на значениях по умолчанию (итог без сбора).
+    @State private var shopLoadError: String?
     @State private var quote: DeliveryQuote?
     /// Сумма товаров, по которой считан quote (после скидок и баллов).
     @State private var quotedGoods: Double?
     @State private var comment = ""
     @State private var placing = false
-    @State private var idemKey = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     @State private var errorText: String?
     /// Почему не посчиталась доставка (обрыв связи, 5xx). Раньше ошибка
     /// проглатывалась: кнопка «Оформить заказ» просто становилась серой и
@@ -318,12 +320,23 @@ struct CheckoutView: View {
     /// временем, а не временем телефона).
     private var shopClosed: Bool { shop?.isOpen == false }
 
+    private func loadShop(_ slug: String) async {
+        do {
+            let loaded: ShopDetail = try await API.shared.get("api/v1/shops/\(slug)")
+            await MainActor.run { shop = loaded; shopLoadError = nil }
+        } catch is CancellationError {
+        } catch {
+            await MainActor.run { shopLoadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить условия заведения" }
+        }
+    }
+
     private var ctaEnabled: Bool {
         // shopClosed — сервер всё равно откажет («Заведение сейчас закрыто —
         // оформите предзаказ»), а предзаказ приложение не отправляет. Активная
         // кнопка под надписью «заказ можно оформить, когда откроется» только
         // путала бы человека.
         !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin && !quoteMissing && !shopClosed
+            && (cart.shopSlug == nil || shop != nil)
     }
 
     var body: some View {
@@ -340,14 +353,14 @@ struct CheckoutView: View {
             AddAddressSheet(cityName: cityName) { newAddr in
                 // Свежесозданный адрес выбираем и сразу считаем доставку.
                 selectedAddress = newAddr
+                quote = nil; quotedGoods = nil; quoteError = nil
                 Task { await loadAddresses(selectAfter: newAddr) }
             }
         }
         .task {
             await loadAddresses()
             if let slug = cart.shopSlug {
-                let loaded: ShopDetail? = try? await API.shared.get("api/v1/shops/\(slug)")
-                await MainActor.run { shop = loaded }
+                await loadShop(slug)
                 // Если заведение не принимает выбранный по умолчанию способ
                 // (доставка/наличные) — сразу переключаемся на доступный, а не
                 // ведём человека через весь экран к отказу сервера.
@@ -407,6 +420,25 @@ struct CheckoutView: View {
                 storeBanner
                     .padding(.bottom, YMSpace.md)
 
+                if shop == nil, let e = shopLoadError, let slug = cart.shopSlug {
+                    Button {
+                        Task {
+                            await loadShop(slug)
+                            await MainActor.run {
+                                let fs = allowedFulfillment
+                                if !fs.contains(fulfillment), let first = fs.first { fulfillment = first }
+                                let ps = allowedPayments
+                                if !ps.contains(payment), let first = ps.first { payment = first }
+                            }
+                            await quoteDelivery()
+                        }
+                    } label: {
+                        Text("Не удалось загрузить условия заведения: \(e). Нажмите, чтобы повторить")
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.bottom, YMSpace.sm)
+                }
                 if shopClosed, let st = shop?.statusText, !st.isEmpty {
                     Text(st + ". Заказ можно оформить, когда заведение откроется.")
                         .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
@@ -793,6 +825,10 @@ struct CheckoutView: View {
 
     private func selectAddress(_ a: Address) {
         selectedAddress = a
+        // Цена доставки прежнего адреса не должна висеть для нового: раньше,
+        // пока считался новый адрес, можно было оформить заказ по старой цене,
+        // а сервер брал цену своей зоны.
+        quote = nil; quotedGoods = nil; quoteError = nil
         Task { await quoteDelivery() }
     }
 
@@ -914,7 +950,10 @@ struct CheckoutView: View {
             lat: fulfillment == .delivery ? selectedAddress?.lat : nil,
             lng: fulfillment == .delivery ? selectedAddress?.lng : nil,
             spendPointsAll: spendPoints,
-            idempotencyKey: idemKey,
+            // Ключ живёт в корзине, а не в экране: после таймаута человек
+            // возвращался в корзину и снова в оформление — новый экран слал
+            // новый ключ, и создавался второй заказ.
+            idempotencyKey: cart.checkoutKey,
             tableNumber: fulfillment == .dineIn && !tableNumber.trimmingCharacters(in: .whitespaces).isEmpty
                 ? String(tableNumber.trimmingCharacters(in: .whitespaces).prefix(20)) : nil,
             promoCode: appliedCode

@@ -109,6 +109,10 @@ struct ProfileView: View {
         .onChange(of: session.isLoggedIn) { logged in
             if logged { Task { await load() } } else { profile = nil }
         }
+        // Вернулись к корню профиля (например, из уведомлений) — счётчик обновляем.
+        // Только счётчик уведомлений: полная перезагрузка дублировала запросы
+        // и при сбое сети стирала шапку профиля.
+        .onChange(of: path.count) { n in if n == 0, session.isLoggedIn { Task { await loadUnread() } } }
         .confirmationDialog("Выйти из аккаунта?", isPresented: $showLogoutConfirm, titleVisibility: .visible) {
             Button("Выйти", role: .destructive) { logout() }
             Button("Отмена", role: .cancel) {}
@@ -426,6 +430,11 @@ struct ProfileView: View {
         // Старый сервер unread не присылает — считаем по первой странице, как раньше.
         let notifPage: Page<AppNotification>? = try? await API.shared.page("api/v1/notifications")
         unreadNotifs = notifPage.map { p in p.meta?.unread ?? p.items.filter { !$0.read }.count } ?? 0
+    }
+
+    private func loadUnread() async {
+        guard let p: Page<AppNotification> = try? await API.shared.page("api/v1/notifications") else { return }
+        unreadNotifs = p.meta?.unread ?? p.items.filter { !$0.read }.count
     }
 
     private func pluralOrders(_ n: Int) -> String {

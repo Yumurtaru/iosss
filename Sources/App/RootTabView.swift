@@ -18,6 +18,10 @@ struct RootTabView: View {
     @EnvironmentObject private var net: NetworkMonitor
     @EnvironmentObject private var router: DeepLinkRouter
     @EnvironmentObject private var coord: NavCoordinator
+    @EnvironmentObject private var session: Session
+    /// Код из ссылки …/r/КОД. Раньше его записывали в роутер, но никто не
+    /// читал — бонус за приглашение по ссылке не начислялся.
+    @State private var referralPrompt: ReferralPrompt?
     @State private var tab = 0
     /// Организация из пуша РЕАЛЬНО на экране. Раньше корневые окна отключались
     /// по pendingOrgSlug: если шторка организации не смогла открыться, корзина
@@ -44,6 +48,13 @@ struct RootTabView: View {
             }
             TabView(selection: $tab) {
                 HomeView()
+                    .sheet(item: $referralPrompt) { p in
+                        NavigationStack {
+                            ReferralView(prefillCode: p.code)
+                                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { referralPrompt = nil } } }
+                        }
+                        .environmentObject(Session.shared)
+                    }
                     .tabItem { Label("Главная", systemImage: "house.fill") }
                     .tag(0)
 
@@ -109,7 +120,13 @@ struct RootTabView: View {
         }
         // Холодный старт из пуша о заказе: значение выставлено до появления
         // экрана, onChange на него не срабатывает.
-        .onAppear { if coord.pendingOrderDetail != nil { tab = 3 } }
+        .onAppear { if coord.pendingOrderDetail != nil { tab = 3 }; presentReferralIfPossible() }
+        .onChange(of: router.referralCode) { _ in presentReferralIfPossible() }
+        // Гость перешёл по ссылке — код ждёт входа.
+        .onChange(of: session.isLoggedIn) { _ in presentReferralIfPossible() }
+        .onChange(of: coord.showCart) { _ in presentReferralIfPossible() }
+        .onChange(of: coord.showLodging) { _ in presentReferralIfPossible() }
+        .onChange(of: orgShown) { _ in presentReferralIfPossible() }
         // ── Корзина, конфликт корзины и чат ──
         // Пока открыта организация из пуша/ссылки (cover ниже), эти окна
         // показывает сам cover: SwiftUI не открывает второй cover/sheet с той
@@ -127,11 +144,12 @@ struct RootTabView: View {
         .fullScreenCover(isPresented: Binding(
             get: { coord.pendingOrgSlug != nil },
             set: { if !$0 { coord.pendingOrgSlug = nil } }
-        )) {
+        ), onDismiss: { orgShown = false }) {
             NavigationStack {
                 Group {
                     if let slug = coord.pendingOrgSlug, !slug.isEmpty {
-                        OrgView(shopSlug: slug)
+                        // id: второй push/ссылка на другое заведение показывали прежнее.
+                        OrgView(shopSlug: slug).id(slug)
                     } else {
                         EmptyView()
                     }
@@ -142,8 +160,9 @@ struct RootTabView: View {
                     }
                 }
             }
+            // Сбрасываем только по закрытию обложки: onDisappear срабатывал и
+            // при показе корзины поверх организации.
             .onAppear { orgShown = true }
-            .onDisappear { orgShown = false }
             .modifier(GlobalPresenters(
                 coord: coord, cart: cart, router: router,
                 enabled: true,
@@ -215,5 +234,19 @@ private struct GlobalPresenters: ViewModifier {
                 }
                 .environmentObject(Session.shared)
             }
+    }
+}
+
+/// Код приглашения из ссылки для листа «Пригласить друга».
+struct ReferralPrompt: Identifiable { let code: String; var id: String { code } }
+
+extension RootTabView {
+    fileprivate func presentReferralIfPossible() {
+        // Под обложкой (организация, корзина, жильё) лист не покажется — ждём.
+        guard let c = router.referralCode, !c.isEmpty, session.isLoggedIn,
+              !orgShown, !coord.showCart, !coord.showLodging else { return }
+        router.referralCode = nil
+        tab = 0
+        referralPrompt = ReferralPrompt(code: c)
     }
 }

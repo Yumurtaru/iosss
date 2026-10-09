@@ -31,12 +31,16 @@ struct AddressesView: View {
     @State private var showAdd = false
     /// Удаление не прошло — раньше ошибка глоталась, и адрес просто оставался.
     @State private var deleteError: String?
+    /// Загрузка не прошла — это не «адресов нет».
+    @State private var loadError: String?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: YMSpace.md) {
                 if loading {
                     ForEach(0..<3, id: \.self) { _ in SkeletonBox(radius: 18).frame(height: 78) }
+                } else if let e = loadError, items.isEmpty {
+                    ErrorRetryView(message: e) { Task { await load() } }
                 } else if items.isEmpty {
                     emptyState
                 } else {
@@ -95,8 +99,10 @@ struct AddressesView: View {
     }
 
     private func load() async {
-        loading = true
-        items = (try? await API.shared.list("api/v1/profile/addresses")) ?? []
+        loading = true; loadError = nil
+        do { items = try await API.shared.list("api/v1/profile/addresses") }
+        catch is CancellationError {}
+        catch { loadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить адреса" }
         // Основной — первым (золотая рамка/бейдж по isDefaultBool).
         items.sort { ($0.isDefaultBool ? 0 : 1) < ($1.isDefaultBool ? 0 : 1) }
         loading = false
@@ -375,6 +381,7 @@ struct BookingsView: View {
     @State private var past: [BookingItem] = []
     @State private var loading = true
     @State private var cancelError: String?
+    @State private var bookingsLoadError: String?
 
     private var current: [BookingItem] { tab == .upcoming ? upcoming : past }
 
@@ -390,6 +397,8 @@ struct BookingsView: View {
                         ForEach(0..<2, id: \.self) { _ in SkeletonBox(radius: 20).frame(height: 150) }
                     }
                     .padding(.horizontal, YMSpace.xl)
+                } else if let e = bookingsLoadError, upcoming.isEmpty && past.isEmpty {
+                    ErrorRetryView(message: e) { Task { await load() } }
                 } else if current.isEmpty {
                     emptyState
                 } else {
@@ -427,8 +436,12 @@ struct BookingsView: View {
     }
 
     private func load() async {
-        loading = true
-        let list: [Appointment] = (try? await API.shared.list("api/v1/appointments")) ?? []
+        loading = true; bookingsLoadError = nil
+        // Ошибка загрузки раньше выглядела как «Нет предстоящих записей».
+        let list: [Appointment]
+        do { list = try await API.shared.list("api/v1/appointments") }
+        catch is CancellationError { loading = false; return }
+        catch { bookingsLoadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить записи"; loading = false; return }
         // Делим по серверному признаку is_past: он уже учитывает и время окончания
         // визита, и статусы done/cancelled. Если поля нет (старый сервер) — запись
         // считается предстоящей, чтобы не пропасть из виду.

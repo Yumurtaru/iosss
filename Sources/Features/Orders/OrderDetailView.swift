@@ -160,7 +160,28 @@ final class OrderDetailViewModel: ObservableObject {
         }
     }
 
-    func stopTracking() { pollTimer?.invalidate(); pollTimer = nil }
+    func stopTracking() {
+        pollTimer?.invalidate(); pollTimer = nil
+        // Проверка оплаты после ухода с экрана не нужна: раньше она ещё до 30 с
+        // дёргала сервер, а два наложившихся цикла снимали блокировку «Оплатить»
+        // раньше времени.
+        paymentRefreshTask?.cancel(); paymentRefreshTask = nil
+        checkingPayment = false
+    }
+    private var paymentRefreshTask: Task<Void, Never>?
+    /// До какого момента ждём подтверждения оплаты: ушли на чат и вернулись
+    /// в эти ~30 с — проверку продолжаем, иначе «Оплатить» снова было активно.
+    private var paymentCheckUntil: Date?
+    func resumePaymentCheckIfNeeded() {
+        guard let until = paymentCheckUntil, until > Date(),
+              (order?.paymentStatus ?? "").lowercased() != "paid" else { paymentCheckUntil = nil; return }
+        startPaymentRefresh(resume: true)
+    }
+    func startPaymentRefresh(resume: Bool = false) {
+        if !resume { paymentCheckUntil = Date().addingTimeInterval(30) }
+        paymentRefreshTask?.cancel()
+        paymentRefreshTask = Task { [weak self] in await self?.refreshAfterPayment() }
+    }
 
     /// Закрыли страницу оплаты — перечитываем заказ. Раньше экран продолжал
     /// показывать «Оплатить», и человек мог заплатить второй раз. Уведомление
@@ -171,7 +192,7 @@ final class OrderDetailViewModel: ObservableObject {
     @Published var checkingPayment = false
     func refreshAfterPayment() async {
         checkingPayment = true
-        defer { checkingPayment = false }
+        defer { if !Task.isCancelled { checkingPayment = false } }
         for attempt in 0..<10 {
             if attempt > 0 { try? await Task.sleep(nanoseconds: 3_000_000_000) }
             if Task.isCancelled { return }
@@ -193,7 +214,11 @@ final class OrderDetailViewModel: ObservableObject {
     /// тем же диалогом, что и карточка товара. Раньше набранная корзина другого
     /// заведения исчезала без предупреждения.
     func repeatOrder(cart: Cart) async {
-        reorderInFlight = true; reorderError = nil; defer { reorderInFlight = false }
+        guard !reorderInFlight else { return }
+        // reorderDone сбрасываем: после первого удачного повтора неудачный второй
+        // уводил в корзину, а ошибка оставалась на скрытом табе.
+        reorderInFlight = true; reorderError = nil; reorderDone = false
+        defer { reorderInFlight = false }
         // GET api/v1/orders/{id}/reorder → ReorderData (как в старом клиенте: Reorder.perform).
         guard let data: ReorderData = try? await API.shared.get("api/v1/orders/\(id)/reorder"),
               let shopId = data.shopId, let items = data.items, !items.isEmpty else {
@@ -317,7 +342,7 @@ struct OrderDetailView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .task { await vm.load(); if !Task.isCancelled { vm.startTrackingIfActive() } }   // экран успели закрыть — опрос не запускаем
+        .task { await vm.load(); if !Task.isCancelled { vm.startTrackingIfActive(); vm.resumePaymentCheckIfNeeded() } }   // экран успели закрыть — опрос не запускаем
         .onDisappear { vm.stopTracking() }
         .onChange(of: courierCoord?.latitude) { _ in recenter() }
         // Диалог подтверждения отмены заказа.
@@ -328,7 +353,7 @@ struct OrderDetailView: View {
             Text("Заказ №\(navNumber) будет отменён. Действие необратимо.")
         }
         // Ссылка YooKassa — открываем во внешнем браузере (SafariView-эквивалент).
-        .sheet(item: $vm.payLink, onDismiss: { Task { await vm.refreshAfterPayment() } }) { link in SafariSheet(url: link.url) }
+        .sheet(item: $vm.payLink, onDismiss: { vm.startPaymentRefresh() }) { link in SafariSheet(url: link.url) }
         // Тост-результат действия (отмена / оплата / отзыв / NPS).
         .overlay(alignment: .bottom) { toastOverlay }
     }

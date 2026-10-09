@@ -37,8 +37,10 @@ final class Session: ObservableObject {
         Task { await Push.shared.registerIfPossible() }
     }
     /// clearLocalData — только для явного выхода и удаления аккаунта. При
-    /// истёкшей сессии (401) корзина и номер неподтверждённой оплаты Plus
-    /// остаются: человек просто войдёт снова.
+    /// истёкшей сессии (401) корзина остаётся: человек просто войдёт снова.
+    /// Номер неподтверждённой оплаты Plus убирается при любом выходе: он
+    /// привязан к человеку (подписку после оплаты всё равно включит сервер
+    /// по уведомлению ЮKassa).
     func signOut(clearLocalData: Bool = false) {
         let wasLoggedIn = token != nil
         token = nil
@@ -49,12 +51,17 @@ final class Session: ObservableObject {
         // корзины уходила на сервер «брошенной корзиной» уже от его имени.
         // Только для настоящего выхода: onUnauthorized зовёт signOut и у гостя,
         // и случайный 401 не должен стирать гостю корзину.
+        // Номер платежа Плюс привязан к человеку — убираем при любом выходе
+        // (и по истёкшей сессии): иначе следующий вошедший активировал бы чужой.
+        if wasLoggedIn {
+            UserDefaults.standard.removeObject(forKey: "plus_pending_payment_id")
+            UserDefaults.standard.removeObject(forKey: "plus_pending_payment_at")
+        }
         if wasLoggedIn && clearLocalData {
             Task { @MainActor in
                 Cart.shared.clear()
                 SearchHistoryStore.clear()
                 RecentStore.clear()
-                UserDefaults.standard.removeObject(forKey: "plus_pending_payment_id")
             }
         }
     }

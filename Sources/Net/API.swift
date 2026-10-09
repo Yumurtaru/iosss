@@ -199,6 +199,9 @@ final class API {
             // (например {"message":"Server Error"}) не должна стать «успехом».
             if (200..<300).contains(status), env.data == nil, T.self == EmptyResp.self,
                let empty = EmptyResp() as? T { return empty }
+            if !(200..<300).contains(status), env.data == nil {
+                throw status >= 500 ? APIError.http(status) : APIError.server("Ошибка \(status)")
+            }
             guard let payload = env.data else { throw APIError.decoding }
             (payload as? PageMetaReceiving)?.receive(meta: env.meta)   // Page<T>: has_more из meta
             return payload
@@ -239,6 +242,9 @@ final class API {
             guard code == 200,
                   let env = try? self.decoder.decode(APIEnvelope<RefreshResp>.self, from: data),
                   let token = env.data?.token, !token.isEmpty else { return .rejected }
+            // Пока шло продление, человек вышел (или вошёл другой) — старую
+            // сессию не возвращаем: иначе после перезапуска снова прежний аккаунт.
+            guard TokenStore.refresh == refresh else { return .unavailable }
             TokenStore.access = token
             return .token(token)
         }

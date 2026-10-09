@@ -261,7 +261,9 @@ struct LodgingDatesSheet: View {
         else if let f = pickFrom, iso <= f { pickFrom = iso; pickTo = nil }
         // Между заездом и этим днём есть занятая ночь — такой выезд невозможен:
         // начинаем выбор заново с этого дня.
-        else if let f = pickFrom, !lodgingNightsFree(days, f, iso) { pickFrom = iso; pickTo = nil }
+        // Выезд в день «без выезда» (ctd) тоже нельзя.
+        else if let f = pickFrom,
+                (days[iso]?.noDeparture ?? false) || !lodgingNightsFree(days, f, iso) { pickFrom = iso; pickTo = nil }
         else { pickTo = iso }
     }
 }

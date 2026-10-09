@@ -50,16 +50,31 @@ struct PlusView: View {
     // Номер платежа храним и на диске: пока человек платит в приложении банка,
     // iOS может выгрузить наше, а активация подписки идёт только по этому номеру.
     // Раньше после такого возврата деньги были списаны, а «Оформить» висело снова.
-    @State private var pendingPaymentId: String? = UserDefaults.standard.string(forKey: PlusView.pendingKey)
+    @State private var pendingPaymentId: String? = PlusView.storedPending()
     /// Прошлый платёж не подтвердился — следующее нажатие создаёт новый.
     @State private var payAgainAllowed = false
     @State private var activating = false
     static let pendingKey = "plus_pending_payment_id"
+    static let pendingAtKey = "plus_pending_payment_at"
+    /// Брошенный или отклонённый платёж не висит вечно: раньше каждый заход
+    /// на экран дёргал активацию, а первое «Оформить» требовало второго нажатия.
+    static let pendingTTL: TimeInterval = 24 * 60 * 60
+
+    static func storedPending() -> String? {
+        let d = UserDefaults.standard
+        guard let id = d.string(forKey: pendingKey), !id.isEmpty else { return nil }
+        let now = Date().timeIntervalSince1970
+        let at = d.double(forKey: pendingAtKey)
+        if at <= 0 { d.set(now, forKey: pendingAtKey); return id }   // сохранён прежней версией — считаем от сейчас
+        if now - at > pendingTTL { d.removeObject(forKey: pendingKey); d.removeObject(forKey: pendingAtKey); return nil }
+        return id
+    }
 
     private func setPending(_ id: String?) {
         pendingPaymentId = id
-        if let id { UserDefaults.standard.set(id, forKey: Self.pendingKey) }
-        else { UserDefaults.standard.removeObject(forKey: Self.pendingKey) }
+        let d = UserDefaults.standard
+        if let id { d.set(id, forKey: Self.pendingKey); d.set(Date().timeIntervalSince1970, forKey: Self.pendingAtKey) }
+        else { d.removeObject(forKey: Self.pendingKey); d.removeObject(forKey: Self.pendingAtKey) }
     }
 
     var body: some View {
@@ -216,6 +231,7 @@ struct PlusView: View {
             // Есть неподтверждённый платёж — сначала проверяем его. Раньше каждое
             // нажатие создавало новый платёж ЮKassa, и после возврата из банка
             // («оплата ещё не подтверждена») человек платил второй раз.
+            if pendingPaymentId != nil, Self.storedPending() == nil { setPending(nil) }
             if pendingPaymentId != nil && !payAgainAllowed {
                 // Проверка уже идёт (вернулись из банка) — дождёмся её, а не
                 // разрешаем новый платёж без проверки.
@@ -245,7 +261,8 @@ struct PlusView: View {
     /// приложение) не запускаем.
     @discardableResult
     private func tryActivate() async -> Bool {
-        guard let pid = pendingPaymentId, !activating else { return false }
+        guard !activating else { return false }
+        guard let pid = Self.storedPending() else { if pendingPaymentId != nil { setPending(nil) }; return false }
         activating = true
         defer { activating = false }
         do {

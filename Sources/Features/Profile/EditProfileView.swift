@@ -57,6 +57,12 @@ struct EditProfileView: View {
     // Поток подтверждения.
     @State private var showCodeSheet = false
     @State private var showSupportSheet = false
+    /// Что сделать, когда лист кода закроется. Раньше поддержка открывалась
+    /// через 0,35 с (на медленном устройстве лист ещё закрывался — и ничего
+    /// не показывалось), а dismiss() в одной транзакции с закрытием листа
+    /// часто проглатывался.
+    private enum AfterCodeSheet { case none, support, close }
+    @State private var afterCodeSheet: AfterCodeSheet = .none
     @State private var pendingChanges: [String: String] = [:]
     @State private var confirmTarget: String?
     @State private var code = ""
@@ -132,7 +138,14 @@ struct EditProfileView: View {
         // Только первый раз: .task срабатывает и при возврате на экран (смена
         // вкладки), и перезагрузка затирала несохранённые правки.
         .task { if !didLoad { didLoad = true; await load() } }
-        .sheet(isPresented: $showCodeSheet) { codeSheet }
+        .sheet(isPresented: $showCodeSheet, onDismiss: {
+            let next = afterCodeSheet; afterCodeSheet = .none
+            switch next {
+            case .support: showSupportSheet = true
+            case .close: dismiss()
+            case .none: break
+            }
+        }) { codeSheet }
         .sheet(isPresented: $showSupportSheet) { supportSheet }
     }
 
@@ -200,8 +213,8 @@ struct EditProfileView: View {
                 .opacity((code.isEmpty || saving) ? 0.5 : 1)
 
                 Button("Код не приходит? Написать в поддержку") {
+                    afterCodeSheet = .support
                     showCodeSheet = false; code = ""
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showSupportSheet = true }
                 }
                 .font(YMFont.subhead).foregroundStyle(YMColor.accent)
                 .frame(maxWidth: .infinity)
@@ -216,9 +229,11 @@ struct EditProfileView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Отмена") { showCodeSheet = false; code = "" }
+                        .disabled(saving)
                 }
             }
         }
+        .interactiveDismissDisabled(saving)
     }
 
     // ── Лист «Написать в поддержку» ──
@@ -327,8 +342,8 @@ struct EditProfileView: View {
                 try await API.shared.postVoid("api/v1/profile/change/confirm", body: ChangeConfirmBody(code: c))
                 await MainActor.run {
                     Haptics.success(); saving = false
-                    showCodeSheet = false; password = ""; code = ""
-                    dismiss()
+                    password = ""; code = ""
+                    if showCodeSheet { afterCodeSheet = .close; showCodeSheet = false } else { dismiss() }
                 }
             } catch {
                 await MainActor.run {

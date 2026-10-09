@@ -374,7 +374,7 @@ struct ProductView: View {
                 }
                 VStack(spacing: 8) {
                     ForEach(g.options ?? []) { opt in
-                        checkRow(opt)
+                        checkRow(opt, groupOptions: g.options ?? [], maxQty: g.maxQty)
                     }
                 }
             }
@@ -535,11 +535,15 @@ struct ProductView: View {
     }
 
     /// Чекбокс-строка: выбранная — золотая галочка.
-    private func checkRow(_ opt: ModifierOption) -> some View {
+    private func checkRow(_ opt: ModifierOption, groupOptions: [ModifierOption] = [], maxQty: Int? = nil) -> some View {
         let checked = checkedAddons.contains(opt.id)
         return Button {
             Haptics.selection()
-            if checked { checkedAddons.remove(opt.id) } else { checkedAddons.insert(opt.id) }
+            // «До 2 соусов»: больше лимита группы не отмечаем — иначе отказ на оформлении.
+            if checked { checkedAddons.remove(opt.id) } else {
+                let inGroup = groupOptions.filter { checkedAddons.contains($0.id) }.count
+                if (maxQty ?? 0) <= 0 || inGroup < (maxQty ?? 0) { checkedAddons.insert(opt.id) } else { Haptics.warning() }
+            }
         } label: {
             HStack(spacing: 12) {
                 Text(opt.name ?? "—")

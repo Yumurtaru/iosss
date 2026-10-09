@@ -210,7 +210,7 @@ struct ReferralView: View {
                     .frame(height: 54)
                     .background(YMColor.surface2,
                                 in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
-                    .onChange(of: friendCode) { _ in applyMsg = nil }
+                    .onChange(of: friendCode) { new in if !new.isEmpty { applyMsg = nil } }   // очистка поля после «Код принят» не стирает сообщение
 
                 Button { Haptics.light(); Task { await apply() } } label: {
                     Group {

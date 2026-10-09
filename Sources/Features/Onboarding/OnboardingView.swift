@@ -245,7 +245,7 @@ private struct CityStep: View {
                 onContinue()
             }
             .buttonStyle(YMPrimaryButtonStyle())
-            .disabled(selectedName.isEmpty && !citiesFailed)
+            .disabled(selectedName.isEmpty && !citiesFailed && !cities.isEmpty)   // пустой список городов не запирает экран
             .padding(.horizontal, YMSpace.xxl)
             .padding(.top, 14)
             .padding(.bottom, 30)

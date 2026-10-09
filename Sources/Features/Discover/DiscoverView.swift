@@ -90,6 +90,8 @@ private struct SearchSection: View {
     @State private var shops: [Shop] = []
     @State private var products: [Product] = []
     @State private var loading = false
+    /// Поиск не выполнился (сеть/сервер) — раньше показывалось «Ничего не найдено».
+    @State private var searchFailed = false
     @State private var searchTask: Task<Void, Never>?
     @State private var history: [String] = SearchHistoryStore.load()
     @State private var recent: [RecentProduct] = RecentStore.load()
@@ -133,6 +135,13 @@ private struct SearchSection: View {
                         }
                         if showResults { resultsBlock }
                         else if loading { loadingBlock }
+                        else if searchFailed {
+                            VStack(spacing: YMSpace.sm) {
+                                Text("Не удалось выполнить поиск").font(YMFont.title3).foregroundStyle(YMColor.text)
+                                Button("Повторить") { scheduleSearch() }.foregroundStyle(YMColor.accent)
+                            }
+                            .frame(maxWidth: .infinity).padding(.top, 60)
+                        }
                         else if !showSuggestState && trimmed.count >= 2 {
                             emptyResults
                         }
@@ -154,7 +163,8 @@ private struct SearchSection: View {
                 }
             }
         }
-        .task { await loadFavIds() }
+        // По входу/выходу: сердечки прежнего аккаунта не должны оставаться.
+        .task(id: session.isLoggedIn) { await loadFavIds() }
         // Экран поиска живёт всю сессию: историю и «недавно смотрели» читаем
         // при каждом появлении, иначе они не обновлялись (и после смены
         // аккаунта показывали чужие).
@@ -416,6 +426,7 @@ private struct SearchSection: View {
 
     private func runSearch(_ query: String) async {
         loading = true
+        searchFailed = false
         var params: [String: String] = ["q": query]
         if let cid = session.cityId { params["city_id"] = String(cid) }   // глобально по городу
         do {
@@ -423,8 +434,8 @@ private struct SearchSection: View {
             shops = r.shops ?? []; products = r.products ?? []
         } catch {
             // Отмена (набрали следующую букву) — не «ничего не найдено».
-            if Task.isCancelled { return }
-            shops = []; products = []
+            if Task.isCancelled || error is CancellationError { return }
+            shops = []; products = []; searchFailed = true
         }
         loading = false
     }
@@ -437,7 +448,7 @@ private struct SearchSection: View {
         scheduleSearch()
     }
 
-    private func clearResults() { shops = []; products = []; loading = false }
+    private func clearResults() { shops = []; products = []; loading = false; searchFailed = false }
 
     private func loadFavIds() async {
         // Гость: сердечки прошлого аккаунта не показываем.

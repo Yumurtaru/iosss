@@ -63,6 +63,8 @@ struct OrgBookingSection: View {
     }
     @State private var sheet: BookingSheet?
     @State private var confirming = false
+    /// Ключ повтора записи: один на окно и состав, новый — после успеха.
+    @State private var apptKey: (params: String, key: String)?
     /// Адрес визита — только для выездной услуги (сантехник, уборка на дом).
     /// Заполняется в окне подтверждения: у записи, в отличие от доставки,
     /// другого места спросить адрес нет.
@@ -335,6 +337,11 @@ struct OrgBookingSection: View {
     private func book(slot: Slot) {
         guard !confirming else { return }   // двойной тап не создаёт вторую запись
         confirming = true
+        let params = "\(slot.id)|\((selected?.needsGuests ?? false) ? guests : 0)|\((selected?.needsHours ?? false) ? hours : 0)|\(selected?.isAtClient ?? false)"
+        if apptKey?.params != params {
+            apptKey = (params, UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())
+        }
+        let key = apptKey?.key
         Task {
             do {
                 let atClient = selected?.isAtClient ?? false
@@ -347,9 +354,11 @@ struct OrgBookingSection: View {
                         // Отправляем только то, что клиент реально выбирал: у
                         // обычной услуги тело запроса остаётся прежним.
                         guests: (sel?.needsGuests ?? false) ? guests : nil,
-                        slots: (sel?.needsHours ?? false) ? hours : nil))
+                        slots: (sel?.needsHours ?? false) ? hours : nil,
+                        idempotencyKey: key))
                 let taken = guests
                 await MainActor.run {
+                    apptKey = nil
                     confirming = false
                     // Окно убираем из списка только если мест больше не осталось:
                     // в игровом зале после брони на 3 человека остаётся ещё 5.

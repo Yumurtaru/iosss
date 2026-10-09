@@ -992,6 +992,8 @@ struct AppointmentBody: Encodable {
     // услуги остаётся ровно таким, как раньше, и сервер подставляет 1 и 1.
     var guests: Int? = nil
     var slots: Int? = nil
+    /// Ключ повтора (ответ на заявку №17): повтор после обрыва — та же запись.
+    var idempotencyKey: String? = nil
 }
 
 /// Ответ на создание записи/брони — POST api/v1/appointments.

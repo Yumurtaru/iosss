@@ -118,7 +118,9 @@ struct JobsView: View {
             var list: [Job] = try await API.shared.list("api/v1/jobs", query: cityQuery(cityId))
             if list.isEmpty, cityId != nil {
                 // По городу пусто — показываем все вакансии площадки.
-                list = (try? await API.shared.list("api/v1/jobs")) ?? []
+                // Запрос без города упал — это ошибка, а не «вакансий нет».
+                do { list = try await API.shared.list("api/v1/jobs") }
+                catch { await MainActor.run { phase = .error }; return }
             }
             await MainActor.run {
                 jobs = list
@@ -211,6 +213,8 @@ struct JobDetailView: View {
     @State private var job: JobDetail?
     @State private var phase: DetailPhase = .loading
     @State private var showApply = false
+    /// Отклик отправлен — кнопка неактивна: раньше каждое нажатие создавало ещё один.
+    @State private var applied = false
     @State private var banner: (text: String, success: Bool)?
 
     enum DetailPhase { case loading, content, error }
@@ -250,7 +254,7 @@ struct JobDetailView: View {
         .task { if job == nil { await load() } }
         .sheet(isPresented: $showApply) {
             ApplyFormView(jobId: jobId) { ok, message in
-                banner = (message, ok)
+                banner = (message, ok); if ok { applied = true }
             }
         }
     }
@@ -300,9 +304,10 @@ struct JobDetailView: View {
                 Haptics.light()
                 showApply = true
             } label: {
-                Text("Откликнуться")
+                Text(applied ? "Отклик отправлен" : "Откликнуться")
             }
             .buttonStyle(YMPrimaryButtonStyle())
+            .disabled(applied)
             .padding(.horizontal, YMSpace.xl)
             .padding(.top, YMSpace.sm)
             .padding(.bottom, YMSpace.md)

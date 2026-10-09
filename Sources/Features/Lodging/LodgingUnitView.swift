@@ -81,6 +81,13 @@ final class LodgingUnitVM: ObservableObject {
 
     /// Возвращает бронь, чтобы экран сам показал итоговую шторку (одна шторка
     /// на экран — состоянием владеет вьюха, а не модель).
+    /// Один ключ на набор условий; сумма во входах — после 409 price_changed ключ новый.
+    private var bookKey: (params: String, key: String)?
+    private func bookIdemKey(for params: String) -> String {
+        if let k = bookKey, k.params == params { return k.key }
+        let k = UUID().uuidString.lowercased(); bookKey = (params, k); return k
+    }
+
     func book(slug: String, from: String, to: String, adults: Int, children: Int,
               planId: Int?, name: String, phone: String, comment: String) async -> LodgingBookResp? {
         guard !sending else { return nil }   // двойной тап не создаёт вторую бронь
@@ -96,8 +103,10 @@ final class LodgingUnitVM: ObservableObject {
                                      guestComment: comment.isEmpty ? nil : comment,
                                      // Сумма из расчёта: сервер не оформит бронь
                                      // дороже той, что гость видел на экране.
-                                     expectedTotal: quote.map { "\($0.totalValue)" })
+                                     expectedTotal: quote.map { "\($0.totalValue)" },
+                                     idempotencyKey: bookIdemKey(for: "\(slug)|\(from)|\(to)|\(adults)|\(children)|\(planId ?? 0)|\(quote?.totalValue ?? 0)"))
             )
+            bookKey = nil
             Haptics.success()
             // Даты после брони заняты — обновляем календарь, чтобы их нельзя
             // было выбрать повторно, не выходя с экрана.
