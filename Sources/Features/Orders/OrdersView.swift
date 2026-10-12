@@ -214,12 +214,16 @@ final class OrdersViewModel: ObservableObject {
 
     func load() async {
         loading = true; loadFailed = false
+        // Ответ, запрошенный до выхода/входа (reset), не применяем: заказы
+        // прежнего аккаунта иначе ложились в список следующего.
+        let myGen = gen
         do {
             // Записи на услугу сервер хранит как заказы и отдаёт в этом же списке.
             // Их место — раздел «Мои записи» (BookingsView, GET api/v1/appointments),
             // поэтому здесь они отфильтровываются по аддитивному признаку is_appointment.
             // Старый сервер этого поля не присылает → nil ≠ true → список как раньше.
             let first: Page<Order> = try await API.shared.page("api/v1/orders")
+            guard myGen == gen else { loading = false; return }
             let fresh = first.items.filter { $0.isAppointment != true }
             if page > 1 {
                 // Уже листали дальше первой страницы (возврат в таб, pull-to-refresh):
@@ -235,7 +239,7 @@ final class OrdersViewModel: ObservableObject {
             // перерисовывается. Раньше это показывало экран ошибки вместо
             // уже загруженных заказов.
         } catch {
-            loadFailed = true
+            if myGen == gen { loadFailed = true }
         }
         loading = false
     }
@@ -281,6 +285,9 @@ struct OrdersView: View {
     @State private var tab: Tab = .active
     // Деталь заказа пушится внутри собственного стека таба (self-contained).
     @State private var pushedOrder: Int?
+    @Environment(\.scenePhase) private var scenePhase
+    /// Приложение действительно уходило в фон (а не просто .inactive).
+    @State private var wasBg = false
 
     enum Tab: Hashable { case active, history }
 
@@ -302,9 +309,27 @@ struct OrdersView: View {
             .background(YMColor.bg.ignoresSafeArea())
             .navigationTitle("Заказы")
             .navigationBarTitleDisplayMode(.large)
-            .refreshable { await vm.load() }
+            // Гость: обновление жестом слало запрос без входа (401).
+            .refreshable { if session.isLoggedIn { await vm.load() } }
             .task { if session.isLoggedIn { await vm.firstLoad() } }
-            .onChange(of: session.isLoggedIn) { logged in vm.reset(); if logged { Task { await vm.load() } } }
+            // Вернулись в приложение — статусы активных заказов могли смениться,
+            // пока оно было свёрнуто: тихо обновляем список (без скелетона).
+            // Только после настоящего ухода в фон: .inactive→.active (пункт
+            // управления, Face ID) раньше тоже дёргал перезагрузку.
+            .onChange(of: scenePhase) { phase in
+                if phase == .background { wasBg = true; return }
+                guard phase == .active, wasBg else { return }
+                wasBg = false
+                if session.isLoggedIn, !vm.orders.isEmpty, !vm.loading { Task { await vm.load() } }
+            }
+            .onChange(of: session.isLoggedIn) { logged in
+                vm.reset()
+                // Сессия кончилась / выход: открытая деталь заказа прежнего
+                // аккаунта оставалась в стеке и после входа другого человека
+                // показывала чужой заказ (и опрашивала его каждые 8 с).
+                if !logged { pushedOrder = nil }
+                if logged { Task { await vm.load() } }
+            }
             // Деталь заказа → чат уходит в глобальный координатор.
             .navigationDestination(isPresented: Binding(
                 get: { pushedOrder != nil },
@@ -332,8 +357,12 @@ struct OrdersView: View {
 
     private func consumePending(_ id: Int) {
         tab = .active            // новый заказ активен — показываем нужный таб
-        pushedOrder = id
         coord.pendingOrderDetail = nil
+        // Push о заказе, а вход не выполнен (вышли или сессия кончилась):
+        // деталь отвечала «Сессия истекла» с бесконечным «Повторить».
+        // Остаёмся на списке — там «Войти».
+        guard session.isLoggedIn else { return }
+        pushedOrder = id
         Task { await vm.load() } // всегда свежий список после оформления
     }
 
@@ -348,6 +377,10 @@ struct OrdersView: View {
             emptyState(icon: "person.crop.circle.badge.questionmark",
                        title: "Войдите в аккаунт",
                        hint: "Чтобы видеть свои заказы и статусы доставки.")
+            // Раньше вкладка была тупиком: просили войти, но кнопки входа не было.
+            NavigationLink { AuthView() } label: { Text("Войти") }
+                .buttonStyle(YMPrimaryButtonStyle())
+                .padding(.horizontal, YMSpace.xxxl)
         } else if vm.loading && vm.orders.isEmpty {
             VStack(spacing: YMSpace.md) {
                 ForEach(0..<3, id: \.self) { _ in
@@ -362,6 +395,14 @@ struct OrdersView: View {
             ordersErrorState
         } else {
             let list = tab == .active ? vm.active : vm.history
+            // Обновление не прошло, а заказы уже на экране: раньше сбой был не
+            // виден, и человек принимал устаревший статус за текущий.
+            if vm.loadFailed && !vm.loading {
+                Text("Не удалось обновить заказы. Потяните вниз, чтобы повторить.")
+                    .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, YMSpace.xl)
+            }
             if list.isEmpty {
                 emptyState(icon: tab == .active ? "bag" : "clock.arrow.circlepath",
                            title: tab == .active ? "Активных заказов нет" : "История пуста",
@@ -432,13 +473,24 @@ private struct OrderCard: View {
     private var number: String { "№\(order.dailyNumber ?? order.id)" }
     private var enRoute: Bool { OrderFlow.isEnRoute(order.status) }
     private var cancelled: Bool { OrderFlow.isCancelled(order.status) }
+    /// Подпись статуса: серверная (словами типа организации, знает и новые
+    /// коды), иначе — свой словарь. Как в Android OrdersScreen.
+    private var statusText: String {
+        if let t = order.statusTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        return OrderStatus.label(order.status, shopType: order.shopType)
+    }
 
     /// Подпись справа в строке статуса.
     /// Для отменённых/доставленных — их статус; иначе — реальная дата/время заказа
     /// из created_at в формате «DD.MM, HH:mm» (паритет с Android formatOrderWhen).
     private var etaText: String {
         if cancelled { return "отменён" }
-        if OrderFlow.isDone(order.status) { return "доставлен" }
+        // Самовывоз, заказ за столиком и запись не «доставлены».
+        if OrderFlow.isDone(order.status) {
+            if order.shopType == "service" { return "завершена" }
+            if let dt = order.deliveryType, !dt.isEmpty, dt != "delivery" { return "выполнен" }
+            return "доставлен"
+        }
         return Self.formatOrderWhen(order.createdAt)
     }
 
@@ -477,7 +529,7 @@ private struct OrderCard: View {
                 // ── Строка статуса: точка (пульс у «В пути») + текст + ETA ──
                 HStack(spacing: YMSpace.sm) {
                     StatusDot(color: OrderFlow.color(order.status), pulsing: enRoute)
-                    Text(OrderStatus.label(order.status, shopType: order.shopType))
+                    Text(statusText)
                         .font(YMFont.subhead)
                         .foregroundStyle(OrderFlow.color(order.status))
                         .lineLimit(1)
@@ -495,7 +547,7 @@ private struct OrderCard: View {
         .buttonStyle(CardPressStyle())
         .ymCard(radius: YMRadius.card)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(order.shopName ?? "Заказ") \(number), \(OrderStatus.label(order.status, shopType: order.shopType)), \(money)")
+        .accessibilityLabel("\(order.shopName ?? "Заказ") \(number), \(statusText), \(money)")
     }
 }
 

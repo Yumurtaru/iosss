@@ -141,6 +141,14 @@ struct ReturnsView: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: YMSpace.md) {
+                    // Перечитать не удалось (после новой заявки, жестом), а список
+                    // уже есть: раньше сбой был не виден — новой заявки «не было»,
+                    // и её подавали повторно.
+                    if vm.loadFailed && !vm.loading {
+                        Text("Не удалось обновить список. Потяните вниз, чтобы повторить.")
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     ForEach(vm.items) { r in ReturnCard(item: r) }
                 }
                 .padding(.horizontal, YMSpace.xl)
@@ -219,6 +227,9 @@ private struct ReturnCard: View {
     let item: ReturnItem
 
     private var title: String {
+        // П-23.3: номер за день — тот, что клиент видит в заказах. Даты заказа
+        // в ответе нет; дата заявки и так стоит внизу карточки.
+        if let n = item.orderDailyNumber, n > 0 { return "Заказ №\(n)" }
         if let oid = item.orderId, oid > 0 { return "Заказ №\(oid)" }
         return "Возврат №\(item.id)"
     }
@@ -287,6 +298,10 @@ struct ReturnCreateView: View {
         orders.filter { OrderFlow.isDone($0.status) && $0.isAppointment != true }
     }
     private var canSubmit: Bool { selectedOrderId != nil && !sending && eligibility?.eligible != false }
+    private var ineligibleText: String {
+        let r = (eligibility?.reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return r.isEmpty ? "Этот заказ вернуть нельзя" : r
+    }
 
     var body: some View {
         NavigationStack {
@@ -300,11 +315,16 @@ struct ReturnCreateView: View {
                 if !done {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Отмена") { dismiss() }.tint(YMColor.accent)
+                            .disabled(sending)
                     }
                 }
             }
         }
         .tint(YMColor.accent)
+        // Пока заявка уходит, окно не закрывается: закрытое смахиванием прятало
+        // итог (успех или отказ), а список перечитывался раньше ответа — новой
+        // заявки в нём не было, и человек подавал её повторно.
+        .interactiveDismissDisabled(sending)
         .task { await loadOrders() }
     }
 
@@ -339,7 +359,9 @@ struct ReturnCreateView: View {
                         // Раньше о сроке/активной заявке человек узнавал только
                         // после отправки формы. Причину показываем сразу.
                         if eligibility?.eligible == false {
-                            Text(eligibility?.reason ?? "Этот заказ вернуть нельзя")
+                            // reason по контракту — всегда строка: пустая давала
+                            // красную пустую строку вместо объяснения.
+                            Text(ineligibleText)
                                 .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -453,7 +475,9 @@ struct ReturnCreateView: View {
     }
 
     private func send() {
-        guard let orderId = selectedOrderId else { return }
+        // Двойное нажатие до перерисовки создавало две заявки на возврат
+        // (вторая отказом «уже есть активная заявка» затирала успех).
+        guard let orderId = selectedOrderId, canSubmit else { return }
         sending = true; error = nil
         let body = ReturnCreateBody(orderId: orderId, type: type, reasonCode: reasonCode,
                                     reasonText: comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

@@ -19,6 +19,12 @@ struct BonusesView: View {
     @State private var history: [BonusTx] = []
     @State private var loading = true
     @State private var error: String?
+    // П-23.2: история постранично (meta.has_more); старый сервер — одна страница.
+    @State private var historyPage = 1
+    @State private var historyHasMore = false
+    @State private var historyLoadingMore = false
+    /// Догрузка истории не прошла — раньше кнопка просто ничего не делала.
+    @State private var historyMoreFailed = false
 
     private var total: Decimal { balances.reduce(0) { $0 + Money.dec($1.balance) } }
 
@@ -73,6 +79,26 @@ struct BonusesView: View {
                     .padding(.horizontal, YMSpace.md)
                     .padding(.vertical, YMSpace.xs)
                     .ymCard()
+
+                    // П-23.2: следующая страница истории по кнопке (нажатие
+                    // во время загрузки не шлёт второй запрос).
+                    if historyHasMore {
+                        if historyMoreFailed && !historyLoadingMore {
+                            Text("Не удалось загрузить ещё. Нажмите, чтобы повторить.")
+                                .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                                .frame(maxWidth: .infinity)
+                        }
+                        Button { Task { await loadMoreHistory() } } label: {
+                            Group {
+                                if historyLoadingMore { ProgressView() }
+                                else { Text("Показать ещё").font(.system(size: 14.5, weight: .heavy)).foregroundStyle(YMColor.accent) }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(historyLoadingMore)
+                    }
                 }
             }
             .padding(.horizontal, YMSpace.xl)
@@ -134,12 +160,40 @@ struct BonusesView: View {
         do {
             balances = try await API.shared.list("api/v1/profile/bonuses")
             // История — best-effort: её отсутствие не должно ронять экран.
-            history = (try? await API.shared.list("api/v1/profile/bonuses/history")) ?? []
+            // П-23.2: первая страница + признак has_more (нет meta — страниц больше нет).
+            let p: Page<BonusTx>? = try? await API.shared.page("api/v1/profile/bonuses/history")
+            history = p?.items ?? []
+            historyPage = 1
+            historyMoreFailed = false
+            historyHasMore = (p?.hasMore ?? false) && !(p?.items.isEmpty ?? true)
         } catch is CancellationError {
         } catch {
             self.error = (error as? APIError)?.errorDescription ?? "Не удалось загрузить"
         }
         loading = false
+    }
+
+    /// П-23.2: следующая страница истории. Пустая страница = конец; дубли по id
+    /// на стыке страниц отбрасываем; сбой — кнопка остаётся для повтора.
+    private func loadMoreHistory() async {
+        guard historyHasMore, !historyLoadingMore else { return }
+        historyLoadingMore = true
+        defer { historyLoadingMore = false }
+        let next = historyPage + 1
+        historyMoreFailed = false
+        let p: Page<BonusTx>
+        do {
+            p = try await API.shared.page("api/v1/profile/bonuses/history", query: ["page": String(next)])
+        } catch is CancellationError {
+            return
+        } catch {
+            historyMoreFailed = true
+            return
+        }
+        let known = Set(history.compactMap(\.id))
+        history += p.items.filter { $0.id == nil || !known.contains($0.id!) }
+        historyPage = next
+        historyHasMore = p.hasMore && !p.items.isEmpty
     }
 }
 
@@ -185,7 +239,17 @@ private struct ShopBalanceRow: View {
 private struct HistoryRow: View {
     let tx: BonusTx
 
-    private var isEarn: Bool { tx.type == "earn" }
+    /// П-22.4: знак — по type (earn «+», spend/expire «−»), сумма — по модулю:
+    /// в старых строках знак amount бывает неверным («−-10 ₽»). Неизвестный
+    /// type — по знаку самой суммы.
+    private var isEarn: Bool {
+        switch tx.type {
+        case "earn":            return true
+        case "spend", "expire": return false
+        default:                return (tx.amount ?? 0) >= 0
+        }
+    }
+    private var amountText: String { Money.format(abs(tx.amount ?? 0)) }
     private var label: String {
         switch tx.type {
         case "earn":   return "Начислено"
@@ -217,12 +281,12 @@ private struct HistoryRow: View {
                 }
             }
             Spacer(minLength: 8)
-            Text("\(isEarn ? "+" : "−")\(Money.format(Money.dec(tx.amount)))")
+            Text("\(isEarn ? "+" : "−")\(amountText)")
                 .font(YMFont.headline)
                 .foregroundStyle(isEarn ? YMColor.statusDone : YMColor.muted)
         }
         .padding(.vertical, YMSpace.md)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label), \(isEarn ? "плюс" : "минус") \(Money.format(Money.dec(tx.amount)))")
+        .accessibilityLabel("\(label), \(isEarn ? "плюс" : "минус") \(amountText)")
     }
 }

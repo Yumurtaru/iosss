@@ -362,7 +362,8 @@ private enum SplashHaptics {
 
 /// Держит симуляцию и часы. Класс, а не структура: TimelineView пересобирает
 /// body на каждом кадре, а капли должны продолжать движение, а не рождаться заново.
-private final class SplashScene {
+/// ObservableObject — ради @StateObject (см. SplashView.scene); публикуемых полей нет.
+private final class SplashScene: ObservableObject {
     let fluid: YolkFluid
     let fontSize: CGFloat
     private var startedAt: Date?
@@ -408,7 +409,13 @@ struct SplashView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var scene = SplashScene()
+    // @StateObject, а не @State: начальное значение @State вычисляется при
+    // КАЖДОЙ пересборке SplashView. Корень приложения пересобирается при любом
+    // изменении сессии, корзины или сети — и каждый раз заново рисовалось слово
+    // в буфер и раскладывались 400 капель на главном потоке (и тут же
+    // выбрасывались) — как раз в первые секунды запуска. @StateObject создаёт
+    // сцену один раз.
+    @StateObject private var scene = SplashScene()
 
     var body: some View {
         TimelineView(.animation) { timeline in

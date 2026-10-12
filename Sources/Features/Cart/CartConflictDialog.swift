@@ -28,6 +28,10 @@ struct CartConflictDialog: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appeared = false
+    /// Выбор уже сделан. Действие выполняется через 0,18 с (после анимации), и
+    /// второе нажатие «Очистить и начать новую» в это время добавляло товар
+    /// в корзину дважды (или «Очистить» + «Оставить» срабатывали оба).
+    @State private var decided = false
 
     private var currentName: String { (currentShop?.isEmpty == false) ? currentShop! : "текущего заведения" }
     private var newName: String { (newShop?.isEmpty == false) ? newShop! : "другого заведения" }
@@ -101,6 +105,8 @@ struct CartConflictDialog: View {
     }
 
     private func dismiss(confirm: Bool) {
+        guard !decided else { return }
+        decided = true
         let action = { confirm ? onConfirm() : onCancel() }
         if reduceMotion {
             appeared = false; action()

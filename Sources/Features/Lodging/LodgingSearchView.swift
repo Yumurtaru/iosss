@@ -44,6 +44,9 @@ final class LodgingSearchVM: ObservableObject {
     @Published var total = 0
     @Published var loading = true
     @Published var failed = false
+    /// Причина сбоя: текст сервера (422 «даты уже прошли» и т. п.) или сети.
+    /// Раньше на любой отказ писалось «Проверьте связь».
+    @Published var failText: String?
     // Догрузка. Сервер отдаёт результаты страницами, а экран раньше брал
     // только первую: «Найдено: 45», а карточек — одна страница и никакой
     // «следующей». gen — номер выборки: догрузка по старым фильтрам выбрасывается.
@@ -81,6 +84,7 @@ final class LodgingSearchVM: ObservableObject {
             items = []
             total = 0
             failed = true
+            failText = (error as? LocalizedError)?.errorDescription
         }
         loading = false
     }
@@ -146,6 +150,10 @@ struct LodgingSearchView: View {
         let guests: Int
     }
 
+    /// Ключ последнего удачного поиска: .task(id:) срабатывает и на возврат
+    /// из объявления — список с 3-й страницы обрезался до 1-й и прыгал.
+    @State private var searchedKey: QueryKey?
+
     private var queryKey: QueryKey {
         QueryKey(city: session.cityId, rentLong: rentLong, subtype: subtype,
                  from: from, to: to, guests: guests)
@@ -197,13 +205,26 @@ struct LodgingSearchView: View {
                     }
                 } else if !vm.loading && vm.items.isEmpty {
                     Text(vm.failed
-                         ? "Не удалось загрузить. Проверьте связь."
+                         ? (vm.failText ?? "Не удалось загрузить. Проверьте связь.")
                          : (rentLong
                             ? "На длительный срок пока ничего не сдают. Попробуйте посуточно."
                             : "Попробуйте другие даты или снимите фильтр по типу жилья."))
                         .font(YMFont.callout)
                         .foregroundStyle(YMColor.muted)
                         .padding(.horizontal, YMSpace.xl)
+                    // Сбой сети — раньше без повтора: фильтры не менялись, и
+                    // поиск заново не запускался ничем, кроме ухода с экрана.
+                    if vm.failed {
+                        Button("Повторить") {
+                            Task {
+                                await vm.search(cityId: session.cityId, rentLong: rentLong, subtype: subtype,
+                                                from: from, to: to, guests: guests)
+                            }
+                        }
+                        .font(YMFont.subhead)
+                        .foregroundStyle(YMColor.accent)
+                        .padding(.horizontal, YMSpace.xl)
+                    }
                 }
 
                 Color.clear.frame(height: YMSpace.xxl)
@@ -221,8 +242,10 @@ struct LodgingSearchView: View {
             }
         }
         .task(id: queryKey) {
+            if searchedKey == queryKey, !vm.failed, !vm.items.isEmpty { return }
             await vm.search(cityId: session.cityId, rentLong: rentLong, subtype: subtype,
                             from: from, to: to, guests: guests)
+            if !Task.isCancelled { searchedKey = queryKey }
         }
         .sheet(isPresented: $showDates) {
             // Календарь объекта тут неизвестен (объект ещё не выбран) — сетка
@@ -237,7 +260,10 @@ struct LodgingSearchView: View {
         )) {
             switch route {
             case .unit(let slug):
-                LodgingUnitView(slug: slug)
+                // Выбранные в поиске даты и гости переходят в карточку объекта:
+                // раньше там всё выбиралось заново. У длительной аренды дат нет.
+                LodgingUnitView(slug: slug, from: rentLong ? nil : from,
+                                to: rentLong ? nil : to, guests: guests)
             case .trips:
                 LodgingTripsView()
             case .none:
@@ -249,11 +275,24 @@ struct LodgingSearchView: View {
     // ── Части экрана ──
 
     private var datesRow: some View {
-        HStack(spacing: YMSpace.sm) {
-            // Даты необязательны: без них раздел работает как каталог и
-            // показывает цену «от» — так ведут себя все сервисы брони.
-            dateBox(label: "Заезд", value: from.map(LodgingDate.human) ?? "выберите")
-            dateBox(label: "Выезд", value: to.map(LodgingDate.human) ?? "выберите")
+        VStack(alignment: .leading, spacing: YMSpace.xs) {
+            HStack(spacing: YMSpace.sm) {
+                // Даты необязательны: без них раздел работает как каталог и
+                // показывает цену «от» — так ведут себя все сервисы брони.
+                dateBox(label: "Заезд", value: from.map(LodgingDate.human) ?? "выберите")
+                dateBox(label: "Выезд", value: to.map(LodgingDate.human) ?? "выберите")
+            }
+            // Выбранные даты раньше нельзя было снять: вернуться к каталогу
+            // без дат (цена «за ночь», все объекты) было невозможно.
+            if from != nil || to != nil {
+                Button("Сбросить даты") {
+                    Haptics.light()
+                    from = nil
+                    to = nil
+                }
+                .font(YMFont.caption)
+                .foregroundStyle(YMColor.accent)
+            }
         }
         .padding(.horizontal, YMSpace.xl)
     }

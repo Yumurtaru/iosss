@@ -56,19 +56,36 @@ final class OrderDetailViewModel: ObservableObject {
     @Published var actionBusy = false      // общий busy для одиночных действий (cancel/pay/review/nps)
     @Published var toast: String?          // единый тост-результат действия
     @Published var reviewSent = false      // локальный флаг «отзыв отправлен» (сервер флага не отдаёт)
+    @Published var reviewAlready = false   // П-23.1: 409 при отправке — отзыв уже оставлен
     @Published var npsSent = false         // локальный флаг «NPS отправлен»
     @Published var payLink: PayLink?       // ссылка YooKassa → открыть во внешнем браузере
 
     private var pollTimer: Timer?
     private var pollTick: Int = 0
+    /// Тик опроса ещё идёт (медленная сеть, повторы до ~60 с) — следующий
+    /// не ставим поверх: раньше запросы копились каждые 8 с.
+    private var pollBusy = false
 
     init(id: Int) { self.id = id }
 
+    /// Заказ не загрузился (сеть, 5xx). Раньше это показывалось как «Заказ не
+    /// найден» без кнопки повтора, а повторная загрузка с ошибкой стирала уже
+    /// открытый заказ.
+    @Published var loadError: String?
+
     func load() async {
         loading = true
-        async let o: OrderDetail? = try? await API.shared.get("api/v1/orders/\(id)")
         async let t: TrackData?   = try? await API.shared.get("api/v1/orders/\(id)/track")
-        order = await o
+        do {
+            let o: OrderDetail = try await API.shared.get("api/v1/orders/\(id)")
+            order = o
+            loadError = nil
+        } catch is CancellationError {
+        } catch {
+            if order == nil {
+                loadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить заказ"
+            }
+        }
         track = await t
         loading = false
     }
@@ -91,6 +108,9 @@ final class OrderDetailViewModel: ObservableObject {
             await reload()
         } catch {
             Haptics.error(); toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось отменить заказ"
+            // П-20.3: 422 «Заказ уже отменён» / «уже готовится» — статус на экране
+            // устарел: перечитываем заказ, чтобы кнопка «Отменить» ушла.
+            if let s = (error as? APIError)?.rejectStatus, s == 409 || s == 422 { await reload() }
         }
     }
 
@@ -108,6 +128,9 @@ final class OrderDetailViewModel: ObservableObject {
             }
         } catch {
             Haptics.error(); toast = (error as? LocalizedError)?.errorDescription ?? "Ошибка оплаты"
+            // 409/422 («уже оплачен», «заказ отменён») — карточка устарела:
+            // перечитываем, иначе «Оплатить» оставалась и отвечала тем же отказом.
+            if let s = (error as? APIError)?.rejectStatus, s == 409 || s == 422 { await reload() }
         }
     }
 
@@ -115,10 +138,15 @@ final class OrderDetailViewModel: ObservableObject {
     func sendReview(rating: Int, text: String) async {
         guard !actionBusy else { return }
         actionBusy = true; defer { actionBusy = false }
+        // Пробелы и пустые строки по краям не отправляем: «   » уходило отзывом-пустышкой.
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             try await API.shared.postVoid("api/v1/reviews",
-                body: OrderReviewBody(orderId: id, rating: rating, text: text.isEmpty ? nil : text))
+                body: OrderReviewBody(orderId: id, rating: rating, text: t.isEmpty ? nil : t))
             Haptics.success(); reviewSent = true; toast = "Спасибо за отзыв!"
+        } catch let e as APIError where e.rejectStatus == 409 {
+            // П-23.1: 409 — отзыв по заказу уже есть: форму прячем, не «ошибка».
+            Haptics.warning(); reviewAlready = true; toast = "Отзыв уже оставлен"
         } catch {
             Haptics.error(); toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось отправить отзыв"
         }
@@ -145,6 +173,9 @@ final class OrderDetailViewModel: ObservableObject {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
+                guard !self.pollBusy else { return }
+                self.pollBusy = true
+                defer { self.pollBusy = false }
                 if let t: TrackData = try? await API.shared.get("api/v1/orders/\(self.id)/track") {
                     self.track = t
                 }
@@ -155,6 +186,11 @@ final class OrderDetailViewModel: ObservableObject {
                 if self.pollTick % 3 == 0,
                    let o: OrderDetail = try? await API.shared.get("api/v1/orders/\(self.id)") {
                     self.order = o
+                }
+                // Заказ завершён или отменён — опрос больше не нужен (раньше шёл,
+                // пока открыт экран). Проверку оплаты это не трогает.
+                if let st = self.order?.status ?? self.track?.status, !OrderFlow.isActive(st) {
+                    self.pollTimer?.invalidate(); self.pollTimer = nil
                 }
             }
         }
@@ -220,11 +256,22 @@ final class OrderDetailViewModel: ObservableObject {
         reorderInFlight = true; reorderError = nil; reorderDone = false
         defer { reorderInFlight = false }
         // GET api/v1/orders/{id}/reorder → ReorderData (как в старом клиенте: Reorder.perform).
-        guard let data: ReorderData = try? await API.shared.get("api/v1/orders/\(id)/reorder"),
-              let shopId = data.shopId, let items = data.items, !items.isEmpty else {
-            // TODO(API): если эндпоинт reorder отсутствует/пуст — деградируем без падения (ниже баннер).
+        // Сбой и «нечего повторять» различаем: раньше на всё — «Проверьте
+        // соединение», даже когда сервер ответил текстом или все позиции сняты.
+        let data: ReorderData
+        do {
+            data = try await API.shared.get("api/v1/orders/\(id)/reorder")
+        } catch is CancellationError {
+            return
+        } catch {
             Haptics.warning()
-            reorderError = "Не удалось повторить заказ. Проверьте соединение и попробуйте ещё раз."
+            reorderError = (error as? LocalizedError)?.errorDescription
+                ?? "Не удалось повторить заказ. Проверьте соединение и попробуйте ещё раз."
+            return
+        }
+        guard let shopId = data.shopId, let items = data.items, !items.isEmpty else {
+            Haptics.warning()
+            reorderError = "Позиции этого заказа больше не продаются."
             return
         }
         // Конвертация ReorderItem → CartLine (single-store: одна корзина = один магазин).
@@ -306,6 +353,9 @@ struct OrderDetailView: View {
 
     private var courierCoord: CLLocationCoordinate2D? {
         guard let lat = vm.track?.courierLat, let lng = vm.track?.courierLng else { return nil }
+        // 0,0 — «точки ещё нет» (курьер назначен, геопозиция не пришла): раньше
+        // карта показывала пин в океане у Африки.
+        guard lat != 0 || lng != 0 else { return nil }
         return CLLocationCoordinate2D(latitude: lat, longitude: lng)
     }
 
@@ -327,14 +377,19 @@ struct OrderDetailView: View {
                     if canPay(o) { payCard(o) }          // онлайн-оплата (неоплаченный online-заказ)
                     if let ch = o.changes, !ch.isEmpty { changesCard(ch) }
                     itemsCard(o)
-                    if canReview(o) {                     // отзыв + NPS (для доставленных)
-                        reviewCard(o)
-                        npsCard(o)
-                    }
+                    // П-23.1: форма отзыва — по can_review сервера; NPS — как раньше.
+                    if showReviewCard(o) { reviewCard(o) }
+                    if canReview(o) { npsCard(o) }        // NPS (для доставленных)
                     actionButtons(o)
                 }
                 .padding(.horizontal, YMSpace.xl)
                 .padding(.vertical, YMSpace.lg)
+            } else if let e = vm.loadError {
+                // Ошибка загрузки — с повтором, а не «Заказ не найден».
+                ErrorRetryView(message: e) {
+                    Task { await vm.load(); vm.startTrackingIfActive() }
+                }
+                .padding(.top, 60)
             } else {
                 emptyBox
             }
@@ -343,7 +398,17 @@ struct OrderDetailView: View {
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
         .task { await vm.load(); if !Task.isCancelled { vm.startTrackingIfActive(); vm.resumePaymentCheckIfNeeded() } }   // экран успели закрыть — опрос не запускаем
-        .onDisappear { vm.stopTracking() }
+        .onDisappear { visible = false; vm.stopTracking() }
+        .onAppear { visible = true }
+        // Вернулись в приложение — статус и курьер могли смениться, пока оно
+        // было свёрнуто: перечитываем сразу и снова включаем опрос (он
+        // останавливается сам, когда заказ завершён).
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active, visible, vm.order != nil else { return }
+            // Пока шёл reload, экран могли закрыть — без проверки опрос
+            // перезапускался после onDisappear и тикал вхолостую.
+            Task { await vm.reload(); if visible { vm.startTrackingIfActive() } }
+        }
         .onChange(of: courierCoord?.latitude) { _ in recenter() }
         // Диалог подтверждения отмены заказа.
         .alert("Отменить заказ?", isPresented: $showCancelAlert) {
@@ -359,6 +424,9 @@ struct OrderDetailView: View {
     }
 
     @State private var showCancelAlert = false
+    @Environment(\.scenePhase) private var scenePhase
+    /// Экран заказа виден (для перечитывания при возврате из фона).
+    @State private var visible = false
     @State private var reviewRating = 5
     @State private var reviewText = ""
     @State private var npsScore = -1
@@ -391,6 +459,15 @@ struct OrderDetailView: View {
     /// Отзыв/NPS: только для доставленного заказа.
     private func canReview(_ o: OrderDetail) -> Bool { OrderFlow.isDone(o.status) }
 
+    /// П-23.1: блок отзыва. Сервер прислал can_review — верим ему (отзыв уже
+    /// есть → блока нет); поля нет (старый сервер) — прежняя логика по статусу.
+    /// Только что отправленный или «уже оставлен» (409) — блок с итогом.
+    private func showReviewCard(_ o: OrderDetail) -> Bool {
+        if vm.reviewSent || vm.reviewAlready { return true }
+        if let c = o.canReview { return c }
+        return canReview(o)
+    }
+
     @ViewBuilder private var toastOverlay: some View {
         if let msg = vm.toast {
             Text(msg)
@@ -400,8 +477,11 @@ struct OrderDetailView: View {
                 .overlay(Capsule().strokeBorder(YMColor.hairline, lineWidth: 1))
                 .padding(.bottom, YMSpace.xxxl)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-                .onAppear {
-                    Task { try? await Task.sleep(nanoseconds: 2_200_000_000); await MainActor.run { vm.toast = nil } }
+                // Таймер на КАЖДОЕ сообщение: раньше таймер первого тоста гасил
+                // следующий, пришедший раньше чем через 2 с («Заказ отменён» и т.п.).
+                .task(id: msg) {
+                    try? await Task.sleep(nanoseconds: 2_200_000_000)
+                    if !Task.isCancelled { vm.toast = nil }
                 }
         }
     }
@@ -474,7 +554,10 @@ struct OrderDetailView: View {
 
     private var etaLine: String {
         let mins = vm.track?.etaMinutes
-        let base = OrderStatus.label(vm.track?.status ?? vm.order?.status, shopType: vm.order?.shopType)
+        // Подпись сервера — только если трек не ушёл вперёд статуса карточки.
+        let st = vm.track?.status ?? vm.order?.status
+        let base = OrderStatus.label(st, shopType: vm.order?.shopType,
+                                     title: st == vm.order?.status ? vm.order?.statusTitle : nil)
         if let m = mins, m > 0 { return "\(base) · \(m) мин до вас" }
         return base
     }
@@ -500,9 +583,14 @@ struct OrderDetailView: View {
                 }
             } else {
                 let current = OrderFlow.stepIndex(o.status)
-                ForEach(Array(OrderFlow.steps.enumerated()), id: \.offset) { idx, key in
+                // Самовывоз и заказ за столиком в путь не уходят: шаг «Курьер в пути»
+                // у них лишний (если заказ вдруг в нём — показываем).
+                let dt = o.deliveryType ?? ""
+                let noCourier = !dt.isEmpty && dt != "delivery" && current != 4
+                ForEach(Array(OrderFlow.steps.enumerated()).filter { !(noCourier && $0.element == "in_delivery") },
+                        id: \.offset) { idx, key in
                     TimelineRow(
-                        title: OrderFlow.stepTitle(key, shopType: vm.order?.shopType),
+                        title: stepTitle(key, o: o, noCourier: noCourier),
                         time: stepTime(idx: idx, current: current, o: o),
                         state: idx < current ? .done : (idx == current ? .active : .todo),
                         isLast: idx == OrderFlow.steps.count - 1)
@@ -514,15 +602,28 @@ struct OrderDetailView: View {
         .ymCard(radius: YMRadius.card)
     }
 
-    /// Подпись времени шага: для оформления — реальное createdAt; для активного — «сейчас»;
-    /// для будущего — ETA (если есть). Детальных штампов по каждому шагу сервер не отдаёт.
+    /// Подпись шага: серверная из status_timeline (словами типа организации),
+    /// иначе свой словарь. Самовывоз — «Выполнен», а не «Доставлен».
+    private func stepTitle(_ key: String, o: OrderDetail, noCourier: Bool) -> String {
+        if let t = o.statusTimeline?.step(key)?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        if noCourier, key == "done", vm.order?.shopType != "service" { return "Выполнен" }
+        return OrderFlow.stepTitle(key, shopType: vm.order?.shopType)
+    }
+
+    /// Подпись времени шага: время перехода от сервера; для оформления — createdAt;
+    /// для активного — «сейчас»; для будущего — ETA (если есть).
     private func stepTime(idx: Int, current: Int, o: OrderDetail) -> String {
+        // Время перехода, если сервер его прислал (status_timeline[].at).
+        if idx < OrderFlow.steps.count, idx <= current,
+           let at = o.statusTimeline?.step(OrderFlow.steps[idx])?.at {
+            let t = DateFmt.time(at)
+            if !t.isEmpty { return t }
+        }
         if idx == 0 { return DateFmt.time(o.createdAt) }
         if idx == current { return "сейчас" }
         if idx == OrderFlow.steps.count - 1, let m = vm.track?.etaMinutes, m > 0, current < idx {
             return "ожидается ~\(m) мин"
         }
-        // TODO(API): нет per-step timestamps (status_timeline) — время промежуточных шагов не показываем.
         return ""
     }
 
@@ -672,6 +773,9 @@ struct OrderDetailView: View {
             Text("Оцените заказ").font(YMFont.title3).foregroundStyle(YMColor.text)
             if vm.reviewSent {
                 Text("Спасибо за отзыв!").font(YMFont.body).foregroundStyle(YMColor.muted)
+            } else if vm.reviewAlready {
+                // П-23.1: 409 — форму больше не показываем.
+                Text("Отзыв уже оставлен").font(YMFont.body).foregroundStyle(YMColor.muted)
             } else {
                 HStack(spacing: YMSpace.sm) {
                     ForEach(1...5, id: \.self) { i in
@@ -759,7 +863,9 @@ struct OrderDetailView: View {
             Button {
                 Haptics.light(); onChat(id)
             } label: {
-                Label("Чат с рестораном", systemImage: "bubble.left.and.bubble.right.fill")
+                // «Чат с рестораном» писалось и у магазина, и у салона.
+                Label(o.shopType == "shop" ? "Чат с магазином" : "Чат с заведением",
+                      systemImage: "bubble.left.and.bubble.right.fill")
             }
             .buttonStyle(YMPrimaryButtonStyle())
 

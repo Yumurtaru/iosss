@@ -34,6 +34,49 @@ private struct RegRequestResult: Decodable {
 private struct AuthTokens: Decodable {
     let token: String?
     let refresh: String?
+    /// user.id из ответа входа — только чтобы узнать, тот же ли это человек.
+    let user: AuthUser?
+}
+
+/// Из `user` берём один id. Разбор не бросает ошибок: неожиданная форма
+/// `user` не должна ломать сам вход.
+private struct AuthUser: Decodable {
+    let id: Int?
+    private enum K: String, CodingKey { case id }
+    init(from decoder: Decoder) throws {
+        var v: Int? = nil
+        if let c = try? decoder.container(keyedBy: K.self),
+           let w = try? c.decode(LenientInt.self, forKey: .id) { v = w.wrappedValue }
+        id = v
+    }
+}
+
+/// Кто входил в этом телефоне последним. Сессия, кончившаяся сама (401),
+/// оставляет корзину, историю поиска и «недавно смотрели» — чтобы тот же
+/// человек вошёл и продолжил. Но если входит ДРУГОЙ человек, раньше он
+/// получал всё это от прежнего. Явный выход чистит данные сам и забывает id.
+enum AuthLastUser {
+    static let key = "auth_last_user_id"
+    static func forget() { UserDefaults.standard.removeObject(forKey: key) }
+    /// Вход, сделанный до этой версии: id ещё не записан — запоминаем по профилю.
+    static func seed(_ uid: Int?) {
+        guard let uid, uid > 0, UserDefaults.standard.integer(forKey: key) == 0 else { return }
+        UserDefaults.standard.set(uid, forKey: key)
+    }
+    /// Вызывать до signIn. Другой id — чистим локальные данные прежнего.
+    @MainActor static func switchTo(_ uid: Int?) {
+        guard let uid, uid > 0 else { return }
+        let prev = UserDefaults.standard.integer(forKey: key)
+        if prev != 0 && prev != uid {
+            Cart.shared.clear()
+            SearchHistoryStore.clear()
+            RecentStore.clear()
+            // Черновик оформления (комментарий, стол, промокод) прежнего
+            // человека не должен достаться новому.
+            CheckoutDraft.clear()
+        }
+        UserDefaults.standard.set(uid, forKey: key)
+    }
 }
 
 // MARK: - AuthView
@@ -59,6 +102,12 @@ struct AuthView: View {
     // Подтверждение почты
     @State private var code = ""
     @State private var sentMask: String?
+    /// Повторная отправка кода: раньше ни паузы, ни отклика — каждое нажатие
+    /// слало новое письмо (быстро упирались в лимит 429), а на экране ничего
+    /// не менялось, и было непонятно, ушёл ли код. Теперь пауза 60 с с отсчётом.
+    @State private var resendLeft = 0
+    @State private var resendTimer: Task<Void, Never>?
+    @State private var notice: String?
 
     @State private var busy = false
     @State private var error: String?
@@ -126,6 +175,11 @@ struct AuthView: View {
                         Text(error)
                             .font(YMFont.subhead)
                             .foregroundStyle(YMColor.statusCancel)
+                            .padding(.top, YMSpace.sm)
+                    } else if let notice, !notice.isEmpty {
+                        Text(notice)
+                            .font(YMFont.subhead)
+                            .foregroundStyle(YMColor.muted)
                             .padding(.top, YMSpace.sm)
                     }
 
@@ -275,7 +329,8 @@ struct AuthView: View {
     @ViewBuilder
     private var footerLinks: some View {
         if step == .registerCode {
-            linkButton("Отправить код повторно") { registerRequest() }
+            linkButton(resendLeft > 0 ? "Отправить код повторно через \(resendLeft) с" : "Отправить код повторно",
+                       enabled: resendLeft == 0) { registerRequest() }
         }
         if step == .password || step == .register {
             linkButton(step == .register ? "Уже есть аккаунт? Войти" : "Регистрация") {
@@ -284,16 +339,29 @@ struct AuthView: View {
         }
     }
 
-    private func linkButton(_ title: String, action: @escaping () -> Void) -> some View {
+    private func linkButton(_ title: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: { Haptics.light(); action() }) {
             Text(title)
                 .font(YMFont.subhead)
-                .foregroundStyle(YMColor.accent)
+                .foregroundStyle(enabled ? YMColor.accent : YMColor.muted)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, YMSpace.sm)
         }
         .buttonStyle(.plain)
-        .disabled(busy)
+        .disabled(busy || !enabled)
+    }
+
+    /// Пауза перед следующей повторной отправкой кода (см. resendLeft).
+    private func startResendCooldown() {
+        resendTimer?.cancel()
+        resendLeft = 60
+        resendTimer = Task { @MainActor in
+            while resendLeft > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                resendLeft -= 1
+            }
+        }
     }
 
     // MARK: Переходы
@@ -301,6 +369,7 @@ struct AuthView: View {
     private func back(to step: Step) {
         self.step = step
         error = nil
+        notice = nil
     }
 
     /// Кнопка «назад» в шапке: registerCode → register → password → закрыть.
@@ -353,11 +422,17 @@ struct AuthView: View {
             do {
                 let r: RegRequestResult = try await API.shared.post("api/v1/auth/register/request", body: body)
                 await MainActor.run {
+                    let resent = step == .registerCode
                     busy = false
                     sentMask = r.email
-                    if let dc = r.debugCode, !dc.isEmpty { code = dc } // dev-режим
+                    // После повторной отправки прежний набранный код уже не тот —
+                    // поле очищаем (как Android), иначе «Подтвердить» слало старый
+                    // и получало «Неверный код». dev-режим — подставляем новый.
+                    if let dc = r.debugCode, !dc.isEmpty { code = dc } else { code = "" }
                     Haptics.success()
                     back(to: .registerCode)
+                    if resent { notice = "Новый код отправлен на почту" }
+                    startResendCooldown()
                 }
             } catch {
                 fail(error, fallback: "Не удалось отправить код")
@@ -374,7 +449,9 @@ struct AuthView: View {
             do {
                 let t: AuthTokens = try await API.shared.post(
                     "api/v1/auth/register/confirm",
-                    body: ["email": email, "code": code.trimmingCharacters(in: .whitespaces)]
+                    // Только цифры: codeValid считает цифры, и вставленный «123 456»
+                    // или «123-456» проходил проверку, а сервер отвечал «Неверный код».
+                    body: ["email": email, "code": code.filter { $0.isASCII && $0.isNumber }]
                 )
                 finish(t)
             } catch {
@@ -392,6 +469,7 @@ struct AuthView: View {
             Haptics.error()
             return
         }
+        AuthLastUser.switchTo(tokens.user?.id)
         session.signIn(token, refresh: tokens.refresh)
         Haptics.success()
         if let onAuthed { onAuthed() } else { dismiss() }

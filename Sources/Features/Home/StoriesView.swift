@@ -32,12 +32,17 @@ struct StoriesView: View {
     @State private var banners: [Banner] = []
     @State private var openIndex: Int?
     @State private var loaded = false
+    /// Город, для которого лента уже загружена.
+    @State private var loadedCity: Int?
 
     var body: some View {
         Group {
             // Пусто → ничего не рисуем (без пустого места и без краша).
             if banners.isEmpty {
-                EmptyView()
+                // Не EmptyView: на «ничего» .task ниже не срабатывает — лента,
+                // пустая на старте, так и не запрашивала баннеры. Невидимая
+                // полоска нулевой высоты держит загрузку.
+                Color.clear.frame(height: 0)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: YMSpace.md) {
@@ -50,6 +55,9 @@ struct StoriesView: View {
                     .padding(.horizontal, YMSpace.xl)
                     .padding(.vertical, YMSpace.sm)
                 }
+                // Верхний отступ — только когда лента есть: снаружи он
+                // давал пустую щель над чипами при отсутствии баннеров.
+                .padding(.top, 6)
             }
         }
         .task(id: cityId) { await load() }
@@ -63,10 +71,21 @@ struct StoriesView: View {
 
     private func load() async {
         // При смене города перезагружаем; повторно на тот же город — один раз.
+        // Лента живёт в LazyVStack Главной: .task срабатывал при каждом
+        // появлении на экране (прокрутили вниз и обратно, вернулись из
+        // заведения) — баннеры качались заново, а сбой связи стирал уже
+        // показанную ленту. Теперь тот же город не перезапрашиваем, а при
+        // ошибке оставляем прежнее (другой город — убираем, он не наш).
+        let city = cityId
+        if loaded && loadedCity == city { return }
         var query: [String: String] = [:]
-        if let c = cityId, c > 0 { query["city_id"] = String(c) }
-        let result: [Banner] = (try? await API.shared.list("api/v1/banners", query: query)) ?? []
-        await MainActor.run { banners = result; loaded = true }
+        if let c = city, c > 0 { query["city_id"] = String(c) }
+        do {
+            let result: [Banner] = try await API.shared.list("api/v1/banners", query: query)
+            await MainActor.run { banners = result; loaded = true; loadedCity = city }
+        } catch {
+            await MainActor.run { if loadedCity != city { banners = [] } }
+        }
     }
 }
 
@@ -195,10 +214,9 @@ private struct StoriesPlayer: View {
 
                 // Кнопка «Подробнее» — если у баннера есть ссылка.
                 // Только веб-ссылки и ссылки самого приложения — не произвольные схемы.
-                if let link = current?.link, let url = URL(string: link),
-                   ["https", "http", "yumurta"].contains(url.scheme?.lowercased() ?? "") {
+                if let url = storyURL(current?.link) {
                     Button {
-                        close(); openURL(url)
+                        close(); openStory(url)
                     } label: {
                         Text("Подробнее")
                             .font(.system(size: 15, weight: .heavy)).foregroundStyle(.black)
@@ -216,6 +234,39 @@ private struct StoriesPlayer: View {
         .onAppear { startTimer() }
         .onDisappear { timer?.invalidate() }
         .statusBarHidden(true)
+    }
+
+    /// Ссылка баннера. Путь от корня сайта («/shop/…») дополняем адресом сайта,
+    /// как Android: раньше у такой ссылки кнопки «Подробнее» не было вовсе.
+    /// Только веб-ссылки и ссылки самого приложения — не произвольные схемы.
+    private func storyURL(_ raw: String?) -> URL? {
+        let s = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        let full = s.hasPrefix("/") ? API.base + s : s
+        guard let u = URL(string: full),
+              ["https", "http", "yumurta"].contains(u.scheme?.lowercased() ?? "") else { return nil }
+        return u
+    }
+
+    /// Заведение и приглашение (yumurta://…, yumurta.ru/shop/…, /r/…) открываем
+    /// внутри приложения, как ссылку извне; остальное — в браузере. Раньше
+    /// ссылка на заведение уводила в Safari, а yumurta:// не открывалась.
+    private func openStory(_ url: URL) {
+        let host = url.host?.lowercased() ?? ""
+        let ownScheme = url.scheme?.lowercased() == "yumurta"
+        let ownSite = host == "yumurta.ru" || host.hasSuffix(".yumurta.ru")
+        let parts = url.pathComponents
+        if ownScheme || (ownSite && (parts.contains("shop") || parts.contains("r"))) {
+            // Ждём, пока закроется сторис: вторую обложку поверх закрывающейся
+            // SwiftUI не покажет.
+            // Не разобрали (нет слага, лишний сегмент) — сайт открываем в браузере,
+            // как раньше; свою схему без экрана — молча.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if !DeepLinkRouter.shared.handle(url: url), !ownScheme { UIApplication.shared.open(url) }
+            }
+        } else {
+            openURL(url)
+        }
     }
 
     /// Заполнение полоски i относительно текущего кадра.

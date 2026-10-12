@@ -49,12 +49,17 @@ enum LodgingDate {
     /// «2026-11-09» → «9 ноября». Для человека даты только так.
     static func human(_ iso: String?) -> String {
         guard let iso = iso, let d = api.date(from: iso) else { return iso ?? "" }
+        return humanOut.string(from: d)
+    }
+    /// Один форматтер на приложение: раньше новый создавался на каждый вызов —
+    /// по два на каждую строку «Моих поездок» и на каждое касание в календаре.
+    private static let humanOut: DateFormatter = {
         let out = DateFormatter()
         out.locale = Locale(identifier: "ru_RU")
         out.timeZone = TimeZone(identifier: "UTC")
         out.dateFormat = "d MMMM"
-        return out.string(from: d)
-    }
+        return out
+    }()
 
     /// Ночей между датами: день выезда НЕ считается — канон всей отрасли.
     static func nights(_ from: String?, _ to: String?) -> Int {

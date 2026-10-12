@@ -147,6 +147,9 @@ private struct CityStep: View {
     // онбординге до перезапуска. Теперь можно продолжить без города: Главная
     // сама возьмёт первый город, когда появится связь.
     @State private var citiesFailed = false
+    /// Список ещё грузится. Без сети запрос ждёт связь до 40 с, и всё это время
+    /// под заголовком было пусто — казалось, что городов нет.
+    @State private var citiesLoading = false
 
     // Список для отображения: только города, где есть заведения (+ поиск по ним).
     private var shownNames: [String] {
@@ -231,6 +234,27 @@ private struct CityStep: View {
                     ForEach(shownNames, id: \.self) { name in
                         cityRow(name)
                     }
+                    if citiesLoading && cities.isEmpty {
+                        ProgressView()
+                            .tint(YMColor.accent)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 24)
+                    }
+                    // Первый запуск без сети: раньше под заголовком было пусто и без
+                    // объяснения, повторить загрузку было нельзя до перезапуска.
+                    if citiesFailed && cities.isEmpty {
+                        VStack(alignment: .leading, spacing: YMSpace.sm) {
+                            Text("Не удалось загрузить список городов. Проверьте интернет или продолжите — город можно выбрать позже на главной.")
+                                .font(.system(size: 14))
+                                .foregroundStyle(YMColor.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button("Повторить") { Task { await loadCities() } }
+                                .font(.system(size: 14.5, weight: .bold))
+                                .foregroundStyle(YMColor.accent)
+                        }
+                        .padding(.horizontal, YMSpace.xxl)
+                        .padding(.top, 12)
+                    }
                 }
                 .padding(.bottom, 120)
             }
@@ -287,6 +311,8 @@ private struct CityStep: View {
     private func loadCities() async {
         // Только города, где есть активные организации.
         citiesFailed = false
+        citiesLoading = true
+        defer { citiesLoading = false }
         guard let list: [City] = try? await API.shared.list("api/v1/cities", query: ["with_orgs": "1"]) else {
             citiesFailed = true
             return

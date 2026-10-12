@@ -67,6 +67,8 @@ struct EditProfileView: View {
     @State private var confirmTarget: String?
     @State private var code = ""
     @State private var didLoad = false
+    /// Обращение в поддержку из листа кода ушло — говорим об этом на экране.
+    @State private var supportNotice: String?
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
     private var emailValid: Bool {
@@ -115,6 +117,10 @@ struct EditProfileView: View {
                     if let saveError {
                         Text(saveError)
                             .font(YMFont.callout).foregroundStyle(YMColor.statusCancel)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if let supportNotice {
+                        Text(supportNotice)
+                            .font(YMFont.callout).foregroundStyle(YMColor.statusDone)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
@@ -240,7 +246,9 @@ struct EditProfileView: View {
     private var supportSheet: some View {
         SupportComposeSheet(
             onCancel: { showSupportSheet = false },
-            onSent: { showSupportSheet = false; saveError = nil }
+            // Раньше лист просто закрывался — непонятно, ушло ли обращение.
+            onSent: { showSupportSheet = false; saveError = nil
+                      supportNotice = "Обращение отправлено — поддержка свяжется с вами." }
         )
     }
 
@@ -274,8 +282,11 @@ struct EditProfileView: View {
         if !n.isEmpty && n != origName { m["name"] = n }
         let e = email.trimmingCharacters(in: .whitespaces)
         if e != origEmail { m["email"] = e }
-        let p = phone.trimmingCharacters(in: .whitespaces)
-        if !p.isEmpty && p != origPhone { m["phone"] = p }
+        // Только цифры и «+», как в Android: «8 (938) 112-11-91» с пробелами и
+        // скобками уходил на сервер как есть.
+        let p = phone.filter { $0.isASCII && ($0.isNumber || $0 == "+") }
+        let op = origPhone.filter { $0.isASCII && ($0.isNumber || $0 == "+") }
+        if !p.isEmpty && p != op { m["phone"] = p }
         if !password.isEmpty { m["password"] = password }
         return m
     }
@@ -386,12 +397,16 @@ private struct SupportComposeSheet: View {
 
     private struct Payload: Encodable { let subject: String?; let message: String }
 
-    private var canSend: Bool { message.trimmingCharacters(in: .whitespaces).count >= 5 && !sending }
+    // Переводы строк тоже пустота: пять «Enter» проходили проверку и уходили
+    // в поддержку пустым обращением.
+    private var canSend: Bool { message.trimmingCharacters(in: .whitespacesAndNewlines).count >= 5 && !sending }
 
     var body: some View {
         NavigationView {
             VStack(alignment: .leading, spacing: YMSpace.lg) {
-                Text("Опишите проблему — мы ответим прямо в приложении.")
+                // Экрана обращений в приложении нет — обещание «ответим прямо в
+                // приложении» было неправдой: человек ждал ответа там, где его не будет.
+                Text("Опишите проблему — поддержка свяжется с вами по контактам из профиля.")
                     .font(YMFont.callout).foregroundStyle(YMColor.muted)
                 ZStack(alignment: .topLeading) {
                     if message.isEmpty {
@@ -421,13 +436,16 @@ private struct SupportComposeSheet: View {
             .navigationTitle("Поддержка")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Отмена", action: onCancel) }
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена", action: onCancel).disabled(sending) }
             }
         }
+        // Пока обращение уходит, лист не закрывается: закрытый смахиванием
+        // прятал ошибку отправки, и человек считал, что написал в поддержку.
+        .interactiveDismissDisabled(sending)
     }
 
     private func send() {
-        let msg = message.trimmingCharacters(in: .whitespaces)
+        let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard msg.count >= 5, !sending else { return }
         sending = true; error = nil
         Task {

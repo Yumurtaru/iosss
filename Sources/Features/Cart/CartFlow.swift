@@ -23,6 +23,9 @@ struct CartFlow: View {
     var onClose: () -> Void
     /// Открыть трекинг заказа после успешного оформления.
     var onTrackOrder: (Int) -> Void
+    /// «Меню» в корзине открывает заведение корзины (вкладка «Корзина»). В
+    /// шторке поверх заведения — false: «Меню» просто закрывает шторку.
+    var openShopOnMenu: Bool = false
 
     private enum Step: Hashable { case checkout, success }
 
@@ -32,6 +35,7 @@ struct CartFlow: View {
     @State private var showAuth = false
     // Результат создания заказа — источник данных для SuccessView.
     @State private var result: OrderCreateResult?
+    @ObservedObject private var cart = Cart.shared
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -39,7 +43,8 @@ struct CartFlow: View {
                 onCheckout: {
                     if Session.shared.isLoggedIn { path.append(.checkout) } else { showAuth = true }
                 },
-                onClose: { onClose() }
+                onClose: { onClose() },
+                onMenu: menuAction
             )
             .navigationDestination(for: Step.self) { step in
                 switch step {
@@ -57,6 +62,16 @@ struct CartFlow: View {
                 }
             }
         }
+        // Ушли с «Заказ оформлен» через таб-бар — при возврате на вкладку
+        // показываем корзину, а не прошлый успех (оттуда не было пути назад).
+        .onDisappear { if path.last == .success { path.removeAll() } }
+        // Корзину опустошили вне оформления (выход из аккаунта в профиле,
+        // «Очистить и начать новую» в другом заведении) — вкладка «Корзина»
+        // оставалась на пустом оформлении с серой кнопкой. Возвращаем в корзину.
+        // После успешного заказа корзина тоже пустеет, но там стек уже на .success.
+        .onChange(of: cart.isEmpty) { empty in
+            if empty && path.last == .checkout { path.removeAll() }
+        }
         .sheet(isPresented: $showAuth) {
             NavigationStack {
                 AuthView(onAuthed: {
@@ -65,6 +80,18 @@ struct CartFlow: View {
                 })
             }
             .environmentObject(Session.shared)
+        }
+    }
+
+    /// «Меню» во вкладке: заведение корзины поверх вкладок (как из ссылки).
+    private var menuAction: (() -> Void)? {
+        guard openShopOnMenu else { return nil }
+        return {
+            if let slug = Cart.shared.shopSlug, !slug.isEmpty {
+                NavCoordinator.shared.openOrg(slug: slug)
+            } else {
+                onClose()
+            }
         }
     }
 
@@ -82,7 +109,15 @@ struct CartFlow: View {
                     path.removeAll()
                     result = nil
                     onClose()
-                    onTrackOrder(id)
+                    // Номер заказа в ответе не пришёл: раньше открывалась деталь
+                    // заказа 0 («Заказ не найден»). Тогда — просто список заказов.
+                    if id > 0 {
+                        onTrackOrder(id)
+                    } else {
+                        NavCoordinator.shared.revealForPush(closeAll: true) {
+                            DeepLinkRouter.shared.requestedTab = 3
+                        }
+                    }
                 },
                 onHome: {
                     path.removeAll()

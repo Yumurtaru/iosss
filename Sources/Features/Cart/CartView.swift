@@ -21,6 +21,8 @@ struct CartView: View {
     @ObservedObject private var cart = Cart.shared
     var onCheckout: () -> Void = {}
     var onClose: () -> Void = {}
+    /// «Меню» у баннера заведения. nil — как раньше, закрыть корзину.
+    var onMenu: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
@@ -76,7 +78,10 @@ struct CartView: View {
                         }
                     }
 
-                    commentHint
+                    // Плашка похожа на поле ввода, но нажатие на неё ничего не
+                    // делало. Комментарий вводится на оформлении — туда и ведём.
+                    Button(action: { Haptics.light(); onCheckout() }) { commentHint.contentShape(Rectangle()) }
+                        .buttonStyle(.plain)
                         .padding(.top, YMSpace.lg)
 
                     totalsCard
@@ -111,7 +116,7 @@ struct CartView: View {
                     .foregroundStyle(YMColor.muted)
             }
             Spacer()
-            Button(action: { Haptics.light(); onClose() }) {
+            Button(action: { Haptics.light(); if let m = onMenu { m() } else { onClose() } }) {
                 Text("Меню")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(YMColor.accent)
@@ -251,8 +256,11 @@ private struct CartRow: View {
     let line: CartLine
     @ObservedObject private var cart = Cart.shared
 
+    // Как Cart.total и сервер: строка округляется до копейки отдельно,
+    // иначе строка могла разойтись с итогом на 1 копейку.
     private var lineTotal: Decimal {
-        Money.parse(line.unitPrice) * Decimal(line.qty)
+        var v = Money.parse(line.unitPrice) * (Decimal(string: String(line.qty)) ?? 0)
+        var r = Decimal(); NSDecimalRound(&r, &v, 2, .plain); return r
     }
 
     var body: some View {

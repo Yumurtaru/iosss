@@ -55,7 +55,9 @@ struct GiftCardView: View {
                 .foregroundStyle(YMColor.onAccent)
             Text("Подарочная карта")
                 .font(YMFont.title3).foregroundStyle(YMColor.onAccent)
-            Text("Введите код с карты, чтобы проверить баланс и активировать её.")
+            // Экран только проверяет баланс — «и активировать её» обещало
+            // действие, которого здесь нет (кнопку уже переименовали).
+            Text("Введите код с карты, чтобы проверить её баланс и срок действия.")
                 .font(YMFont.callout).foregroundStyle(YMColor.onAccent.opacity(0.85))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -188,14 +190,28 @@ struct GiftCardView: View {
         guard input.count >= 4, !loading else { return }
         loading = true; error = nil; card = nil
         Task {
+            // Код правят, пока идёт проверка: ответ по прежнему коду раньше
+            // ложился под новый («Карта найдена» с чужим балансом).
+            var stillSame: Bool { code.trimmingCharacters(in: .whitespaces) == input }
             do {
-                let path = "api/v1/gift-cards/\(input.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? input)"
+                // «/» в коде не должен менять путь запроса.
+                var allowed = CharacterSet.urlPathAllowed; allowed.remove(charactersIn: "/")
+                let path = "api/v1/gift-cards/\(input.addingPercentEncoding(withAllowedCharacters: allowed) ?? input)"
                 let c: GiftCard = try await API.shared.get(path)
-                Haptics.success()
-                card = c
+                if stillSame { Haptics.success(); card = c }
+            } catch is CancellationError {
             } catch {
-                Haptics.error()
-                self.error = (error as? APIError)?.errorDescription ?? "Сертификат не найден"
+                if stillSame {
+                    Haptics.error()
+                    // 404 без текста сервера: общее «Не найдено — возможно, уже
+                    // удалено» про карту звучало странно — говорим прямо.
+                    let api = error as? APIError
+                    if api?.rejectStatus == 404, api?.errorDescription == APIError.httpText(404) {
+                        self.error = "Карта с таким кодом не найдена. Проверьте код"
+                    } else {
+                        self.error = api?.errorDescription ?? "Сертификат не найден"
+                    }
+                }
             }
             loading = false
         }

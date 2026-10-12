@@ -13,6 +13,25 @@ struct ClientCardBlock: View {
     let code: String
 
     @State private var savedBrightness: CGFloat?
+    /// Яркость, выставленная приложением, держится и после сворачивания (до
+    /// блокировки телефона): с открытым профилем свернули приложение — экран
+    /// оставался на 100 % и садил батарею. Возвращаем при уходе в фон и
+    /// поднимаем снова при возврате, если карта всё ещё на экране.
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var onScreen = false
+
+    private func raiseBrightness() {
+        if savedBrightness == nil {
+            savedBrightness = UIScreen.main.brightness
+            UIScreen.main.brightness = 1.0
+        }
+    }
+    private func restoreBrightness() {
+        if let b = savedBrightness {
+            UIScreen.main.brightness = b
+            savedBrightness = nil
+        }
+    }
 
     var body: some View {
         if let modules = EAN13.modules(code) {
@@ -56,17 +75,10 @@ struct ClientCardBlock: View {
             .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .padding(.horizontal, YMSpace.xl)
             .padding(.top, YMSpace.lg)
-            .onAppear {
-                if savedBrightness == nil {
-                    savedBrightness = UIScreen.main.brightness
-                    UIScreen.main.brightness = 1.0
-                }
-            }
-            .onDisappear {
-                if let b = savedBrightness {
-                    UIScreen.main.brightness = b
-                    savedBrightness = nil
-                }
+            .onAppear { onScreen = true; raiseBrightness() }
+            .onDisappear { onScreen = false; restoreBrightness() }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { if onScreen { raiseBrightness() } } else { restoreBrightness() }
             }
         }
     }

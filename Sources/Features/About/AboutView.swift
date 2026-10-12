@@ -8,7 +8,10 @@ import SwiftUI
 
 struct AboutView: View {
     private struct Feature: Identifiable {
-        let id = UUID(); let icon: String; let title: String; let text: String
+        // Ключ — заголовок, а не UUID(): список пересоздаётся при каждой сборке
+        // экрана, и новые UUID заставляли SwiftUI считать все строки новыми.
+        var id: String { title }
+        let icon: String; let title: String; let text: String
     }
 
     private let features: [Feature] = [

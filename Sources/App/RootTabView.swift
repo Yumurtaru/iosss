@@ -65,7 +65,9 @@ struct RootTabView: View {
                 // Корзина как вкладка (Корзина → Оформление → Успех) через CartFlow.
                 CartFlow(
                     onClose: { tab = 0 },
-                    onTrackOrder: { id in coord.pendingOrderDetail = id; tab = 3 }
+                    onTrackOrder: { id in coord.pendingOrderDetail = id; tab = 3 },
+                    // Во вкладке «Меню» вело на Главную, а не в заведение корзины.
+                    openShopOnMenu: true
                 )
                     .tabItem { Label("Корзина", systemImage: "cart.fill") }
                     .tag(2)
@@ -107,6 +109,9 @@ struct RootTabView: View {
                 .environmentObject(router)
                 .environmentObject(coord)
                 .environmentObject(Session.shared)
+                // Заведение из «Жилья»: общие корзина/диалог отсюда не видны —
+                // экран заведения показывает их сам (см. ymNestedPresentation).
+                .environment(\.ymNestedPresentation, true)
             }
         }
         .tint(YMColor.accent)
@@ -120,13 +125,20 @@ struct RootTabView: View {
         }
         // Холодный старт из пуша о заказе: значение выставлено до появления
         // экрана, onChange на него не срабатывает.
-        .onAppear { if coord.pendingOrderDetail != nil { tab = 3 }; presentReferralIfPossible() }
+        .onAppear {
+            if coord.pendingOrderDetail != nil { tab = 3 }
+            // П-21.1: холодный старт из push объявления — вкладка выставлена до
+            // появления экрана, onChange(requestedTab) на неё не сработал.
+            else if let t = router.requestedTab { tab = t; router.requestedTab = nil }
+            presentReferralIfPossible()
+        }
         .onChange(of: router.referralCode) { _ in presentReferralIfPossible() }
         // Гость перешёл по ссылке — код ждёт входа.
         .onChange(of: session.isLoggedIn) { _ in presentReferralIfPossible() }
         .onChange(of: coord.showCart) { _ in presentReferralIfPossible() }
         .onChange(of: coord.showLodging) { _ in presentReferralIfPossible() }
         .onChange(of: orgShown) { _ in presentReferralIfPossible() }
+        .onChange(of: coord.profileOpen) { _ in presentReferralIfPossible() }
         // ── Корзина, конфликт корзины и чат ──
         // Пока открыта организация из пуша/ссылки (cover ниже), эти окна
         // показывает сам cover: SwiftUI не открывает второй cover/sheet с той
@@ -221,7 +233,9 @@ private struct GlobalPresenters: ViewModifier {
                 NavigationStack {
                     Group {
                         if let id = coord.chatOrderId, id > 0 {
-                            ChatView(orderId: id)
+                            // .id: push о чате ДРУГОГО заказа при открытой шторке —
+                            // новый экран, иначе @StateObject держал прежний чат.
+                            ChatView(orderId: id).id(id)
                         } else {
                             ChatView.list          // id == -1 → общий список чатов
                         }
@@ -243,8 +257,10 @@ struct ReferralPrompt: Identifiable { let code: String; var id: String { code } 
 extension RootTabView {
     fileprivate func presentReferralIfPossible() {
         // Под обложкой (организация, корзина, жильё) лист не покажется — ждём.
+        // Профиль — тоже шторка: под ней лист приглашения не открывался, а код
+        // уже был снят с роутера и пропадал (бонус за приглашение не начислялся).
         guard let c = router.referralCode, !c.isEmpty, session.isLoggedIn,
-              !orgShown, !coord.showCart, !coord.showLodging else { return }
+              !orgShown, !coord.showCart, !coord.showLodging, !coord.profileOpen else { return }
         router.referralCode = nil
         tab = 0
         referralPrompt = ReferralPrompt(code: c)

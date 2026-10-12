@@ -43,6 +43,9 @@ struct OrgBookingSection: View {
 
     @State private var days: [DayOption] = OrgBookingSection.nearestDays(7)
     @State private var selectedDate: String = ""
+    @Environment(\.scenePhase) private var scenePhase
+    /// Приложение уходило в фон (а не просто шторка уведомлений сверху).
+    @State private var wasInBackground = false
     @State private var selected: ServiceItem?
 
     @State private var slots: [Slot] = []
@@ -96,7 +99,14 @@ struct OrgBookingSection: View {
                         }
                     }
                 } else if let e = error, !e.isEmpty {
-                    BookingNotice(text: e)
+                    // Ошибка загрузки услуг — с «Повторить»: раньше повторить можно
+                    // было только выйдя из заведения и зайдя снова.
+                    VStack(spacing: 8) {
+                        BookingNotice(text: e)
+                        Button("Повторить") { Task { await loadServices() } }
+                            .font(.system(size: 14.5, weight: .bold))
+                            .foregroundStyle(YMColor.accent)
+                    }
                 } else if services.isEmpty {
                     BookingNotice(text: "Услуги появятся позже")
                 } else {
@@ -130,7 +140,28 @@ struct OrgBookingSection: View {
         .opacity(hideWhenEmpty && !loading && services.isEmpty ? 0 : 1)
         .frame(height: hideWhenEmpty && !loading && services.isEmpty ? 0 : nil)
         .clipped()
-        .task { if selectedDate.isEmpty { selectedDate = days.first?.value ?? "" }; await loadServices() }
+        // Услуги — только если их ещё нет (или была ошибка): .task срабатывает и при
+        // возврате с карточки товара, и раньше весь блок мигал скелетоном, а
+        // меню под ним прыгало.
+        .task {
+            refreshDaysIfStale(); if selectedDate.isEmpty { selectedDate = days.first?.value ?? "" }
+            if services.isEmpty || error != nil { await loadServices() }
+        }
+        // Вернулись в приложение на следующий день — дни пересчитываем.
+        // Вернулись из фона — свободное время перечитываем: за это время окна
+        // могли занять, и человек выбирал уже занятое (отказ на подтверждении).
+        // День сменился — перечитает onChange даты. При открытом подтверждении
+        // не трогаем: цена в нём считается по текущему списку окон.
+        .onChange(of: scenePhase) { phase in
+            if phase == .background { wasInBackground = true }
+            guard phase == .active else { return }
+            let before = selectedDate
+            refreshDaysIfStale()
+            if wasInBackground, before == selectedDate, selected != nil, sheet == nil {
+                Task { await loadSlots() }
+            }
+            wasInBackground = false
+        }
         .sheet(item: $sheet) { s in
             switch s {
             case .confirm(let slot): confirmSheet(slot: slot)
@@ -224,7 +255,14 @@ struct OrgBookingSection: View {
             HStack { Spacer(); ProgressView().tint(YMColor.accent); Spacer() }
                 .padding(.vertical, 8)
         } else if let e = slotsError, !e.isEmpty {
-            Text(e).font(.system(size: 14.5)).foregroundStyle(YMColor.muted)
+            // Повтор по нажатию: раньше после сбоя оставалось только переключать
+            // день туда-обратно.
+            Button { Task { await loadSlots() } } label: {
+                Text("\(e). Нажмите, чтобы повторить")
+                    .font(.system(size: 14.5)).foregroundStyle(YMColor.statusCancel)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
         } else if slots.isEmpty {
             Text("На эту дату нет свободных слотов")
                 .font(.system(size: 14.5)).foregroundStyle(YMColor.muted)
@@ -237,6 +275,8 @@ struct OrgBookingSection: View {
                     .font(.system(size: 14.5)).foregroundStyle(YMColor.muted)
             } else {
                 SlotGrid(slots: startableSlots, showFree: (selected?.capacityValue ?? 1) > 1) { slot in
+                    // Отказ прошлой попытки («окно занято») не висит над новой.
+                    actionMessage = nil
                     if Session.shared.isLoggedIn { sheet = .confirm(slot) } else { onNeedAuth() }
                 }
             }
@@ -383,6 +423,9 @@ struct OrgBookingSection: View {
                     sheet = nil
                     actionMessage = error.localizedDescription
                 }
+                // Окно могли занять, пока человек подтверждал: перечитываем свободное
+                // время, иначе занятое окно оставалось в списке и отказ повторялся.
+                await loadSlots()
             }
         }
     }
@@ -403,6 +446,16 @@ struct OrgBookingSection: View {
     }
 
     // MARK: Ближайшие дни
+
+    /// Дни строились один раз при открытии экрана. Организация, оставленная
+    /// открытой до утра (или в фоне), показывала «Сегодня» на вчерашнюю дату:
+    /// окна грузились за прошедший день, записаться было нельзя.
+    private func refreshDaysIfStale() {
+        let fresh = OrgBookingSection.nearestDays(7)
+        guard fresh.first?.value != days.first?.value else { return }
+        days = fresh
+        if !fresh.contains(where: { $0.value == selectedDate }) { selectedDate = fresh.first?.value ?? "" }
+    }
 
     fileprivate static func nearestDays(_ count: Int) -> [DayOption] {
         var cal = Calendar(identifier: .gregorian)
@@ -869,6 +922,10 @@ private struct ConfirmBookingSheet: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .presentationDetents(atClient ? [.large] : [.medium])
+        // Пока запись отправляется, шторку не смахнуть: «Отмена» уже выключена,
+        // а жестом окно закрывалось, человек выбирал другое время, и пришедший
+        // ответ первой записи подменял новое окно экраном «Вы записаны».
+        .interactiveDismissDisabled(confirming)
     }
 
     // MARK: Куда приехать
@@ -960,8 +1017,11 @@ private struct SuccessBookingSheet: View {
     private var summary: String? {
         guard let r = info else { return nil }
         var when: [String] = []
-        if let d = r.date, !d.isEmpty { when.append(d) }
+        // Дата приходит как в базе («2026-10-12») — человеку пишем «12 октября»;
+        // время «19:00:00» — без секунд. Неожиданный вид печатаем как есть.
+        if let d = r.date, !d.isEmpty { when.append(DateFmt.day(d) != nil ? fmtDateHuman(String(d.prefix(10))) : d) }
         let t = [r.time, r.timeEnd].compactMap { $0 }.filter { !$0.isEmpty }
+            .map { s in s.count == 8 && s.filter({ ch in ch == ":" }).count == 2 ? String(s.prefix(5)) : s }
         if !t.isEmpty { when.append(t.joined(separator: "–")) }
         var what: [String] = []
         if (r.guests ?? 1) > 1 { what.append("\(r.guests ?? 1) чел.") }

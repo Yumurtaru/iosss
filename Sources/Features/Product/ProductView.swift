@@ -59,7 +59,13 @@ final class ProductViewModel: ObservableObject {
         case .product:
             guard let id = productId else { error = "Нет данных товара"; loading = false; return }
             do {
-                detail = try await API.shared.get("api/v1/products/\(id)")
+                let d: ProductDetail = try await API.shared.get("api/v1/products/\(id)")
+                detail = d
+                // «Недавно смотрели» во вкладке «Поиск» читает RecentStore, но
+                // записи туда не делал никто — раздел всегда был пустым.
+                RecentStore.add(RecentProduct(id: d.id, name: d.name ?? "",
+                                              photo: d.photos?.first?.pathWebp,
+                                              price: d.price, shopId: d.shopId, shopName: d.shopName))
             } catch is CancellationError {
             } catch {
                 self.error = error.localizedDescription
@@ -142,6 +148,13 @@ struct ProductView: View {
     @State private var selectedSlot: Int?              // id слота
     @State private var homeVisit = false
 
+    /// Карточка открыта в шторке профиля («Избранное») или в «Жилье»: общий
+    /// диалог «Начать новую корзину?» рисуется на корне вкладок ПОД шторкой —
+    /// «В корзину» с товаром другого заведения молча ничего не делала. Тогда
+    /// диалог показываем на самой карточке.
+    @Environment(\.ymNestedPresentation) private var nested
+    @State private var localConflict = false
+
     init(id: Int) { _vm = StateObject(wrappedValue: ProductViewModel(id: id)) }
     init(product: Product) { _vm = StateObject(wrappedValue: ProductViewModel(product: product)) }
     init(service: ServiceItem, shopName: String?) {
@@ -165,6 +178,12 @@ struct ProductView: View {
             topControls
         }
         .navigationBarHidden(true)
+        .cartConflictDialog(
+            isPresented: $localConflict,
+            currentShop: cart.shopName,
+            newShop: vm.detail?.shopName,
+            onConfirm: { if let d = vm.detail { commitAdd(d) } }
+        )
         .sheet(isPresented: $showAuth) {
             NavigationStack {
                 AuthView(onAuthed: { showAuth = false })
@@ -175,18 +194,23 @@ struct ProductView: View {
         // грузит её отдельно). Пресет веса и стартовое количество подбираем на
         // КАЖДОЕ появление детали: иначе после повторной загрузки весовой товар
         // оставался с нулевым весом, и в корзину уходило «× 0» по нулевой цене.
-        .onChange(of: vm.detail?.id) { _ in syncQtyDefaults() }
+        // Предвыбор обязательных вариантов — тоже на появление детали: после
+        // «Повторить» в ошибке он не выполнялся, и «В корзину» оставалась серой.
+        .onChange(of: vm.detail?.id) { _ in syncQtyDefaults(); preselectRequired() }
         .task {
             await vm.load()
             syncQtyDefaults()
-            // Обязательная радио-группа: предвыбираем первый вариант (как в Android).
-            if let d = vm.detail {
-                for g in d.modifierGroups ?? [] where g.isRequired == true
-                    && ((g.type ?? "") == "single" || (g.maxQty ?? 0) == 1) {
-                    if selectedRadio[g.id] == nil, let first = g.options?.first { selectedRadio[g.id] = first.id }
-                }
-            }
+            preselectRequired()
             await loadFav()
+        }
+    }
+
+    /// Обязательная радио-группа: предвыбираем первый вариант (как в Android).
+    private func preselectRequired() {
+        guard let d = vm.detail else { return }
+        for g in d.modifierGroups ?? [] where g.isRequired == true
+            && ((g.type ?? "") == "single" || (g.maxQty ?? 0) == 1) {
+            if selectedRadio[g.id] == nil, let first = g.options?.first { selectedRadio[g.id] = first.id }
         }
     }
 
@@ -350,7 +374,7 @@ struct ProductView: View {
                 }
                 VStack(spacing: 8) {
                     ForEach(g.options ?? []) { opt in
-                        radioRow(opt, groupId: g.id, groupOptions: g.options ?? [])
+                        radioRow(opt, groupId: g.id, groupOptions: g.options ?? [], required: g.isRequired == true)
                     }
                 }
             }
@@ -502,11 +526,14 @@ struct ProductView: View {
     }
 
     /// Радио-строка: выбранная — золотая рамка + золотая точка.
-    private func radioRow(_ opt: ModifierOption, groupId: Int, groupOptions: [ModifierOption]) -> some View {
+    private func radioRow(_ opt: ModifierOption, groupId: Int, groupOptions: [ModifierOption], required: Bool = false) -> some View {
         let selected = selectedRadio[groupId] == opt.id
         return Button {
             Haptics.selection()
-            selectedRadio[groupId] = opt.id
+            // Необязательная группа («Не обязательно»): повторное нажатие снимает
+            // выбор. Раньше однажды выбранную платную добавку убрать было нельзя —
+            // только закрыть карточку и открыть заново.
+            if selected && !required { selectedRadio[groupId] = nil } else { selectedRadio[groupId] = opt.id }
         } label: {
             HStack(spacing: 12) {
                 Text(opt.name ?? "—")
@@ -702,7 +729,12 @@ struct ProductView: View {
             Spacer()
             // Сердечко товара показываем только в режиме товара (у услуги избранного нет).
             if vm.mode == .product {
-                HeartButton(isFav: $isFav, size: 38, favColor: YMColor.statusCancel)
+                // Гостю — сначала вход: раньше сердечко загоралось, запрос получал
+                // 401 и молча гасло обратно, без объяснения.
+                HeartButton(isFav: Binding(
+                    get: { isFav },
+                    set: { v in if Session.shared.isLoggedIn { isFav = v } else { showAuth = true } }
+                ), size: 38, favColor: YMColor.statusCancel)
                     .onChange(of: isFav) { _ in toggleFav() }
             }
         }
@@ -972,6 +1004,7 @@ struct ProductView: View {
         // Инвариант single-store: если корзина занята ДРУГИМ магазином — просим
         // подтверждение через глобальный диалог, и только по «Очистить» добавляем.
         if let cur = cart.shopId, cur != newShopId, !cart.isEmpty {
+            if nested { localConflict = true; return }
             coord.requestCartConflict(
                 currentShop: cart.shopName,
                 newShop: d.shopName,

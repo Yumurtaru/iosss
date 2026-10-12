@@ -23,6 +23,8 @@ struct OrgReviewsSection: View {
     let error: String?
     let avgRating: Double?
     let reviewsCount: Int?
+    /// «Повторить» после сбоя загрузки. nil — кнопки нет (как раньше).
+    var onRetry: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -68,12 +70,22 @@ struct OrgReviewsSection: View {
                         }
                     }
                 } else if let e = error, !e.isEmpty {
-                    ReviewsNotice(text: "Не удалось загрузить отзывы")
+                    // Сбой — с причиной и «Повторить»: раньше отзывы возвращались
+                    // только после перезахода в заведение.
+                    VStack(spacing: 8) {
+                        ReviewsNotice(text: "Не удалось загрузить отзывы: \(e)")
+                        if let retry = onRetry {
+                            Button("Повторить", action: retry)
+                                .font(.system(size: 14.5, weight: .bold))
+                                .foregroundStyle(YMColor.accent)
+                        }
+                    }
                 } else if reviews.isEmpty {
                     ReviewsNotice(text: "Пока нет отзывов. Будьте первым!")
                 } else {
                     VStack(spacing: 10) {
-                        ForEach(reviews.prefix(2)) { r in OrgReviewCard(review: r) }
+                        // По позиции: Review.id («автор-дата») бывает одинаковым у разных отзывов.
+                        ForEach(Array(reviews.prefix(2).enumerated()), id: \.offset) { _, r in OrgReviewCard(review: r) }
                     }
                     if reviews.count > 2 {
                         NavigationLink {
@@ -99,8 +111,25 @@ struct OrgReviewsSection: View {
 
 // MARK: - Карточка отзыва
 
+/// П-21.4: тело жалобы на отзыв — POST api/v1/complaints (snake_case сам).
+private struct ReviewComplaintBody: Encodable {
+    let targetType: String
+    let targetId: Int
+    let reason: String
+}
+
+/// П-21.4: причины жалобы — уходят текстом в reason.
+private let reviewReportReasons = ["Спам", "Оскорбление", "Неправда", "Другое"]
+
 struct OrgReviewCard: View {
     let review: Review
+
+    // П-21.4: жалоба на отзыв. «Отправлено» помним по id отзыва, а не по
+    // позиции карточки: после перезагрузки списка на месте может быть другой.
+    @State private var showReport = false
+    @State private var reportSending = false
+    @State private var reportSentFor: Int?
+    @State private var reportError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -163,12 +192,69 @@ struct OrgReviewCard: View {
                 .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .padding(.top, 10)
             }
+
+            // П-21.4: «Пожаловаться» — только если сервер прислал id отзыва и
+            // человек вошёл (жалоба гостя дала бы 401).
+            if let rid = review.serverId, Session.shared.isLoggedIn {
+                HStack(spacing: 6) {
+                    Spacer(minLength: 0)
+                    if reportSentFor == rid || ReviewComplaints.sent.contains(rid) {
+                        Text("Жалоба отправлена")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(YMColor.statusDone)
+                    } else if reportSending {
+                        ProgressView()
+                    } else {
+                        Button { Haptics.light(); showReport = true } label: {
+                            Text("Пожаловаться")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(YMColor.muted)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.top, 8)
+                if let e = reportError {
+                    Text(e)
+                        .font(.system(size: 12))
+                        .foregroundStyle(YMColor.statusCancel)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.top, 4)
+                }
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(YMColor.hairline, lineWidth: 1))
+        .confirmationDialog("Пожаловаться на отзыв", isPresented: $showReport, titleVisibility: .visible) {
+            ForEach(reviewReportReasons, id: \.self) { r in
+                Button(r) { Task { await sendReport(reason: r) } }
+            }
+            Button("Отмена", role: .cancel) {}
+        }
+    }
+
+    /// П-21.4: POST api/v1/complaints {target_type:"review", target_id, reason}.
+    /// Повторное нажатие во время отправки не шлёт вторую жалобу.
+    @MainActor
+    private func sendReport(reason: String) async {
+        guard let rid = review.serverId, !reportSending, reportSentFor != rid,
+              !ReviewComplaints.sent.contains(rid) else { return }
+        reportSending = true; reportError = nil
+        defer { reportSending = false }
+        do {
+            try await API.shared.postVoid("api/v1/complaints",
+                body: ReviewComplaintBody(targetType: "review", targetId: rid, reason: reason))
+            Haptics.success()
+            ReviewComplaints.sent.insert(rid)
+            reportSentFor = rid
+        } catch is CancellationError {
+        } catch {
+            Haptics.error()
+            reportError = (error as? LocalizedError)?.errorDescription ?? "Не удалось отправить жалобу"
+        }
     }
 }
 
@@ -246,4 +332,11 @@ private func fmtReviewDate(_ raw: String) -> String {
     let p = datePart.split(separator: "-").map(String.init)
     if p.count == 3, p[0].count == 4 { return "\(p[2]).\(p[1]).\(p[0])" }
     return datePart
+}
+
+/// Отзывы, на которые уже пожаловались в этом запуске. Карточка на странице заведения
+/// и полный список — разные экземпляры: без общего списка можно было отправить
+/// вторую жалобу на тот же отзыв.
+enum ReviewComplaints {
+    static var sent = Set<Int>()
 }

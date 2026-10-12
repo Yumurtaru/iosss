@@ -78,7 +78,7 @@ private struct SearchSmartResult: Decodable { let shops: [Shop]?; let products: 
 private enum DiscoverRoute: Hashable {
     case shop(Shop)
     case product(Int)
-    case listing(orgType: String, title: String)
+    case listing(orgType: String, title: String, categoryId: Int?)
 }
 
 private struct SearchSection: View {
@@ -93,12 +93,18 @@ private struct SearchSection: View {
     /// Поиск не выполнился (сеть/сервер) — раньше показывалось «Ничего не найдено».
     @State private var searchFailed = false
     @State private var searchTask: Task<Void, Never>?
-    @State private var history: [String] = SearchHistoryStore.load()
-    @State private var recent: [RecentProduct] = RecentStore.load()
+    // Пустые на старте — заполняет .onAppear ниже. Начальное значение @State
+    // вычисляется при КАЖДОЙ пересборке экрана (а она идёт с корня вкладок при
+    // любом изменении корзины, сети, сессии): чтение настроек и разбор JSON
+    // «недавно смотрели» шли на главном потоке впустую — результат отбрасывался.
+    @State private var history: [String] = []
+    @State private var recent: [RecentProduct] = []
 
     // Локальные избранные (оптимистично; toggle синхронизируется с сервером).
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
+    /// Гость нажал ♥ — сначала вход (избранное хранится в аккаунте).
+    @State private var showAuth = false
 
     // Навигация внутри своего NavigationStack: одно состояние на переход.
     @State private var route: DiscoverRoute?
@@ -170,6 +176,15 @@ private struct SearchSection: View {
         // аккаунта показывали чужие).
         .onAppear { history = SearchHistoryStore.load(); recent = RecentStore.load() }
         .onChange(of: q) { _ in scheduleSearch() }
+        // Сменили город на Главной — результаты прежнего города под тем же
+        // запросом оставались до следующей буквы. Ищем заново.
+        .onChange(of: session.cityId) { _ in scheduleSearch() }
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                AuthView(onAuthed: { showAuth = false })
+            }
+            .environmentObject(Session.shared)
+        }
     }
 
     // ── Поле ввода с золотой рамкой + «Отмена» ──
@@ -329,6 +344,12 @@ private struct SearchSection: View {
                 Text(p.name ?? "—")
                     .font(.system(size: 13.5, weight: .bold))
                     .foregroundStyle(YMColor.text).lineLimit(1)
+                // П-22.3: из какого заведения товар (поле необязательное).
+                if let sn = p.shopName?.trimmingCharacters(in: .whitespaces), !sn.isEmpty {
+                    Text(sn)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(YMColor.muted).lineLimit(1)
+                }
                 Text(Money.format(Money.parse(p.price)))
                     .font(.system(size: 12))
                     .foregroundStyle(YMColor.muted)
@@ -408,6 +429,9 @@ private struct SearchSection: View {
 
     private func favProduct(_ id: Int) -> Binding<Bool> {
         Binding(get: { favProducts.contains(id) }, set: { on in
+            // Гостю — вход: раньше сердечко загоралось, запрос получал 401 и
+            // молча гасло обратно, без объяснения.
+            guard session.isLoggedIn else { showAuth = true; return }
             if on { favProducts.insert(id) } else { favProducts.remove(id) }
             Task { await toggleProductFav(id, on: on) }
         })
@@ -431,10 +455,16 @@ private struct SearchSection: View {
         if let cid = session.cityId { params["city_id"] = String(cid) }   // глобально по городу
         do {
             let r: SearchSmartResult = try await API.shared.get("api/v1/search/smart", query: params)
+            // Ответ пришёл, а запрос уже сменили (набрали букву, стёрли поле):
+            // отмена не успела оборвать запрос, и результаты прежнего запроса
+            // ложились под новый текст. Новый поиск сам выставит свои.
+            if Task.isCancelled || query != trimmed { return }
             shops = r.shops ?? []; products = r.products ?? []
         } catch {
             // Отмена (набрали следующую букву) — не «ничего не найдено».
-            if Task.isCancelled || error is CancellationError { return }
+            // Но и вечную крутилку не оставляем: ушли с экрана посреди поиска —
+            // при возврате индикатор висел до следующей буквы.
+            if Task.isCancelled || error is CancellationError { loading = false; return }
             shops = []; products = []; searchFailed = true
         }
         loading = false
@@ -541,10 +571,13 @@ private struct CategoriesSection: View {
                                             GridItem(.flexible(), spacing: YMSpace.md)],
                                   spacing: YMSpace.md) {
                             ForEach(Array(cats.enumerated()), id: \.element.id) { idx, cat in
-                                CategoryTile(category: cat, tone: idx) {
+                                CategoryTile(category: cat, tone: idx, tab: tab) {
                                     Haptics.selection()
+                                    // id категории — в листинг: раньше открывался весь
+                                    // раздел под названием категории (как Android — с фильтром).
                                     route = .listing(orgType: tab.apiType,
-                                                     title: cat.name ?? tab.title)
+                                                     title: cat.name ?? tab.title,
+                                                     categoryId: cat.id)
                                 }
                             }
                         }
@@ -559,8 +592,8 @@ private struct CategoriesSection: View {
                 get: { route != nil }, set: { if !$0 { route = nil } }
             )) {
                 switch route {
-                case .listing(let type, let title):
-                    ListingView(orgType: type, title: title, cityId: session.cityId)
+                case .listing(let type, let title, let categoryId):
+                    ListingView(orgType: type, title: title, cityId: session.cityId, categoryId: categoryId)
                 default:
                     EmptyView()
                 }
@@ -590,9 +623,14 @@ private struct CategoriesSection: View {
 
     private func load() async {
         loading = true
-        var q: [String: String] = ["type": tab.apiType]
+        let forTab = tab
+        var q: [String: String] = ["type": forTab.apiType]
         if let cid = session.cityId { q["city_id"] = String(cid) }
-        cats = (try? await API.shared.list("api/v1/org-categories/with-counts", query: q)) ?? []
+        let list: [OrgCategory] = (try? await API.shared.list("api/v1/org-categories/with-counts", query: q)) ?? []
+        // «Магазины» → сразу «Услуги»: опоздавший ответ по магазинам ложился под
+        // вкладку «Услуги», и плитка открывала листинг не того раздела.
+        guard forTab == tab else { return }
+        cats = list
         loading = false
     }
 }
@@ -601,6 +639,8 @@ private struct CategoriesSection: View {
 private struct CategoryTile: View {
     let category: OrgCategory
     var tone: Int = 0
+    /// Раздел плитки: слово счётчика своё — у «Еды» и «Услуг» было «12 магазинов».
+    fileprivate var tab: CatTab = .shops
     var onTap: () -> Void = {}
 
     // Счётчик «128 магазинов» с корректным склонением.
@@ -610,9 +650,15 @@ private struct CategoryTile: View {
     }
     private func plural(_ n: Int) -> String {
         let m10 = n % 10, m100 = n % 100
-        if m10 == 1 && m100 != 11 { return "магазин" }
-        if (2...4).contains(m10) && !(12...14).contains(m100) { return "магазина" }
-        return "магазинов"
+        let forms: (String, String, String)
+        switch tab {
+        case .shops:    forms = ("магазин", "магазина", "магазинов")
+        case .services: forms = ("организация", "организации", "организаций")
+        case .food:     forms = ("заведение", "заведения", "заведений")
+        }
+        if m10 == 1 && m100 != 11 { return forms.0 }
+        if (2...4).contains(m10) && !(12...14).contains(m100) { return forms.1 }
+        return forms.2
     }
 
     var body: some View {
@@ -790,14 +836,21 @@ private struct FavoritesSection: View {
         error = nil
         // try? здесь больше нет: сбой должен быть виден, а не выглядеть как
         // пустое избранное.
+        // Отмена (ушли на карточку, «Повторить» во время загрузки) — не ошибка:
+        // раньше список стирался и показывалось английское
+        // «The operation couldn't be completed (Swift.CancellationError…)».
         do {
             shops = try await API.shared.list("api/v1/favorites")
+        } catch is CancellationError {
+            return   // следующий запуск .task загрузит заново
         } catch {
             shops = []
             self.error = "Не удалось загрузить избранное: \(error.localizedDescription)"
         }
         do {
             products = try await API.shared.list("api/v1/product-favorites")
+        } catch is CancellationError {
+            return   // следующий запуск .task загрузит заново
         } catch {
             products = []
             // Ошибку первого запроса не затираем: показываем ту, что случилась раньше.
@@ -911,11 +964,17 @@ private struct FavProductCard: View {
                     Text(product.name ?? "—")
                         .font(.system(size: 16, weight: .heavy))
                         .foregroundStyle(YMColor.text).lineLimit(1)
+                    // П-22.3: заведение товара (поле необязательное).
+                    if let sn = product.shopName?.trimmingCharacters(in: .whitespaces), !sn.isEmpty {
+                        Text(sn)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(YMColor.muted).lineLimit(1)
+                    }
                     HStack(spacing: 8) {
                         Text(Money.format(Money.parse(product.price)))
                             .font(.system(size: 14, weight: .heavy))
                             .foregroundStyle(YMColor.accent)
-                        if let old = product.oldPrice, old > (product.price ?? 0) {
+                        if let old = product.oldPriceAny, old > (product.price ?? 0) {
                             Text(Money.format(Money.parse(old)))
                                 .font(.system(size: 12))
                                 .strikethrough()

@@ -40,19 +40,45 @@ final class AdDetailViewModel: ObservableObject {
         loading = false
     }
 
+    /// Запросы в полёте. Двойной тап «Показать телефон» засчитывал владельцу два
+    /// обращения (сервер считает каждое), а двойной тап сердечка переключал
+    /// избранное туда и обратно — в итоге ничего не менялось.
+    private var phoneBusy = false
+    private var favBusy = false
+
     func showPhone(_ id: Int) async {
-        if let r = try? await API.shared.adContact(id), let p = r.phone, !p.isEmpty { phone = p }
-        else { toast = "Телефон недоступен" }
+        guard !phoneBusy else { return }
+        phoneBusy = true
+        defer { phoneBusy = false }
+        // Причина отказа словами (нет связи, лимит 429, объявление снято): раньше
+        // любой сбой показывался как «Телефон недоступен», и человек не повторял.
+        do {
+            let r = try await API.shared.adContact(id)
+            if let p = r.phone, !p.isEmpty { phone = p } else { toast = "Телефон недоступен" }
+        } catch is CancellationError {
+        } catch {
+            toast = (error as? LocalizedError)?.errorDescription ?? "Телефон недоступен"
+        }
     }
 
     func toggleFavorite(_ id: Int) async {
-        if let r = try? await API.shared.adFavorite(id) { favorite = r.favorite ?? favorite }
-        else { toast = "Не удалось изменить избранное" }
+        guard !favBusy else { return }
+        favBusy = true
+        defer { favBusy = false }
+        // Текст сервера/сети вместо одного общего «Не удалось…».
+        do {
+            let r = try await API.shared.adFavorite(id)
+            favorite = r.favorite ?? favorite
+        } catch is CancellationError {
+        } catch {
+            toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось изменить избранное"
+        }
     }
 
     func report(_ id: Int, reason: String) async {
         do { try await API.shared.adReport(id, reason: reason, comment: nil); toast = "Жалоба отправлена, спасибо" }
-        catch { toast = "Не удалось отправить жалобу" }
+        // Текст сервера («Вы уже жаловались…», лимит, сессия) вместо одного общего.
+        catch { toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось отправить жалобу" }
     }
 }
 
@@ -63,6 +89,14 @@ struct AdDetailView: View {
     @State private var showReport = false
     @State private var reason = adReportReasons[0].0
     @Environment(\.openURL) private var openURL
+    /// Телефон, избранное и жалоба требуют входа (сервер отвечает 401). Гость
+    /// раньше видел «Телефон недоступен» / «Не удалось…» и не знал, что надо войти.
+    @State private var showAuth = false
+    private func needsAuth() -> Bool {
+        if Session.shared.isLoggedIn { return false }
+        showAuth = true
+        return true
+    }
 
     var body: some View {
         Group {
@@ -87,8 +121,20 @@ struct AdDetailView: View {
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .background(YMColor.text.opacity(0.9), in: Capsule())
                     .padding(.bottom, YMSpace.lg)
-                    .task { try? await Task.sleep(nanoseconds: 2_500_000_000); vm.toast = nil }
+                    // Свой таймер у каждого сообщения: таймер прежнего тоста гасил новый раньше срока.
+                    .task(id: t) {
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        if !Task.isCancelled { vm.toast = nil }
+                    }
             }
+        }
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                // После входа перечитываем объявление: у гостя «В избранном»
+                // всегда false, и первое нажатие сердечка снимало уже избранное.
+                AuthView(onAuthed: { showAuth = false; Task { await vm.load(adId) } })
+            }
+            .environmentObject(Session.shared)
         }
         .confirmationDialog("Пожаловаться", isPresented: $showReport, titleVisibility: .visible) {
             ForEach(adReportReasons, id: \.0) { value, label in
@@ -116,6 +162,10 @@ struct AdDetailView: View {
                     if let u = API.imageURL(shown) {
                         CachedAsyncImage(url: u) { phase in
                             if let img = phase.image { img.resizable().aspectRatio(contentMode: .fit) }
+                            // П-19.2: файла нет (404) — заглушка, а не вечная крутилка.
+                            else if case .failure = phase {
+                                Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(YMColor.muted)
+                            }
                             else { ProgressView() }
                         }
                     } else {
@@ -147,7 +197,8 @@ struct AdDetailView: View {
                     Text(a.priceText ?? "").font(YMFont.largeTitle).foregroundStyle(YMColor.text)
                     Text(a.title ?? "").font(YMFont.title3).foregroundStyle(YMColor.text)
                     Text([
-                        a.categoryName, a.city, "\(a.viewsCount ?? 0) просмотров",
+                        // Склонение: «1 просмотр», «3 просмотра» — раньше всегда «просмотров».
+                        a.categoryName, a.city, LodgingDate.plural(a.viewsCount ?? 0, "просмотр", "просмотра", "просмотров"),
                     ].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "))
                         .font(YMFont.caption).foregroundStyle(YMColor.muted)
                 }
@@ -164,6 +215,7 @@ struct AdDetailView: View {
                     }
                 } else {
                     Button {
+                        if needsAuth() { return }
                         Task { await vm.showPhone(adId) }
                     } label: {
                         Label("Показать телефон", systemImage: "phone.fill")
@@ -175,13 +227,14 @@ struct AdDetailView: View {
 
                 HStack(spacing: YMSpace.md) {
                     Button {
+                        if needsAuth() { return }
                         Task { await vm.toggleFavorite(adId) }
                     } label: {
                         Label(vm.favorite ? "В избранном" : "В избранное",
                               systemImage: vm.favorite ? "heart.fill" : "heart")
                             .font(YMFont.callout).foregroundStyle(YMColor.accent)
                     }
-                    Button { showReport = true } label: {
+                    Button { if !needsAuth() { showReport = true } } label: {
                         Label("Пожаловаться", systemImage: "flag")
                             .font(YMFont.callout).foregroundStyle(YMColor.muted)
                     }

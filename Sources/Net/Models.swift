@@ -181,10 +181,16 @@ struct OrgApplyBody: Encodable {
     let phone: String
     let type: String            // store | restaurant | service (канон API)
     let cityId: Int?
+    /// П-23.5: почта и код из письма — нужны только НОВОМУ владельцу
+    /// (телефона нет в базе). nil в JSON не попадает.
+    var email: String? = nil
+    var emailCode: String? = nil
 }
 struct OrgApplyResult: Decodable {
     @LenientInt var registrationId: Int?
     let status: String?          // "pending"
+    /// П-23.5: заявка уже подана и ждёт разбора (200 duplicate: true).
+    @LenientBool var duplicate: Bool?
 }
 // ── Лицензия организации ────────────────────────────────────────────────────
 // Медцентр, стоматология, аптека, ветклиника, автошкола обязаны показывать
@@ -300,6 +306,14 @@ struct Product: Codable, Identifiable, Hashable {
     /// Сервер ставит продвинутые товары в начало выдачи поиска — подъём обязан
     /// быть помечен, иначе это неотмеченная реклама.
     @LenientInt var isPromoted: Int?
+    /// Меню магазина (`shops/{slug}/products`) отдаёт старую цену в `price_old`,
+    /// а `old_price` там null: фильтр «Скидки» был всегда пустым.
+    @LenientDouble var priceOld: Double?
+    /// Старая цена из любого из двух ключей.
+    var oldPriceAny: Double? { oldPrice ?? priceOld }
+    /// П-22.3 (А58): название заведения в умном поиске и избранных товарах.
+    /// Нет поля (старый сервер, меню магазина) — nil, строка не показывается.
+    let shopName: String?
 }
 struct ComboItem: Codable {
     let name: String?; @LenientInt var qty: Int?; @LenientDouble var price: Double?; let photo: String?
@@ -350,6 +364,11 @@ struct Order: Codable, Identifiable {
     /// кафе готовит, магазин собирает, салон работает — раньше клиент писал
     /// «Готовится» даже для записи в барбершоп.
     let shopType: String?
+    /// Подпись статуса от сервера (словами типа организации) и способ получения —
+    /// сервер шлёт оба, раньше не читались: неизвестный код статуса показывался
+    /// латиницей, а самовывоз в списке подписывался «доставлен».
+    let statusTitle: String?
+    let deliveryType: String?
 }
 
 /// Запись клиента на услугу — GET api/v1/appointments (экран «Мои записи»).
@@ -467,6 +486,33 @@ struct OrderDetail: Codable, Identifiable {
     /// Ревизия состава и история правок (аддитивно). Пусто — заказ не правили.
     @LenientInt var rev: Int?
     let changes: [OrderChange]?
+    /// Подпись статуса и шаги с временем перехода — сервер шлёт их словами типа
+    /// организации (как читает Android). Раньше не читались: у самовывоза и
+    /// услуг в таймлайне стояли «Курьер в пути» и «Доставлен».
+    let statusTitle: String?
+    let statusTimeline: OrderTimeline?
+    /// П-23.1 (А58): отзыв по заказу. nil — старый сервер, тогда прежняя логика
+    /// (форма у завершённого заказа, 409 при отправке = «уже оставлен»).
+    @LenientBool var hasReview: Bool?
+    @LenientInt var reviewId: Int?
+    @LenientBool var canReview: Bool?
+}
+/// Шаг `status_timeline`: {code, title, at}.
+struct OrderTimelineStep: Codable {
+    let code: String?
+    let title: String?
+    let at: String?
+}
+/// Таймлайн, который не роняет карточку заказа: битый шаг или другая форма
+/// поля дают пустой список, а не «не удалось загрузить заказ».
+struct OrderTimeline: Codable {
+    let steps: [OrderTimelineStep]
+    init(from decoder: Decoder) throws {
+        steps = ((try? [LossyElement<OrderTimelineStep>](from: decoder)) ?? []).compactMap { $0.value }
+    }
+    func encode(to encoder: Encoder) throws { try steps.encode(to: encoder) }
+    /// Шаг по коду статуса (первый с таким кодом).
+    func step(_ code: String) -> OrderTimelineStep? { steps.first { $0.code == code } }
 }
 /// GET api/v1/orders/{id}/track.
 ///
@@ -524,7 +570,8 @@ struct BonusRow: Codable, Identifiable { @LenientInt var id: Int?; @LenientDoubl
 // Баланс баллов по магазину (ответ /profile/bonuses — массив).
 struct BonusShopBalance: Codable { @LenientInt var shopId: Int?; let shop: String?; @LenientDouble var balance: Double? }
 // Операция по баллам (ответ /profile/bonuses/history).
-struct BonusTx: Codable { @LenientInt var id: Int?; let shop: String?; let type: String?; @LenientDouble var amount: Double?; let createdAt: String?
+// П-22.4: amount — строка "10.00", читаем точным Decimal (знак у старых строк бывает неверным).
+struct BonusTx: Codable { @LenientInt var id: Int?; let shop: String?; let type: String?; @LenientDecimal var amount: Decimal?; let createdAt: String?
     var stableId: String { "\(id ?? 0)-\(createdAt ?? "")" } }
 struct AppNotification: Codable, Identifiable { let id: Int; let type: String?; let title: String?; let body: String?; @LenientInt var isRead: Int?; let createdAt: String?
     var read: Bool { (isRead ?? 0) > 0 } }
@@ -541,6 +588,37 @@ struct OrderCreateResult: Codable {
     var gifts: [PromoGift]? = nil
     var pointsSpent: Double? = nil
     var pointsEarned: Double? = nil
+    /// П-22.2 (А58): фактический способ получения, срок в минутах и время
+    /// предзаказа. Всё необязательно: старый сервер и повтор (duplicate) —
+    /// eta = nil, тогда экран успеха срок не показывает.
+    var deliveryType: String? = nil
+    var etaMin: Int? = nil
+    var etaMax: Int? = nil
+    var preorderAt: String? = nil
+
+    enum CodingKeys: String, CodingKey { case id, dailyNumber, orderId, promotions, gifts, pointsSpent, pointsEarned
+        case deliveryType, etaMin, etaMax, preorderAt }
+    /// Когда приходит этот ответ, заказ УЖЕ создан. Раньше любое поле акций не
+    /// того типа (строка "0.00" вместо числа, null в имени акции) роняло разбор
+    /// целиком: человек видел «Не удалось обработать ответ», корзина оставалась,
+    /// и казалось, что заказа нет. Для экрана успеха нужен только номер —
+    /// дополнительные поля разбираем мягко.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        _id = try c.decode(LenientInt.self, forKey: .id)
+        _dailyNumber = try c.decode(LenientInt.self, forKey: .dailyNumber)
+        _orderId = try c.decode(LenientInt.self, forKey: .orderId)
+        promotions = try? c.decodeIfPresent([AppliedPromo].self, forKey: .promotions)
+        gifts = try? c.decodeIfPresent([PromoGift].self, forKey: .gifts)
+        pointsSpent = try c.decode(LenientDouble.self, forKey: .pointsSpent).wrappedValue
+        pointsEarned = try c.decode(LenientDouble.self, forKey: .pointsEarned).wrappedValue
+        // П-22.2: мягко — не того типа = nil, заказ всё равно «оформлен».
+        deliveryType = (try? c.decodeIfPresent(String.self, forKey: .deliveryType)) ?? nil
+        etaMin = try c.decode(LenientInt.self, forKey: .etaMin).wrappedValue
+        etaMax = try c.decode(LenientInt.self, forKey: .etaMax).wrappedValue
+        let pre = (try? c.decodeIfPresent(String.self, forKey: .preorderAt)) ?? nil
+        preorderAt = (pre?.trimmingCharacters(in: .whitespaces).isEmpty ?? true) ? nil : pre
+    }
 }
 // Ответ создания онлайн-платежа (YooKassa). Декодер сам делает snake_case → CodingKeys не нужны.
 struct PayOnlineResp: Codable { let confirmationUrl: String?; let paymentId: String? }
@@ -768,6 +846,8 @@ struct WalletTopupBody: Encodable {
 struct ReturnItem: Codable, Identifiable {
     let id: Int; @LenientInt var orderId: Int?; let type: String?; let reasonCode: String?
     let status: String?; @LenientDouble var refundAmount: Double?; let createdAt: String?; let shop: String?
+    /// П-23.3 (А58): номер заказа за день (как видит клиент). nil — старые заказы/сервер.
+    @LenientInt var orderDailyNumber: Int?
 }
 struct ReturnEligibility: Codable { let eligible: Bool?; @LenientInt var windowHours: Int?; let reason: String? }
 
@@ -782,6 +862,9 @@ struct JobDetail: Codable, Identifiable {
     @LenientDouble var salaryFrom: Double?; @LenientDouble var salaryTo: Double?; let description: String?; let requirements: String?
     let schedule: String?; let employmentType: String?; let experience: String?
     let shop: String?; let shopAddress: String?
+    /// Условия работы и адрес самой вакансии — сервер шлёт, экран не показывал.
+    let conditions: String?
+    let address: String?
 }
 
 // ---- Услуги / запись ----
@@ -938,11 +1021,18 @@ struct Application: Codable, Identifiable { let id: Int; let status: String?; le
 
 // ---- Отзыв (чтение) ----
 struct Review: Codable, Identifiable {
-    var id: String { "\(author ?? "")-\(createdAt ?? "")" }
+    var id: String { serverId.map { "r\($0)" } ?? "\(author ?? "")-\(createdAt ?? "")" }
+    /// П-21.4/П-23.4 (А58): id отзыва на сервере — для жалобы и дублей при догрузке.
+    /// nil — старый сервер: тогда «Пожаловаться» не показываем.
+    @LenientInt var serverId: Int?
     @LenientInt var ratingOverall: Int?; let text: String?; let author: String?; @LenientInt var isVerified: Int?; let createdAt: String?
     let photos: [String]?
     // Ответ продавца (Фаза 2.4, аддитивно): nil = ответа нет.
     let reply: String?; let replyAt: String?
+    // Ключи в camelCase: декодер сам переводит snake_case; serverId ← "id".
+    enum CodingKeys: String, CodingKey {
+        case serverId = "id", ratingOverall, text, author, isVerified, createdAt, photos, reply, replyAt
+    }
 }
 
 // ---- Тела запросов (camelCase -> snake_case автоматически) ----

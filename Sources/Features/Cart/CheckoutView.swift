@@ -139,10 +139,22 @@ struct CheckoutView: View {
     var onBack: () -> Void = {}
 
     @ObservedObject private var cart = Cart.shared
+    /// Сессия: истекла посреди оформления — раньше оставалась только надпись
+    /// «Сессия истекла, войдите снова» без кнопки входа; вошёл другой человек
+    /// при открытом оформлении — на экране оставались адреса прежнего.
+    @ObservedObject private var session = Session.shared
+    @State private var showAuth = false
+    /// Промокод, применённый до выхода из аккаунта: после входа проверяем его заново.
+    @State private var reapplyCode: String?
+    /// Выбранный до выхода адрес: тот же человек вошёл снова — выбираем его же
+    /// (у другого человека такого id нет, ему — адрес по умолчанию).
+    @State private var reselectAddressId: Int?
 
     @State private var fulfillment: Fulfillment = .delivery
     @State private var payment: Payment = .cash
     @State private var addresses: [Address] = []
+    /// Список адресов не загрузился (сеть/сервер).
+    @State private var addressesError: String?
     @State private var selectedAddress: Address?
     @State private var shop: ShopDetail?
     /// Карточка заведения не загрузилась: сбор, способы и «открыто» неизвестны —
@@ -167,6 +179,10 @@ struct CheckoutView: View {
     @State private var promo: PromoPreview?
     @State private var spendPoints = false
     @State private var promoTask: Task<Void, Never>?
+    /// Пересчёт акций/баллов ещё идёт. Пока он не вернулся, итог на кнопке — от
+    /// прежнего состояния: сняли «Оплатить баллами» — кнопка ещё показывала сумму
+    /// со списанием, а сервер брал полную. Кнопку держим до ответа.
+    @State private var promoPending = false
     @State private var showAddAddress = false
     // «За столик»: номер стола уходит в заказ (раньше не отправлялся вовсе).
     @State private var tableNumber = ""
@@ -218,6 +234,9 @@ struct CheckoutView: View {
                 "api/v1/promo/check", body: PromoCheckBody(code: code, subtotal: subtotalD, shopId: sid))
             await MainActor.run {
                 checkingCode = false
+                // Тихая перепроверка, а код за это время убрали («Убрать») или
+                // сменили — ответ по старому коду не должен вернуть его в заказ.
+                if silent && appliedCode != code { return }
                 let d = r.discount ?? 0
                 if d > 0 || r.freeDelivery == true {
                     appliedCode = code; codeDiscount = d; codeFree = r.freeDelivery == true
@@ -231,6 +250,16 @@ struct CheckoutView: View {
         } catch {
             await MainActor.run {
                 checkingCode = false
+                if silent && appliedCode != code { return }
+                // Тихая перепроверка не дошла (нет сети, таймаут, 5xx) — код не
+                // снимаем: раньше скидка пропадала из-за обрыва связи. Сервер всё
+                // равно проверит код при оформлении.
+                if silent, error is CancellationError { return }
+                if silent, (error as? APIError)?.isRetryable == true {
+                    // Скидка осталась прежней, но не подтверждена — честно говорим об этом.
+                    codeMsg = "Промокод проверим при оформлении"
+                    return
+                }
                 appliedCode = nil; codeDiscount = 0; codeFree = false
                 codeMsg = (error as? LocalizedError)?.errorDescription ?? "Промокод не подошёл"
                 refreshPromo()
@@ -242,7 +271,8 @@ struct CheckoutView: View {
     /// корзины, способа получения, адреса и тумблера баллов.
     private func refreshPromo() {
         promoTask?.cancel()
-        guard let sid = cart.shopId, !cart.isEmpty else { promo = nil; return }
+        guard let sid = cart.shopId, !cart.isEmpty else { promo = nil; promoPending = false; return }
+        promoPending = true
         let body = PromoPreviewRequest(
             shopId: sid,
             items: cart.lines.map { PromoCartItem(productId: $0.productId, qty: $0.qty, modifiers: $0.modifierIds) },
@@ -261,6 +291,7 @@ struct CheckoutView: View {
             if Task.isCancelled { return }
             await MainActor.run {
                 promo = r
+                promoPending = false
                 // Списывать нечего — тумблер сам гаснет.
                 if (r?.pointsSpendMax ?? 0) <= 0 { spendPoints = false }
                 // Скидка/баллы изменили оплачиваемую сумму — пересчитываем доставку:
@@ -323,7 +354,8 @@ struct CheckoutView: View {
     private func loadShop(_ slug: String) async {
         do {
             let loaded: ShopDetail = try await API.shared.get("api/v1/shops/\(slug)")
-            await MainActor.run { shop = loaded; shopLoadError = nil }
+            // Пока грузили, корзина перешла к другому заведению — чужие условия не кладём.
+            await MainActor.run { if cart.shopSlug == slug { shop = loaded; shopLoadError = nil } }
         } catch is CancellationError {
         } catch {
             await MainActor.run { shopLoadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить условия заведения" }
@@ -336,7 +368,7 @@ struct CheckoutView: View {
         // кнопка под надписью «заказ можно оформить, когда откроется» только
         // путала бы человека.
         !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin && !quoteMissing && !shopClosed
-            && (cart.shopSlug == nil || shop != nil)
+            && (cart.shopSlug == nil || shop != nil) && !promoPending
     }
 
     var body: some View {
@@ -377,7 +409,14 @@ struct CheckoutView: View {
             }
             refreshPromo()
         }
-        .onChange(of: fulfillment) { _ in Task { await quoteDelivery() }; refreshPromo() }
+        .onChange(of: fulfillment) { _ in errorText = nil; Task { await quoteDelivery() }; refreshPromo() }
+        // Корзина перешла к другому заведению, пока оформление было открыто во
+        // вкладке «Корзина» (ушли в каталог, «Очистить и начать новую»): раньше
+        // здесь оставались сбор, способы получения, «открыто» и цена доставки
+        // прежнего заведения.
+        .onChange(of: cart.shopId) { _ in reloadForShop() }
+        .onChange(of: session.token) { _ in resetForAccount() }
+        .onAppear { restoreDraft() }
         // Один параметр в onChange: двухпараметрический вариант — iOS 17, цель 16.0.
         .onChange(of: cart.lines.count) { _ in refreshPromo() }
         .onChange(of: cart.total) { _ in
@@ -402,6 +441,10 @@ struct CheckoutView: View {
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
             }
             .buttonStyle(.plain)
+            // Пока заказ создаётся, назад нельзя: вернулся в корзину, поменял её, а
+            // пришедший ответ очищал уже новую корзину и показывал «Заказ оформлен»
+            // со старым составом.
+            .disabled(placing)
             Text("Оформление")
                 .font(.system(size: 20, weight: .heavy))
                 .foregroundStyle(YMColor.text)
@@ -474,6 +517,16 @@ struct CheckoutView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, YMSpace.sm)
                     }
+                    // Адрес выбран, но без координат, а зона считается по ним: кнопка
+                    // была серой без единого слова — человек не понимал, что не так.
+                    // Только после карточки заведения: без неё неизвестно, есть ли зоны.
+                    if selectedAddress != nil && noAddress && (shop != nil || cart.shopSlug == nil) {
+                        Text("У этого адреса нет точки на карте — зону доставки не определить. Добавьте адрес заново, выбрав улицу из подсказок.")
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, YMSpace.sm)
+                    }
                 }
 
                 SectionKicker("Ваш заказ").padding(.top, YMSpace.lg).padding(.bottom, YMSpace.md)
@@ -492,11 +545,8 @@ struct CheckoutView: View {
 
                 totalsCard.padding(.top, YMSpace.lg)
 
-                if let e = errorText {
-                    Text(e).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, YMSpace.md)
-                }
+                // Ошибка оформления теперь над кнопкой (bottomCTA): в самом низу
+                // прокрутки её не было видно — нажал «Оформить», и ничего.
                 Color.clear.frame(height: YMSpace.lg)
             }
             .padding(.horizontal, YMSpace.xl)
@@ -530,7 +580,16 @@ struct CheckoutView: View {
 
     private var addressSelector: some View {
         VStack(spacing: YMSpace.xs) {
-            if addresses.isEmpty {
+            if addresses.isEmpty, let e = addressesError {
+                // Сбой сети — не «нет адресов»: иначе человек заводил адрес заново.
+                Button { Task { await loadAddresses() } } label: {
+                    Text("Не удалось загрузить адреса: \(e). Нажмите, чтобы повторить")
+                        .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10).padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+            } else if addresses.isEmpty {
                 Text("Нет сохранённых адресов")
                     .font(YMFont.subhead).foregroundStyle(YMColor.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -604,6 +663,7 @@ struct CheckoutView: View {
                 .font(.system(size: 13.5))
                 .foregroundStyle(YMColor.text)
                 .tint(YMColor.accent)
+                .onChange(of: tableNumber) { v in CheckoutDraft.shopId = cart.shopId; CheckoutDraft.table = v }
         }
         .padding(14)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -620,6 +680,9 @@ struct CheckoutView: View {
                     .tint(YMColor.accent)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
+                    // Применённый код правился в поле, а в заказ уходил прежний:
+                    // на экране один код, в заказе другой. Сменить — через «Убрать».
+                    .disabled(appliedCode != nil)
                 if appliedCode != nil {
                     Button("Убрать") {
                         appliedCode = nil; codeDiscount = 0; codeFree = false; codeMsg = nil; promoInput = ""
@@ -644,6 +707,7 @@ struct CheckoutView: View {
                     .foregroundStyle(appliedCode != nil ? YMColor.accent : YMColor.statusCancel)
             }
         }
+        .onChange(of: appliedCode) { c in CheckoutDraft.shopId = cart.shopId; CheckoutDraft.promo = c }
     }
 
     private var commentField: some View {
@@ -653,6 +717,7 @@ struct CheckoutView: View {
                 .font(.system(size: 13.5))
                 .foregroundStyle(YMColor.text)
                 .tint(YMColor.accent)
+                .onChange(of: comment) { v in CheckoutDraft.shopId = cart.shopId; CheckoutDraft.comment = v }
         }
         .padding(14)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -781,14 +846,36 @@ struct CheckoutView: View {
                 Spacer()
                 Text(Money.format(grandTotal)).font(.system(size: 22, weight: .heavy)).foregroundStyle(YMColor.text)
             }
-            Button(action: placeOrder) {
-                HStack(spacing: YMSpace.sm) {
-                    if placing { ProgressView().tint(YMColor.onAccent) }
-                    Text(placing ? "Оформляем…" : "Оформить заказ · \(Money.format(grandTotal))")
-                }
+            if let e = errorText {
+                Text(e).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(YMPrimaryButtonStyle())
-            .disabled(!ctaEnabled)
+            if !session.isLoggedIn && !placing {
+                // Сессия истекла (или вышли из аккаунта в профиле), а оформление
+                // открыто: войти отсюда, корзина и введённое остаются.
+                Button(action: { Haptics.light(); showAuth = true }) {
+                    Text("Войти, чтобы оформить заказ")
+                }
+                .buttonStyle(YMPrimaryButtonStyle())
+            } else {
+                Button(action: placeOrder) {
+                    HStack(spacing: YMSpace.sm) {
+                        if placing { ProgressView().tint(YMColor.onAccent) }
+                        Text(placing ? "Оформляем…" : "Оформить заказ · \(Money.format(grandTotal))")
+                    }
+                }
+                .buttonStyle(YMPrimaryButtonStyle())
+                .disabled(!ctaEnabled)
+            }
+        }
+        // Шторка входа — на нижней панели, а не на корне экрана: там уже висит
+        // шторка нового адреса, а две .sheet на одной вьюхе SwiftUI путает.
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                AuthView(onAuthed: { showAuth = false })
+            }
+            .environmentObject(Session.shared)
         }
         .padding(.horizontal, YMSpace.lg)
         .padding(.top, YMSpace.lg)
@@ -809,6 +896,7 @@ struct CheckoutView: View {
             let list: [Address] = try await API.shared.list("api/v1/profile/addresses")
             await MainActor.run {
                 addresses = list
+                addressesError = nil
                 if let want = selectAfter,
                    let match = list.first(where: { $0.id == want.id }) ?? list.max(by: { $0.id < $1.id }) {
                     selectedAddress = match
@@ -818,8 +906,11 @@ struct CheckoutView: View {
                 }
             }
             await quoteDelivery()
+        } catch is CancellationError {
         } catch {
-            // graceful: адресов нет — покажем плейсхолдер, доставка = уточняется.
+            // Список не пришёл: показываем причину и «повторить», а не «Нет
+            // сохранённых адресов». Уже загруженный список не трогаем.
+            await MainActor.run { addressesError = error.localizedDescription }
         }
     }
 
@@ -829,6 +920,7 @@ struct CheckoutView: View {
         // пока считался новый адрес, можно было оформить заказ по старой цене,
         // а сервер брал цену своей зоны.
         quote = nil; quotedGoods = nil; quoteError = nil
+        errorText = nil   // «Выберите адрес доставки» и прочее от прошлой попытки
         Task { await quoteDelivery() }
     }
 
@@ -864,13 +956,18 @@ struct CheckoutView: View {
             )
             // Пока считали, могли выбрать другой адрес или самовывоз: опоздавший
             // ответ клал цену и зону прежнего адреса на новый.
-            let current = await MainActor.run { selectedAddress?.id == a.id && fulfillment == .delivery }
+            // И заведение корзины то же: ответ по прежнему заведению (корзину
+            // сменили, пока шёл расчёт) мог прийти последним и лечь на новое.
+            let current = await MainActor.run { selectedAddress?.id == a.id && fulfillment == .delivery && cart.shopId == sid }
             guard current else { return }
             // Пересчёт акций — ПОСЛЕ расчёта доставки: движок должен видеть её цену
             // (иначе акция «бесплатная доставка от N» не сработает).
             await MainActor.run { quote = q; quotedGoods = goods; quoteError = nil; refreshPromo() }
+        } catch is CancellationError {
+            // Экран ушёл (смена вкладки) — это не ошибка. Раньше под адресом
+            // появлялось английское «The operation couldn’t be completed…».
         } catch {
-            let current = await MainActor.run { selectedAddress?.id == a.id && fulfillment == .delivery }
+            let current = await MainActor.run { selectedAddress?.id == a.id && fulfillment == .delivery && cart.shopId == sid }
             guard current else { return }
             await MainActor.run {
                 quote = nil
@@ -964,6 +1061,7 @@ struct CheckoutView: View {
                 let r: OrderCreateResult = try await API.shared.post("api/v1/orders", body: body)
                 await MainActor.run {
                     Haptics.success()
+                    CheckoutDraft.clear()
                     cart.clear()
                     placing = false
                     onSuccess(r)
@@ -977,6 +1075,86 @@ struct CheckoutView: View {
             }
         }
     }
+}
+
+// MARK: - Смена заведения / аккаунта, черновик полей
+
+extension CheckoutView {
+    /// Заведение в корзине сменилось: условия прежнего (сбор, способы, «открыто»,
+    /// зона и цена доставки, акции) больше не действуют — грузим заново.
+    fileprivate func reloadForShop() {
+        shop = nil; shopLoadError = nil
+        quote = nil; quotedGoods = nil; quoteError = nil
+        promo = nil; spendPoints = false; errorText = nil
+        tableNumber = ""
+        guard let slug = cart.shopSlug, session.isLoggedIn else { return }
+        // Промокод прежнего заведения мог не действовать в новом — перепроверяем
+        // тихо по новому shopId (не подошёл — applyCode сам его уберёт).
+        if let c = appliedCode { Task { await applyCode(c, silent: true) } }
+        Task {
+            await loadShop(slug)
+            await MainActor.run {
+                let fs = allowedFulfillment
+                if !fs.contains(fulfillment), let first = fs.first { fulfillment = first }
+                let ps = allowedPayments
+                if !ps.contains(payment), let first = ps.first { payment = first }
+            }
+            await quoteDelivery()
+            await MainActor.run { refreshPromo() }
+        }
+    }
+
+    /// Вход/выход при открытом оформлении. Адреса, выбранный адрес, баллы и
+    /// расчёты принадлежат человеку — убираем их и после входа грузим заново:
+    /// раньше вошедший следом видел (и мог выбрать) адреса прежнего.
+    fileprivate func resetForAccount() {
+        if appliedCode != nil { reapplyCode = appliedCode }
+        if let id = selectedAddress?.id { reselectAddressId = id }
+        addresses = []; addressesError = nil; selectedAddress = nil
+        quote = nil; quotedGoods = nil; quoteError = nil
+        promo = nil; spendPoints = false; promoPending = false; promoTask?.cancel()
+        appliedCode = nil; codeDiscount = 0; codeFree = false; codeMsg = nil
+        guard session.isLoggedIn else { return }
+        errorText = nil
+        let code = reapplyCode
+        reapplyCode = nil
+        let keep = reselectAddressId
+        reselectAddressId = nil
+        Task {
+            await loadAddresses()
+            if let keep {
+                await MainActor.run {
+                    if let a = addresses.first(where: { $0.id == keep }) { selectAddress(a) }
+                }
+            }
+            let needShop = await MainActor.run { shop == nil ? cart.shopSlug : nil }
+            if let slug = needShop { await loadShop(slug) }
+            if let c = code { await applyCode(c) }
+            await MainActor.run { refreshPromo() }
+        }
+    }
+
+    /// Ушли в корзину поправить количество и вернулись — комментарий, номер
+    /// стола и промокод раньше пропадали (экран создаётся заново).
+    fileprivate func restoreDraft() {
+        guard CheckoutDraft.shopId != nil, CheckoutDraft.shopId == cart.shopId else { return }
+        if comment.isEmpty { comment = CheckoutDraft.comment }
+        if tableNumber.isEmpty { tableNumber = CheckoutDraft.table }
+        if appliedCode == nil, promoInput.isEmpty, let c = CheckoutDraft.promo, !c.isEmpty {
+            promoInput = c
+            Task { await applyCode(c) }
+        }
+    }
+}
+
+/// Черновик полей оформления — в памяти, пока приложение живо. Привязан к
+/// заведению корзины; стирается после заказа и при выходе из аккаунта.
+enum CheckoutDraft {
+    static var shopId: Int?
+    static var comment = ""
+    static var table = ""
+    static var promo: String?
+    static func clear() { shopId = nil; comment = ""; table = ""; promo = nil }
 }
 
 // MARK: - Форма нового адреса (шторка). Город НЕ вводится — из Session.cityName.
@@ -1043,10 +1221,13 @@ private struct AddAddressSheet: View {
             }
             .navigationTitle("Новый адрес")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } } }
+            // Пока адрес сохраняется, шторку не закрыть: смахнул — ошибка
+            // сохранения пропадала вместе со шторкой, а введённый адрес терялся.
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(saving) } }
         }
         .tint(YMColor.accent)
         .presentationDetents([.large])
+        .interactiveDismissDisabled(saving)
     }
 
     private func suggestLine(_ s: AddrSuggest) -> String {
@@ -1091,6 +1272,8 @@ private struct AddAddressSheet: View {
     }
 
     private func save() {
+        // Двойное нажатие до перерисовки кнопки сохраняло адрес дважды.
+        guard !saving else { return }
         if street.trimmingCharacters(in: .whitespaces).isEmpty { error = "Укажите улицу"; return }
         if house.trimmingCharacters(in: .whitespaces).isEmpty { error = "Укажите номер дома"; return }
         // Координаты могут отсутствовать (подсказка без geo) — сервер догеокодирует адрес при сохранении.
@@ -1132,7 +1315,12 @@ private struct AddAddressSheet: View {
 
 private struct CheckoutRow: View {
     let line: CartLine
-    private var lineTotal: Decimal { Money.parse(line.unitPrice) * Decimal(line.qty) }
+    // Как Cart.total и сервер: каждая строка округляется до копейки отдельно,
+    // иначе строка могла разойтись с итогом на 1 копейку (72,46 против 72,47).
+    private var lineTotal: Decimal {
+        var v = Money.parse(line.unitPrice) * (Decimal(string: String(line.qty)) ?? 0)
+        var r = Decimal(); NSDecimalRound(&r, &v, 2, .plain); return r
+    }
 
     var body: some View {
         HStack(spacing: YMSpace.md) {

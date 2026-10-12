@@ -114,21 +114,25 @@ struct JobsView: View {
     private func load() async {
         phase = .loading
         let cityId = Session.shared.cityId
+        // П-21.3 (А58): вакансии постранично — собираем все страницы по has_more
+        // (раньше видна была только первая).
         do {
-            var list: [Job] = try await API.shared.list("api/v1/jobs", query: cityQuery(cityId))
+            var list: [Job] = try await API.shared.allPages("api/v1/jobs", query: cityQuery(cityId)) { (j: Job) in j.id }
             if list.isEmpty, cityId != nil {
                 // По городу пусто — показываем все вакансии площадки.
                 // Запрос без города упал — это ошибка, а не «вакансий нет».
-                do { list = try await API.shared.list("api/v1/jobs") }
+                do { list = try await API.shared.allPages("api/v1/jobs") { (j: Job) in j.id } }
                 catch { await MainActor.run { phase = .error }; return }
             }
+            // В @Sendable-замыкание — только let: захват var — ошибка сборки в Xcode 15.
+            let found = list
             await MainActor.run {
-                jobs = list
-                phase = list.isEmpty ? .empty : .content
+                jobs = found
+                phase = found.isEmpty ? .empty : .content
             }
         } catch {
             // На ошибке города пробуем без фильтра, прежде чем показывать ошибку.
-            let all: [Job] = (try? await API.shared.list("api/v1/jobs")) ?? []
+            let all: [Job] = (try? await API.shared.allPages("api/v1/jobs") { (j: Job) in j.id }) ?? []
             await MainActor.run {
                 jobs = all
                 phase = all.isEmpty ? .error : .content
@@ -146,7 +150,8 @@ struct JobsView: View {
 // MARK: - Карточка вакансии
 // ─────────────────────────────────────────────────────────────────────────────
 
-private struct JobCard: View {
+/// Карточка вакансии. Общая: список «Профиль → Вакансии» и рубрика «Вакансии» в объявлениях.
+struct JobCard: View {
     let job: Job
 
     private var chips: [String] {
@@ -271,7 +276,8 @@ struct JobDetailView: View {
                         Label(shop, systemImage: "storefront")
                             .font(YMFont.body).foregroundStyle(YMColor.muted).labelStyle(.titleAndIcon)
                     }
-                    if let addr = j.shopAddress, !addr.isEmpty {
+                    // Адрес самой вакансии (может отличаться от адреса заведения).
+                    if let addr = (j.address?.isEmpty == false ? j.address : j.shopAddress), !addr.isEmpty {
                         Label(addr, systemImage: "mappin.and.ellipse")
                             .font(YMFont.caption).foregroundStyle(YMColor.muted).labelStyle(.titleAndIcon)
                     }
@@ -288,6 +294,10 @@ struct JobDetailView: View {
                 }
                 if let r = j.requirements, !r.isEmpty {
                     SectionBlock(title: "Требования", text: r)
+                }
+                // Условия сервер присылает, но экран их не показывал.
+                if let c = j.conditions, !c.isEmpty {
+                    SectionBlock(title: "Условия", text: c)
                 }
 
                 if let banner {
@@ -320,6 +330,10 @@ struct JobDetailView: View {
         do {
             let detail: JobDetail = try await API.shared.get("api/v1/jobs/\(jobId)")
             await MainActor.run { job = detail; phase = .content }
+        } catch let e as APIError where e.rejectStatus == 404 {
+            // Вакансию закрыли/удалили — это не «проверь соединение» с вечным
+            // «Повторить»: показываем «Вакансия не найдена».
+            await MainActor.run { job = nil; phase = .content }
         } catch {
             await MainActor.run { phase = .error }
         }
@@ -371,6 +385,9 @@ private struct ApplyFormView: View {
         !name.trimmingCharacters(in: .whitespaces).isEmpty
             && !phone.trimmingCharacters(in: .whitespaces).isEmpty
     }
+    /// В телефоне 10–11 цифр: «123» раньше уходило работодателю, и связаться
+    /// с соискателем было невозможно.
+    private var phoneOk: Bool { (10...11).contains(phone.filter(\.isNumber).count) }
 
     var body: some View {
         NavigationStack {
@@ -398,7 +415,10 @@ private struct ApplyFormView: View {
             }
             .navigationTitle("Отклик на вакансию")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(sending) } }
+            // Пока отклик уходит, окно не закрывается: закрытое смахиванием
+            // прятало ошибку, и человек не знал, дошёл ли отклик.
+            .interactiveDismissDisabled(sending)
             // Автоподстановка имени/телефона из профиля — клиент подтверждает/правит.
             .task { await prefill() }
         }
@@ -416,6 +436,9 @@ private struct ApplyFormView: View {
     }
 
     private func submit() {
+        // Второе нажатие до перерисовки кнопки отправляло второй отклик.
+        guard !sending, valid else { return }
+        guard phoneOk else { error = "Проверьте номер телефона: нужно 10–11 цифр"; return }
         error = nil
         sending = true
         let n = name.trimmingCharacters(in: .whitespaces)
@@ -493,11 +516,19 @@ struct JobsErrorState: View {
 struct FlexibleWrap: Layout {
     var spacing: CGFloat = 8
 
+    /// Размер чипа не шире строки: длинный график («5/2 с 9:00 до 21:00, …»)
+    /// раньше мерился в одну линию и уезжал за край карточки — теперь переносится.
+    private func chipSize(_ v: LayoutSubview, maxW: CGFloat) -> CGSize {
+        let s = v.sizeThatFits(.unspecified)
+        guard maxW.isFinite, s.width > maxW else { return s }
+        return v.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+    }
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
         let maxW = proposal.width ?? .infinity
         var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0
         for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
+            let s = chipSize(v, maxW: maxW)
             if x + s.width > maxW, x > 0 {
                 x = 0; y += rowH + spacing; rowH = 0
             }
@@ -511,7 +542,7 @@ struct FlexibleWrap: Layout {
         let maxW = bounds.width
         var x: CGFloat = bounds.minX, y: CGFloat = bounds.minY, rowH: CGFloat = 0
         for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
+            let s = chipSize(v, maxW: maxW)
             if x + s.width > bounds.minX + maxW, x > bounds.minX {
                 x = bounds.minX; y += rowH + spacing; rowH = 0
             }

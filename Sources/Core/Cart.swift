@@ -13,6 +13,11 @@ struct CartLine: Codable, Identifiable {
     var unit: String? = nil
     var qtyFractional: Bool? = nil
     var qtyPresets: String? = nil
+    /// Шаг количества товара (qty_step). Корзина раньше его не знала и для
+    /// дробного товара без размеров шагала по 0,1: в карточке 0,3 → 0,6 кг, а в
+    /// корзине «+» давал 0,4 кг, который сервер пересчитывал по своей сетке
+    /// шага, — сумма в корзине и в заказе расходилась. nil у старых строк.
+    var qtyStep: Double? = nil
     var id: String { key }
 
     var presets: [Double] {
@@ -23,7 +28,13 @@ struct CartLine: Codable, Identifiable {
         // Единица «кг» сама по себе не дробит: сервер округлил бы 0,9 кг до 1 кг.
         (qtyFractional ?? false) || presets.count >= 2
     }
-    var step: Double { presets.first ?? (isFractional ? 0.1 : 1.0) }
+    var step: Double {
+        // Тот же порядок, что у карточки товара (ProductView.stepValue).
+        if let p = presets.first { return p }
+        guard isFractional else { return 1.0 }
+        if let s = qtyStep, s > 0 { return s }
+        return 0.1
+    }
 }
 
 /// Количество с запятой и единицей: 0.3 → "0,3 кг".
@@ -40,6 +51,8 @@ func snapCartQty(_ line: CartLine, _ q: Double) -> Double {
     let ps = line.presets
     if ps.count >= 2 { return max(ps.first ?? 0.001, r3(q)) }        // размеры суммируются → свободно
     if ps.count == 1 { let s = ps[0]; return max(s, (q / s).rounded() * s) }
+    // Дробный товар с шагом продавца — по сетке шага, как карточка товара и сервер.
+    if let s = line.qtyStep, s > 0 { return max(s, r3((q / s).rounded() * s)) }
     return max(0.001, r3(q))
 }
 
@@ -92,7 +105,8 @@ final class Cart: ObservableObject {
                 unitPrice: (product.price ?? 0) + modPrice, qty: qty, modifierIds: modifierIds,
                 modsLabel: chosen.compactMap { $0.name }.joined(separator: ", "),
                 photo: product.photos?.first?.pathWebp,
-                unit: product.unit, qtyFractional: (product.qtyFractional ?? 0) == 1, qtyPresets: product.qtyPresets))
+                unit: product.unit, qtyFractional: (product.qtyFractional ?? 0) == 1, qtyPresets: product.qtyPresets,
+                qtyStep: product.qtyStep))
         }
         Track.addToCart(id: product.id, name: product.name, price: product.price, qty: 1)
         save()

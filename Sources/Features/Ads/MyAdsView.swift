@@ -41,6 +41,10 @@ final class MyAdsViewModel: ObservableObject {
         } catch is CancellationError {
         } catch {
             self.error = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить"
+            // Список уже на экране (обновление жестом, после оплаты/снятия) —
+            // экран ошибки не показывается, и сбой был незаметен: говорим тостом.
+            // Итог только что выполненного действия («Опубликовано…») не затираем.
+            if !items.isEmpty && toast == nil { toast = "Не удалось обновить: " + (self.error ?? "") }
         }
         loading = false
     }
@@ -62,8 +66,15 @@ final class MyAdsViewModel: ObservableObject {
             let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось опубликовать"
             // 409 «не хватает денег» сервер отдаёт с суммами, но до экрана
             // доходит текст — показываем его и предлагаем пополнить кошелёк.
-            if msg.contains("хватает") { shortage = msg } else { toast = msg }
+            if Self.isShortage(error, msg) { shortage = msg } else { toast = msg }
         }
+    }
+
+    /// Нехватка денег — по типу ошибки (409 с суммами), а не только по слову
+    /// «хватает» в тексте: иной текст сервера уходил тостом без подсказки пополнить.
+    private static func isShortage(_ error: Error, _ msg: String) -> Bool {
+        if let e = error as? APIError, case .walletShortage = e { return true }
+        return msg.contains("хватает")
     }
 
     func renew(_ ad: AdCard) async {
@@ -77,40 +88,62 @@ final class MyAdsViewModel: ObservableObject {
             await load()
         } catch {
             let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось продлить"
-            if msg.contains("хватает") { shortage = msg } else { toast = msg }
+            if Self.isShortage(error, msg) { shortage = msg } else { toast = msg }
         }
     }
+
+    /// Время сервера — московское и без смещения. Раньше разбиралось в поясе
+    /// телефона: восточнее Москвы срок «выходил» на часы раньше, кнопка
+    /// «Продлить» появлялась и пропадала не вовремя (как в Android — по Москве).
+    /// Один форматтер на все строки списка, а не новый на каждую перерисовку.
+    private static let serverTime: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
 
     /// Срок уже прошёл. Снятое объявление с оплаченным сроком раньше
     /// подписывалось «срок вышел» с будущей датой.
     static func expired(_ s: String?) -> Bool {
         guard let s, s.count >= 19 else { return true }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        guard let d = f.date(from: String(s.prefix(19))) else { return true }
+        guard let d = serverTime.date(from: String(s.prefix(19))) else { return true }
         return d.timeIntervalSinceNow <= 0
     }
 
     /// Срок кончается в ближайшие 3 дня (сервер пишет "Y-m-d H:i:s").
     static func expiresSoon(_ s: String?) -> Bool {
         guard let s, s.count >= 19 else { return false }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        guard let d = f.date(from: String(s.prefix(19))) else { return false }
+        guard let d = serverTime.date(from: String(s.prefix(19))) else { return false }
         let left = d.timeIntervalSinceNow
         return left > 0 && left <= 3 * 86400
     }
 
+    /// Объявления, по которым уже идёт «Снять»/«Удалить»: двойное нажатие слало
+    /// второй запрос, и после удачного действия всплывало «Не удалось…».
+    private var actingIds = Set<Int>()
+
     func archive(_ ad: AdCard) async {
+        guard !actingIds.contains(ad.stableId) else { return }
+        actingIds.insert(ad.stableId)
+        defer { actingIds.remove(ad.stableId) }
         do { try await API.shared.adArchive(ad.stableId); toast = "Снято. Оплаченный срок сохранён"; await load() }
-        catch { toast = "Не удалось снять с публикации" }
+        // Причина словами (сессия кончилась, нет связи, отказ сервера), а не
+        // одно «Не удалось» на всё.
+        catch { toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось снять с публикации" }
     }
 
     func remove(_ ad: AdCard) async {
+        guard !actingIds.contains(ad.stableId) else { return }
+        actingIds.insert(ad.stableId)
+        defer { actingIds.remove(ad.stableId) }
         do { try await API.shared.adDelete(ad.stableId); toast = "Удалено"; await load() }
-        catch { toast = "Не удалось удалить" }
+        catch {
+            toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось удалить"
+            // 404 — уже удалено (с сайта, другим устройством): убираем из списка.
+            if (error as? APIError)?.rejectStatus == 404 { await load() }
+        }
     }
 }
 
@@ -186,7 +219,11 @@ struct MyAdsView: View {
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .background(YMColor.text.opacity(0.9), in: Capsule())
                     .padding(.bottom, YMSpace.lg)
-                    .task { try? await Task.sleep(nanoseconds: 2_500_000_000); vm.toast = nil }
+                    // Свой таймер у каждого сообщения: таймер прежнего тоста гасил новый раньше срока.
+                    .task(id: t) {
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        if !Task.isCancelled { vm.toast = nil }
+                    }
             }
         }
     }
@@ -221,10 +258,7 @@ struct MyAdsView: View {
                                                      : (ad.status == "blocked" ? YMColor.statusCancel : YMColor.muted))
                                 Text(ad.title ?? "").font(YMFont.headline).foregroundStyle(YMColor.text).lineLimit(2)
                                 Text(ad.priceText ?? "").font(YMFont.body).foregroundStyle(YMColor.text)
-                                Text("Просмотров: \(ad.viewsCount ?? 0)"
-                                     + (ad.expiresAt?.isEmpty == false
-                                        ? " · " + ((ad.status == "active" || !MyAdsViewModel.expired(ad.expiresAt)) ? "до " : "срок вышел ") + String((ad.expiresAt ?? "").prefix(10))
-                                        : ""))
+                                Text("Просмотров: \(ad.viewsCount ?? 0)" + expiryText(ad))
                                     .font(YMFont.caption).foregroundStyle(YMColor.muted)
                                 if let br = ad.blockReason, !br.isEmpty {
                                     Text(br).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
@@ -283,6 +317,15 @@ struct MyAdsView: View {
             .padding(.bottom, YMSpace.xxxl)
         }
         .refreshable { await vm.load() }
+    }
+}
+
+extension MyAdsView {
+    /// « · до 09.11.2026» / « · срок вышел 09.11.2026» — дата по-русски, а не ISO.
+    fileprivate func expiryText(_ ad: AdCard) -> String {
+        guard let e = ad.expiresAt, !e.isEmpty else { return "" }
+        let word = (ad.status == "active" || !MyAdsViewModel.expired(e)) ? "до " : "срок вышел "
+        return " · " + word + (DateFmt.day(e) ?? String(e.prefix(10)))
     }
 }
 

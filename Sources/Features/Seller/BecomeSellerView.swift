@@ -60,6 +60,8 @@ struct BecomeSellerPromoCard: View {
 struct BecomeSellerView: View {
     @State private var showForm = false
     @State private var submitted = false
+    /// П-23.5: сервер ответил duplicate: true — заявка уже есть, новую не создал.
+    @State private var duplicate = false
 
     private let benefits: [(String, String)] = [
         ("Витрина в приложении", "Ваши товары и услуги видят клиенты вашего города."),
@@ -79,8 +81,8 @@ struct BecomeSellerView: View {
         .navigationTitle("Стать продавцом")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showForm) {
-            ApplyOrgFormView { ok in
-                if ok { withAnimation { submitted = true } }
+            ApplyOrgFormView { ok, dup in
+                if ok { duplicate = dup; withAnimation { submitted = true } }
             }
         }
     }
@@ -126,8 +128,11 @@ struct BecomeSellerView: View {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 64)).foregroundStyle(YMColor.accent)
                 .padding(.top, YMSpace.xxxl)
-            Text("Заявка отправлена!").font(YMFont.title2).foregroundStyle(YMColor.text)
-            Text("Мы проверим данные и свяжемся с вами по указанному телефону. Обычно это занимает до 24 часов.")
+            // П-23.5: при повторе — честное «уже подана», а не «отправлена».
+            Text(duplicate ? "Заявка уже подана" : "Заявка отправлена!").font(YMFont.title2).foregroundStyle(YMColor.text)
+            Text(duplicate
+                 ? "Ваша прошлая заявка ещё на рассмотрении. Мы свяжемся с вами по указанному телефону."
+                 : "Мы проверим данные и свяжемся с вами по указанному телефону. Обычно это занимает до 24 часов.")
                 .font(YMFont.body).foregroundStyle(YMColor.muted)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -142,8 +147,9 @@ struct BecomeSellerView: View {
 // ─────────────────────────────────────────────────────────────────────────────
 
 private struct ApplyOrgFormView: View {
-    /// success — родитель показывает экран «ждите модерацию».
-    let onResult: (Bool) -> Void
+    /// success — родитель показывает экран «ждите модерацию»;
+    /// второй флаг — П-23.5: заявка уже была подана (duplicate).
+    let onResult: (Bool, Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var orgName = ""
@@ -157,11 +163,23 @@ private struct ApplyOrgFormView: View {
     @State private var type = "store"
     @State private var sending = false
     @State private var error: String?
+    // П-23.5: новому владельцу (телефона нет в базе) сервер шлёт код на почту:
+    // 422 details.need == "email_code" → поле кода и повтор с email_code.
+    @State private var email = ""
+    @State private var emailCode = ""
+    @State private var needCode = false
+    @State private var info: String?
+
+    private var trimmedEmail: String { email.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private var valid: Bool {
         orgName.trimmingCharacters(in: .whitespaces).count >= 2
             && fullName.trimmingCharacters(in: .whitespaces).count >= 2
             && phone.filter({ $0.isNumber }).count >= 10
+            // Почта необязательна (нужна только новому владельцу), но если
+            // введена — похожа на адрес; после письма нужен код.
+            && (trimmedEmail.isEmpty || trimmedEmail.contains("@"))
+            && (!needCode || !emailCode.trimmingCharacters(in: .whitespaces).isEmpty)
     }
 
     var body: some View {
@@ -188,11 +206,39 @@ private struct ApplyOrgFormView: View {
                         .textContentType(.telephoneNumber)
                         .keyboardType(.phonePad)
                 }
+                // П-23.5: почта и код подтверждения для нового владельца.
+                Section {
+                    TextField("Email", text: $email)
+                        .textContentType(.emailAddress)
+                        .keyboardType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .disabled(sending)
+                        // Другая почта — прежний код к ней не подходит.
+                        .onChange(of: email) { _ in
+                            if needCode { needCode = false; emailCode = ""; info = nil }
+                        }
+                    if needCode {
+                        TextField("Код из письма", text: $emailCode)
+                            .textContentType(.oneTimeCode)
+                            .keyboardType(.numberPad)
+                            .disabled(sending)
+                        Button("Отправить код ещё раз") { submit(resendCode: true) }
+                            .disabled(sending || trimmedEmail.isEmpty)
+                    }
+                } header: {
+                    Text("Почта")
+                } footer: {
+                    Text("Нужна, если вы ещё не зарегистрированы на Yumurta: пришлём код подтверждения.")
+                }
+                if let info {
+                    Text(info).font(YMFont.caption).foregroundStyle(YMColor.accent)
+                }
                 if let error {
                     Text(error).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
                 }
                 Section {
-                    Button(action: submit) {
+                    Button(action: { submit() }) {
                         HStack {
                             Spacer()
                             if sending { ProgressView() } else { Text("Отправить заявку").fontWeight(.bold) }
@@ -206,10 +252,14 @@ private struct ApplyOrgFormView: View {
             }
             .navigationTitle("Заявка")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } } }
+            // Пока заявка отправляется, форму не закрыть: закрыл — ответ (код из
+            // письма, «уже подана», ошибка) пропадал вместе с формой и введёнными
+            // данными, а заявка при этом могла уйти.
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(sending) } }
             .task { await prefill() }
         }
         .tint(YMColor.accent)
+        .interactiveDismissDisabled(sending)
     }
 
     /// Автоподстановка ФИО/телефона из профиля (если вошёл) — клиент правит.
@@ -219,33 +269,63 @@ private struct ApplyOrgFormView: View {
             await MainActor.run {
                 if fullName.isEmpty, let n = p.name, !n.isEmpty { fullName = n }
                 if phone.isEmpty, let ph = p.phone, !ph.isEmpty { phone = ph }
+                // П-23.5: почта из профиля — не придётся вводить заново.
+                if email.isEmpty, let em = p.email, !em.isEmpty { email = em }
             }
         }
     }
 
-    private func submit() {
+    /// resendCode — П-23.5: запрос без кода, чтобы сервер прислал новое письмо.
+    private func submit(resendCode: Bool = false) {
+        // Двойное нажатие до перерисовки кнопки отправляло две заявки на модерацию.
+        guard !sending else { return }
+        // Повтор письма — без проверки формы на клиенте (кода ещё нет; поля проверит сервер).
+        if !resendCode { guard valid else { return } }
         error = nil
         sending = true
-        let body = OrgApplyBody(
+        let em = trimmedEmail
+        let code = emailCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        var body = OrgApplyBody(
             orgName: orgName.trimmingCharacters(in: .whitespaces),
             fullName: fullName.trimmingCharacters(in: .whitespaces),
             phone: phone.trimmingCharacters(in: .whitespaces),
             type: type,
             cityId: Session.shared.cityId
         )
+        // П-23.5: почту шлём, только если её ввели; код — только на шаге кода.
+        body.email = em.isEmpty ? nil : em
+        body.emailCode = (needCode && !resendCode && !code.isEmpty) ? code : nil
+        // В Task — неизменяемая копия: захват var в параллельном коде Xcode 15 не пропускает.
+        let sendBody = body
         Task {
             do {
-                let _: OrgApplyResult = try await API.shared.post("api/v1/organizations/apply", body: body)
+                let r: OrgApplyResult = try await API.shared.post("api/v1/organizations/apply", body: sendBody)
                 await MainActor.run {
                     Haptics.success()
                     sending = false
-                    onResult(true)
+                    onResult(true, r.duplicate == true)
                     dismiss()
                 }
             } catch {
                 await MainActor.run {
                     sending = false
-                    self.error = (error as? LocalizedError)?.errorDescription ?? "Не удалось отправить заявку"
+                    let api = error as? APIError
+                    let text = (error as? LocalizedError)?.errorDescription ?? "Не удалось отправить заявку"
+                    // П-23.5: письмо с кодом ушло — это следующий шаг, а не ошибка.
+                    if api?.rejectStatus == 422, api?.rejectDetails?["need"] == "email_code" {
+                        needCode = true
+                        emailCode = ""
+                        info = "Мы отправили код на \(em). Введите его и нажмите «Отправить заявку»."
+                    } else if api?.rejectStatus == 429 {
+                        // Больше 5 попыток кода (или частые запросы) — ждать.
+                        info = nil
+                        self.error = text.isEmpty ? "Слишком много попыток. Попробуйте позже" : text
+                    } else {
+                        // 409 (почта занята / телефон другого аккаунта), неверный код и
+                        // «Укажите email» — показываем текст сервера как есть.
+                        info = nil
+                        self.error = text
+                    }
                 }
             }
         }

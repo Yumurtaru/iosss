@@ -11,15 +11,32 @@ enum APIError: LocalizedError {
     /// показывает «Пополните на 269 ₽» с кнопкой, а не «Ошибка сервера (409)».
     /// Так отвечают создание заказа с оплатой кошельком и публикация объявления.
     case walletShortage(need: Decimal, balance: Decimal, missing: Decimal, message: String)
+    /// П-23: отказ 4xx с кодом и details. Текст тот же, что у .server, но экран
+    /// может различить 409 «отзыв уже оставлен», 422 need=email_code, 429.
+    case rejected(status: Int, message: String, details: [String: String]?)
     var errorDescription: String? {
         switch self {
         case .server(let m): return m
-        case .http(let c):   return "Ошибка сервера (\(c))"
+        case .rejected(_, let m, _): return m
+        // Код ответа человеку ничего не говорит («Ошибка сервера (502)») — пишем по-русски.
+        case .http:          return "Сервер временно недоступен. Попробуйте позже"
         case .network:       return "Нет соединения с интернетом"
         case .timeout:       return "Превышено время ожидания. Попробуйте ещё раз"
         case .unauthorized:  return "Сессия истекла, войдите снова"
         case .decoding:      return "Не удалось обработать ответ"
         case .walletShortage(_, _, _, let m): return m
+        }
+    }
+    /// Текст для 4xx без сообщения сервера (страница nginx, пустое тело).
+    /// Раньше человек видел «Ошибка 413» или «Ошибка 404».
+    static func httpText(_ code: Int) -> String {
+        switch code {
+        case 403: return "Нет доступа"
+        case 404: return "Не найдено — возможно, уже удалено"
+        case 408: return "Превышено время ожидания. Попробуйте ещё раз"
+        case 413: return "Файл слишком большой"
+        case 429: return "Слишком много запросов. Подождите минуту и повторите"
+        default:  return "Не удалось выполнить запрос (код \(code))"
         }
     }
     /// Стоит ли повторять запрос при этой ошибке (для идемпотентных GET).
@@ -29,6 +46,16 @@ enum APIError: LocalizedError {
         case .http(let c):       return c >= 500
         default:                 return false
         }
+    }
+    /// П-23: HTTP-код отказа (nil — не 4xx с разобранным ответом).
+    var rejectStatus: Int? {
+        if case .rejected(let s, _, _) = self { return s }
+        return nil
+    }
+    /// П-23: details отказа (`need`, поля формы) — nil, если их нет.
+    var rejectDetails: [String: String]? {
+        if case .rejected(_, _, let d) = self { return d }
+        return nil
     }
 }
 
@@ -71,6 +98,11 @@ final class API {
 
     private let maxRetries = 2                    // доп. попытки (итого до 3) для GET
 
+    /// Телефон сейчас без сети (по NetworkMonitor, читаем на главном потоке).
+    static func offlineNow() async -> Bool {
+        await MainActor.run { !NetworkMonitor.shared.online }
+    }
+
     /// Абсолютный адрес картинки.
     ///
     /// Сервер отдаёт пути в двух видах, и это не оплошность, а история разделов:
@@ -100,7 +132,12 @@ final class API {
         // Без «!»: путь может содержать данные извне (слаг из ссылки), и кривой
         // адрес должен давать ошибку запроса, а не падение приложения.
         guard var comps = URLComponents(string: API.base + "/" + path) else { throw APIError.network }
-        if !query.isEmpty { comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
+        if !query.isEmpty {
+            comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+            // URLQueryItem оставляет «+» как есть, а PHP читает его как пробел:
+            // поиск «c++» или «+7…» уходил другим запросом.
+            comps.percentEncodedQuery = comps.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        }
         guard let reqURL = comps.url else { throw APIError.network }
         var req = URLRequest(url: reqURL)
         req.httpMethod = method
@@ -121,6 +158,9 @@ final class API {
                 return try await perform(req, as: type)
             } catch let e as APIError where e.isRetryable && attempt < attempts - 1 {
                 lastError = e
+                // Без сети повтор бесполезен: каждая попытка ждёт сеть до 40 с
+                // (waitsForConnectivity), и крутилка висела около двух минут.
+                if await API.offlineNow() { throw APIError.network }
                 let delay = pow(2.0, Double(attempt)) * 0.5 + Double.random(in: 0...0.3) // 0.5s, 1.5s + джиттер
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 continue
@@ -135,7 +175,13 @@ final class API {
             (data, resp) = try await session.data(for: req)
         } catch let urlError as URLError {
             if urlError.code == .cancelled { throw CancellationError() }   // отмена (дебаунс) — не повторяем
-            throw urlError.code == .timedOut ? APIError.timeout : APIError.network
+            // Таймаут при выключенной сети — это «нет соединения», а не
+            // «превышено время ожидания»: запрос просто ждал сеть.
+            if urlError.code == .timedOut {
+                if await API.offlineNow() { throw APIError.network }
+                throw APIError.timeout
+            }
+            throw APIError.network
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -147,6 +193,20 @@ final class API {
             // Тихое продление access-токена (security-аудит): refresh → один повтор запроса.
             // Позволяет серверу сократить JWT_EXPIRES до часов без массовых разлогинов.
             if !isRetryAfterRefresh, !(req.url?.path.hasSuffix("/auth/refresh") ?? false) {
+                // Запрос ушёл со старым токеном, а параллельный запрос уже продлил его:
+                // повторяем со свежим, а не продлеваем второй раз (лишний refresh,
+                // при ротации refresh-токена на сервере он разлогинил бы человека).
+                // Запрос без токена (ушёл, пока человек был гостем), а вход уже
+                // выполнен: тоже повтор с текущим токеном. Раньше такой 401 шёл в
+                // продление, а при отказе продления — в выход только что вошедшего.
+                if let current = TokenStore.access, !current.isEmpty,
+                   req.value(forHTTPHeaderField: "Authorization") != "Bearer \(current)" {
+                    var retry = req
+                    retry.setValue("Bearer \(current)", forHTTPHeaderField: "Authorization")
+                    // false: если и свежий токен отвергнут, этот повтор сам пойдёт в продление
+                    // (заголовок теперь совпадает с текущим — второй раз сюда не попадём).
+                    return try await perform(retry, as: type, isRetryAfterRefresh: false)
+                }
                 switch await refreshAccessToken() {
                 case .token(let newToken):
                     var retry = req
@@ -184,14 +244,24 @@ final class API {
                 // добавляем первую к общему «Проверьте поля объявления», иначе
                 // человек не понимал, что именно исправить.
                 var msg = env.error?.message ?? "Ошибка сервера"
-                if status == 422, let first = env.error?.details?.values.sorted().first, !first.isEmpty, !msg.contains(first) {
+                // П-23.5: details {need: "email_code"} — служебный ключ, а не ошибка
+                // поля: к тексту не приклеиваем (было «…: email_code»).
+                if status == 422, env.error?.details?["need"] == nil,
+                   let first = env.error?.details?.values.sorted().first, !first.isEmpty, !msg.contains(first) {
                     msg += ": " + first
+                }
+                // П-23: 4xx — с кодом и details (текст прежний), остальное как было.
+                if (400..<500).contains(status) {
+                    throw APIError.rejected(status: status, message: msg, details: env.error?.details)
                 }
                 throw APIError.server(msg)
             }
             // Ошибочный статус с телом {ok:false,error:"..."} (Response::error): success отсутствует,
             // но текст есть — показываем его (иначе терялось «Минимальная сумма заказа…» → «Ошибка 422»).
-            if status >= 400, let msg = env.error?.message, !msg.isEmpty { throw APIError.server(msg) }
+            if status >= 400, let msg = env.error?.message, !msg.isEmpty {
+                if status < 500 { throw APIError.rejected(status: status, message: msg, details: env.error?.details) }
+                throw APIError.server(msg)
+            }
             // Действие без полезной нагрузки (отмена заказа, удаление…) сервер
             // может закрыть ответом {"success":true,"data":null} — это успех,
             // а не «Не удалось обработать ответ».
@@ -200,7 +270,10 @@ final class API {
             if (200..<300).contains(status), env.data == nil, T.self == EmptyResp.self,
                let empty = EmptyResp() as? T { return empty }
             if !(200..<300).contains(status), env.data == nil {
-                throw status >= 500 ? APIError.http(status) : APIError.server("Ошибка \(status)")
+                if status >= 500 { throw APIError.http(status) }
+                // П-23: 4xx без текста — тоже с кодом (409 у отзыва на старом сервере).
+                if status >= 400 { throw APIError.rejected(status: status, message: APIError.httpText(status), details: nil) }
+                throw APIError.server(APIError.httpText(status))
             }
             guard let payload = env.data else { throw APIError.decoding }
             (payload as? PageMetaReceiving)?.receive(meta: env.meta)   // Page<T>: has_more из meta
@@ -209,7 +282,7 @@ final class API {
             throw e
         } catch {
             if status >= 500 { throw APIError.http(status) }
-            if status >= 400 { throw APIError.server("Ошибка \(status)") }
+            if status >= 400 { throw APIError.rejected(status: status, message: APIError.httpText(status), details: nil) }
             throw APIError.decoding
         }
     }
@@ -377,6 +450,35 @@ final class API {
 
     func deleteVoid(_ path: String) async throws { _ = try await send(try makeRequest("DELETE", path), as: EmptyResp.self) }
     func putVoid(_ path: String, body: Encodable? = nil) async throws { _ = try await send(try makeRequest("PUT", path, body: body), as: EmptyResp.self) }
+}
+
+extension API {
+    /// П-21.3 (А58): весь список по meta.has_more — для коротких списков без
+    /// подвала догрузки (вакансии, записи). Пустая страница = конец (у записей
+    /// has_more изредка true при пустой следующей). Дубли на стыке — по `key`.
+    /// Первая страница упала — ошибка; сбой на следующих — отдаём собранное.
+    /// Старый сервер без meta — одна страница, как раньше.
+    func allPages<T: Decodable, K: Hashable>(_ path: String, query: [String: String] = [:],
+                                             maxPages: Int = 20, key: (T) -> K) async throws -> [T] {
+        let first: Page<T> = try await page(path, query: query)
+        var seen = Set<K>()
+        var items = first.items.filter { seen.insert(key($0)).inserted }
+        var more = first.hasMore && !first.items.isEmpty
+        var n = 1
+        while more && n < maxPages {
+            n += 1
+            var q = query; q["page"] = String(n)
+            // Отмена (ушли с экрана) — наверх, а не «неполный список»; прочие сбои
+            // хвоста — возвращаем то, что успели собрать.
+            let p: Page<T>
+            do { p = try await page(path, query: q) }
+            catch is CancellationError { throw CancellationError() }
+            catch { break }
+            items += p.items.filter { seen.insert(key($0)).inserted }
+            more = p.hasMore && !p.items.isEmpty
+        }
+        return items
+    }
 }
 
 // MARK: - Вспомогательные типы транспорта

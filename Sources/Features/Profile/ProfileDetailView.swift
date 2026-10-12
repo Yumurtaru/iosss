@@ -33,6 +33,9 @@ struct AddressesView: View {
     @State private var deleteError: String?
     /// Загрузка не прошла — это не «адресов нет».
     @State private var loadError: String?
+    /// Адреса, которые уже удаляются: двойной выбор «Удалить» слал второй
+    /// DELETE, тот отвечал 404, и после удачного удаления всплывала ошибка.
+    @State private var deletingIds = Set<Int>()
 
     var body: some View {
         ScrollView {
@@ -44,6 +47,13 @@ struct AddressesView: View {
                 } else if items.isEmpty {
                     emptyState
                 } else {
+                    // Перечитать не удалось (после добавления, возврат на экран),
+                    // а список уже есть — раньше сбой был не виден, и только что
+                    // добавленного адреса «не было».
+                    if let e = loadError {
+                        Text("Не удалось обновить: " + e)
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    }
                     ForEach(Array(items.enumerated()), id: \.element.id) { _, a in
                         // «Изменить» убран: у пункта не было экрана правки, нажатие
                         // ничего не делало. Поменять адрес — удалить и добавить.
@@ -108,10 +118,20 @@ struct AddressesView: View {
         loading = false
     }
     private func remove(_ a: Address) async {
+        let aid = a.id
+        guard !deletingIds.contains(aid) else { return }
+        deletingIds.insert(aid)
+        defer { deletingIds.remove(aid) }
         do {
-            try await API.shared.deleteVoid("api/v1/profile/addresses/\(a.id)")
-            await MainActor.run { items.removeAll { $0.id == a.id } }
+            try await API.shared.deleteVoid("api/v1/profile/addresses/\(aid)")
+            await MainActor.run { items.removeAll { $0.id == aid } }
         } catch {
+            // 404 — адрес уже удалён (на сайте, другим устройством): убираем из
+            // списка, а не показываем «Адрес не удалён».
+            if (error as? APIError)?.rejectStatus == 404 {
+                await MainActor.run { items.removeAll { $0.id == aid } }
+                return
+            }
             let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось удалить адрес"
             await MainActor.run { deleteError = msg }
         }
@@ -253,9 +273,13 @@ private struct AddAddressView: View {
             }
             .navigationTitle("Новый адрес")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(saving) } }
         }
         .tint(YMColor.accent)
+        // Пока адрес сохраняется, окно не закрывается: закрытое смахиванием
+        // перечитывало список раньше ответа — адреса в нём не было, и его
+        // добавляли второй раз (дубль), а ошибка сохранения терялась.
+        .interactiveDismissDisabled(saving)
     }
 
     private func scheduleSuggest(_ text: String) {
@@ -277,16 +301,24 @@ private struct AddAddressView: View {
         }
     }
     private func pick(_ s: AddrSuggest) {
-        suppress = true
-        street = s.street ?? street
+        // Флаг «не искать» ставим, только если улица реально сменится: иначе
+        // onChange не срабатывал, флаг оставался взведённым, и следующая ручная
+        // правка улицы не сбрасывала координаты подсказки (адрес уходил с
+        // точкой другого дома). Запоздавший ответ подсказок тоже гасим.
+        suggestTask?.cancel()
+        let newStreet = s.street ?? street
+        suppress = newStreet != street
+        street = newStreet
         if let h = s.house, !h.isEmpty { house = h }
         lat = s.lat; lng = s.lng
         suggestions = []
     }
     private func save() {
+        // Двойное нажатие до перерисовки кнопки сохраняло адрес дважды.
+        guard !saving else { return }
         if street.trimmingCharacters(in: .whitespaces).isEmpty { error = "Укажите улицу и дом"; return }
         if lat == nil || lng == nil { error = "Выберите адрес из подсказок"; return }
-        saving = true
+        saving = true; error = nil
         let body = AddressBody(label: label,
                                city: cityName.isEmpty ? nil : cityName,
                                street: street,
@@ -345,13 +377,24 @@ struct BookingItem: Identifiable {
         date = BookingItem.parse(a.date)
         time = String((a.timeStart ?? "").prefix(5))
         switch (a.status ?? "").lowercased() {
-        case "cancelled":           status = .cancelled
-        case "accepted", "done":    status = .confirmed
-        default:                    status = .pending
+        case "cancelled", "canceled": status = .cancelled
+        case "accepted", "confirmed": status = .confirmed
+        // Запись — это заказ и проходит те же статусы. «В работе» (preparing) и
+        // «Выполнена» (ready) раньше показывались как «Ожидает» с кнопкой
+        // «Отменить», которую сервер отклоняет (как в Android-клиенте).
+        case "preparing":             status = .inWork
+        case "ready":                 status = .ready
+        // Состоявшийся визит раньше подписывался «Подтверждена» и показывал
+        // кнопку «Отменить» (сервер такую отмену всё равно отклоняет).
+        case "done", "completed":     status = .done
+        default:                      status = .pending
         }
         address = (a.shopAddress?.isEmpty == false) ? a.shopAddress : nil
-        lat = a.shopLat
-        lng = a.shopLng
+        // Нулевые координаты — «координат нет» (так их отдаёт пустая колонка):
+        // «Маршрут» вёл в точку 0,0 в океане. Тогда строим по адресу.
+        let hasCoords = (a.shopLat ?? 0) != 0 && (a.shopLng ?? 0) != 0
+        lat = hasCoords ? a.shopLat : nil
+        lng = hasCoords ? a.shopLng : nil
         visitAddress = (a.address?.isEmpty == false) ? a.address : nil
     }
 
@@ -359,15 +402,29 @@ struct BookingItem: Identifiable {
     /// иначе на телефоне с другим календарём получится nil и плашка будет пустой.
     private static func parse(_ s: String?) -> Date? {
         guard let s, !s.isEmpty else { return nil }
+        return dayIn.date(from: s)
+    }
+    /// Один форматтер на все записи: раньше новый создавался на каждую запись
+    /// при каждой загрузке списка (DateFormatter дорогой).
+    private static let dayIn: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone.current
         f.dateFormat = "yyyy-MM-dd"
-        return f.date(from: s)
-    }
+        return f
+    }()
 }
-enum BookingStatus { case confirmed, pending, cancelled
-    var title: String { self == .confirmed ? "Подтверждена" : self == .pending ? "Ожидает" : "Отменена" }
+enum BookingStatus { case confirmed, pending, cancelled, done, inWork, ready
+    var title: String {
+        switch self {
+        case .confirmed: return "Подтверждена"
+        case .pending:   return "Ожидает"
+        case .cancelled: return "Отменена"
+        case .done:      return "Завершена"
+        case .inWork:    return "В работе"
+        case .ready:     return "Выполнена"
+        }
+    }
 }
 
 private enum BookingTab: String, CaseIterable, Hashable {
@@ -402,6 +459,14 @@ struct BookingsView: View {
                 } else if current.isEmpty {
                     emptyState
                 } else {
+                    // Перечитать не удалось (после отмены, возврат на экран), а
+                    // записи уже есть — раньше сбой был не виден.
+                    if let e = bookingsLoadError {
+                        Text("Не удалось обновить: " + e)
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                            .padding(.horizontal, YMSpace.xl)
+                            .padding(.bottom, YMSpace.sm)
+                    }
                     VStack(spacing: YMSpace.lg) {
                         ForEach(current) { b in
                             BookingCard(booking: b, onCancel: { await cancel(b) })
@@ -439,7 +504,9 @@ struct BookingsView: View {
         loading = true; bookingsLoadError = nil
         // Ошибка загрузки раньше выглядела как «Нет предстоящих записей».
         let list: [Appointment]
-        do { list = try await API.shared.list("api/v1/appointments") }
+        // П-21.3 (А58): записи постранично — собираем все страницы (пустая = конец).
+        // Ключ дубля — окно + заказ: одно окно могли отменить и занять снова.
+        do { list = try await API.shared.allPages("api/v1/appointments") { (a: Appointment) in "\(a.id)-\(a.orderId ?? 0)" } }
         catch is CancellationError { loading = false; return }
         catch { bookingsLoadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить записи"; loading = false; return }
         // Делим по серверному признаку is_past: он уже учитывает и время окончания
@@ -471,21 +538,31 @@ private struct BookingCard: View {
     @State private var confirmCancel = false
     @State private var working = false
 
+    // Форматтеры — один раз на приложение: раньше каждая карточка на каждой
+    // перерисовке создавала по два DateFormatter (это дорого). «d» — в той же
+    // русской локали: в локали телефона с другими цифрами день выглядел чужим.
+    private static let monthOut: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "MMM"; return f
+    }()
+    private static let dayOut: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d"; return f
+    }()
     private var monthText: String {
         guard let d = booking.date else { return "" }
-        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "MMM"
-        return f.string(from: d).uppercased()
+        return Self.monthOut.string(from: d).uppercased()
     }
     private var dayText: String {
         guard let d = booking.date else { return "—" }
-        let f = DateFormatter(); f.dateFormat = "d"
-        return f.string(from: d)
+        return Self.dayOut.string(from: d)
     }
     private var statusColor: Color {
         switch booking.status {
         case .confirmed: return YMColor.statusDone
         case .pending:   return YMColor.accent
         case .cancelled: return YMColor.statusCancel
+        case .done:      return YMColor.muted
+        case .inWork:    return YMColor.statusDone
+        case .ready:     return YMColor.muted
         }
     }
 

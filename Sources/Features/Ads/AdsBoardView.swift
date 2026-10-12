@@ -6,6 +6,10 @@
 //      «подкатегория → родитель → настройки» сервер уже применил)
 //    • GET api/v1/ads            → лента с фильтрами и постраничной подгрузкой
 //
+//  Вакансии магазинов (продавцы заводят их в кабинете, GET api/v1/jobs) в
+//  рубрике «Вакансии»/«Работа» показываются над объявлениями — те же карточки,
+//  что в «Профиль → Вакансии»; нажатие открывает вакансию с откликом.
+//
 //  Деньги — Decimal через @LenientDecimal и Money.format, никогда не Double.
 //  Токены YM.*, light+dark, Dynamic Type.
 //
@@ -26,6 +30,11 @@ final class AdsBoardViewModel: ObservableObject {
     /// Режим «Избранное»: та же лента, но из api/v1/ads/favorites. Сердечко на
     /// карточке было, а посмотреть сохранённое было негде.
     @Published var favOnly = false
+    /// Вакансии магазинов для рубрики «Вакансии»: nil — ещё не загружены.
+    /// Грузим один раз, поиск фильтрует на месте; ошибка объявлениям не мешает.
+    @Published var shopJobs: [Job]?
+    @Published var jobsExpanded = false
+    private var jobsLoading = false
 
     private var page = 1
     private var pages = 1
@@ -40,20 +49,74 @@ final class AdsBoardViewModel: ObservableObject {
             ?? cats.first { root in (root.children ?? []).contains { $0.stableId == categoryId } }
     }
 
+    /// .task срабатывает на КАЖДОЕ появление экрана: возврат из объявления
+    /// обрезал догруженные страницы до первой и прокрутка прыгала.
+    private var started = false
+    /// Лента хоть раз ответила (успехом или ошибкой) — см. load(reset:).
+    private var everLoaded = false
+    /// Для какого фильтра (избранное|рубрика|поиск) сейчас лежат items.
+    private var shownKey = ""
+    private var filterKey: String { "\(favOnly)|\(categoryId)|\(query)" }
+    /// Поиск или рубрика заданы — ошибку показываем под полем поиска, а не
+    /// во весь экран (иначе поле пропадало вместе с клавиатурой).
+    var hasFilter: Bool { !favOnly && (!query.isEmpty || categoryId != 0) }
+
+    var showJobs: Bool { enabled && !favOnly && isJobsAdCategory(cats, categoryId) }
+
+    var visibleJobs: [Job] {
+        guard showJobs else { return [] }
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return (shopJobs ?? []).filter { j in
+            q.isEmpty
+                || (j.title ?? "").lowercased().contains(q)
+                || (j.shop ?? "").lowercased().contains(q)
+                || (j.category ?? "").lowercased().contains(q)
+        }
+    }
+
+    /// Город из настроек → пусто — вся площадка (как в «Профиль → Вакансии»).
+    func loadJobsIfNeeded(force: Bool = false) async {
+        guard showJobs, !jobsLoading, shopJobs == nil || force else { return }
+        jobsLoading = true
+        defer { jobsLoading = false }
+        let cityId = Session.shared.cityId
+        do {
+            var list: [Job] = try await API.shared.allPages("api/v1/jobs",
+                query: cityId.map { ["city_id": String($0)] } ?? [:]) { (j: Job) in j.id }
+            if list.isEmpty, cityId != nil {
+                list = try await API.shared.allPages("api/v1/jobs") { (j: Job) in j.id }
+            }
+            shopJobs = list
+        } catch {
+            // Нет сети — попробуем при следующем выборе рубрики или обновлении.
+        }
+    }
+
     func start() async {
+        guard !started else { return }
+        started = true
         if let r = try? await API.shared.adCategories() {
             cats = r.categories ?? []
             enabled = r.enabled ?? true
+        } else {
+            // Категории не пришли (нет сети) — при следующем появлении попробуем
+            // снова, иначе чипы рубрик не появлялись до перезапуска.
+            started = false
         }
         await load(reset: true)
+        if Task.isCancelled { started = false }   // ушли до ответа — при возврате загрузим снова
     }
 
     func load(reset: Bool) async {
         // Двойной тап «Показать ещё» раньше грузил одну страницу дважды:
         // дубли id в ForEach и пропуск следующей страницы.
         if !reset && loadingMore { return }
-        if reset { gen += 1; loadingMore = false; loading = items.isEmpty; page = 1 } else { loadingMore = true }
+        // Скелетон — только до первого ответа. Раньше при пустой выдаче каждая
+        // буква в поиске (или смена рубрики) включала скелетон, а он заменяет
+        // весь экран вместе с полем поиска: клавиатура пряталась посреди ввода.
+        if reset { gen += 1; loadingMore = false; loading = items.isEmpty && (!everLoaded || error != nil); if items.isEmpty { error = nil }; page = 1 } else { loadingMore = true }
         let my = gen
+        let key = filterKey
         do {
             let next = reset ? 1 : page + 1
             let r = favOnly
@@ -64,13 +127,23 @@ final class AdsBoardViewModel: ObservableObject {
             total = r.total ?? 0
             pages = max(1, r.pages ?? 1)
             let fresh = r.items ?? []
-            items = reset ? fresh : items + fresh
+            // Новое объявление между догрузками сдвигает страницы: без фильтра
+            // один id попадал в ForEach дважды.
+            let known = Set(items.compactMap(\.id))
+            items = reset ? fresh : items + fresh.filter { a in a.id.map { !known.contains($0) } ?? true }
             if !reset { page += 1 }
+            if reset { shownKey = key }
             error = nil
+            everLoaded = true
         } catch is CancellationError {
         } catch {
             guard my == gen else { return }
             self.error = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить"
+            // Сменили рубрику/поиск, а запрос упал: раньше под новым фильтром
+            // оставались объявления прежнего, будто это найденное. Обновление
+            // того же фильтра (жест) список не стирает.
+            if reset && key != shownKey { items = []; total = 0; pages = 1; shownKey = key }
+            everLoaded = true
         }
         guard my == gen else { return }
         loading = false
@@ -92,6 +165,7 @@ final class AdsBoardViewModel: ObservableObject {
     func pick(_ id: Int) {
         categoryId = id
         Task { await load(reset: true) }
+        Task { await loadJobsIfNeeded() }
     }
 
     /// Переключить ленту «все / избранные». Поиск и категорию сбрасываем:
@@ -107,6 +181,10 @@ struct AdsBoardView: View {
     @StateObject private var vm = AdsBoardViewModel()
     @State private var path = NavigationPath()
     @State private var showForm = false
+    /// Подача объявления и «Мои» требуют входа. Гость раньше заполнял всю
+    /// форму и получал «Сессия истекла», а «Мои» — ошибку с бесполезным «Повторить».
+    @EnvironmentObject private var session: Session
+    @State private var showAuth = false
 
     private let columns = [GridItem(.flexible(), spacing: YMSpace.md), GridItem(.flexible(), spacing: YMSpace.md)]
 
@@ -116,7 +194,7 @@ struct AdsBoardView: View {
                 content
                 if vm.enabled {
                     Button {
-                        showForm = true
+                        if session.isLoggedIn { showForm = true } else { showAuth = true }
                     } label: {
                         Label("Подать объявление", systemImage: "plus")
                             .font(YMFont.headline)
@@ -137,7 +215,7 @@ struct AdsBoardView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 // Избранное доступно только вошедшим: ручка требует токен.
-                if Session.shared.isLoggedIn {
+                if session.isLoggedIn {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button {
                             Haptics.selection()
@@ -149,13 +227,16 @@ struct AdsBoardView: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    NavigationLink(value: AdsRoute.my) { Text("Мои") }
+                    Button {
+                        if session.isLoggedIn { path.append(AdsRoute.my) } else { showAuth = true }
+                    } label: { Text("Мои") }
                 }
             }
             .navigationDestination(for: AdsRoute.self) { route in
                 switch route {
                 case .my: MyAdsView()
                 case .detail(let id): AdDetailView(adId: id)
+                case .job(let id): JobDetailView(jobId: id)
                 }
             }
             .sheet(isPresented: $showForm) {
@@ -165,6 +246,18 @@ struct AdsBoardView: View {
                 }
             }
             .task { await vm.start() }
+            // Вышли из аккаунта в режиме «Избранные» — ручка избранного отвечает
+            // 401, и лента застревала на ошибке. Возвращаем общую ленту.
+            .onChange(of: session.isLoggedIn) { logged in
+                if !logged && vm.favOnly { vm.toggleFavorites() }
+            }
+        }
+        // Вход — отдельной шторкой на самом стеке: шторка формы висит уровнем ниже.
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                AuthView(onAuthed: { showAuth = false })
+            }
+            .environmentObject(session)
         }
     }
 
@@ -173,9 +266,9 @@ struct AdsBoardView: View {
         if !vm.enabled {
             AdsEmptyView(title: "Доска объявлений пока не включена",
                          subtitle: "Заходите позже — раздел скоро откроется.")
-        } else if vm.loading {
+        } else if vm.loading && !vm.hasFilter {
             AdsSkeletonView()
-        } else if let e = vm.error, vm.items.isEmpty {
+        } else if let e = vm.error, vm.items.isEmpty, !vm.hasFilter {
             ErrorRetryView(message: e) { Task { await vm.load(reset: true) } }
         } else {
             ScrollView {
@@ -184,7 +277,29 @@ struct AdsBoardView: View {
                         searchField
                         categoryRow
                     }
-                    if vm.items.isEmpty {
+                    // Ошибка при уже показанном списке (догрузка, обновление
+                    // жестом) раньше не была видна вовсе; при поиске/рубрике —
+                    // под полем, чтобы не прятать клавиатуру.
+                    if let e = vm.error, !vm.loading {
+                        HStack(alignment: .firstTextBaseline, spacing: YMSpace.sm) {
+                            Text(e).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                            Spacer(minLength: 0)
+                            if vm.items.isEmpty {
+                                Button("Повторить") { Task { await vm.load(reset: true) } }
+                                    .font(YMFont.caption)
+                            }
+                        }
+                    }
+                    if !vm.visibleJobs.isEmpty {
+                        shopJobsSection
+                    }
+                    if vm.loading && vm.items.isEmpty {
+                        ProgressView().frame(maxWidth: .infinity).padding(.top, YMSpace.xl)
+                    } else if vm.items.isEmpty && vm.error != nil {
+                        EmptyView()
+                    } else if vm.items.isEmpty && !vm.visibleJobs.isEmpty {
+                        EmptyView()
+                    } else if vm.items.isEmpty {
                         AdsEmptyView(
                             title: vm.favOnly ? "В избранном пусто" : "Ничего не нашлось",
                             subtitle: vm.favOnly
@@ -193,6 +308,11 @@ struct AdsBoardView: View {
                         )
                             .frame(height: 260)
                     } else {
+                        if !vm.visibleJobs.isEmpty {
+                            Text("Объявления")
+                                .font(YMFont.headline).foregroundStyle(YMColor.text)
+                                .padding(.top, YMSpace.sm)
+                        }
                         if vm.total > 0 {
                             Text("Найдено: \(vm.total)")
                                 .font(YMFont.caption).foregroundStyle(YMColor.muted)
@@ -221,7 +341,32 @@ struct AdsBoardView: View {
                 .padding(.top, YMSpace.sm)
                 .padding(.bottom, 96)   // место под кнопку «Подать объявление»
             }
-            .refreshable { await vm.load(reset: true) }
+            .refreshable {
+                await vm.load(reset: true)
+                await vm.loadJobsIfNeeded(force: true)
+            }
+        }
+    }
+
+    /// Вакансии магазинов: первые три, остальные — по кнопке.
+    private var shopJobsSection: some View {
+        VStack(alignment: .leading, spacing: YMSpace.md) {
+            Text("Вакансии магазинов · \(vm.visibleJobs.count)")
+                .font(YMFont.headline).foregroundStyle(YMColor.text)
+            ForEach(vm.jobsExpanded ? vm.visibleJobs : Array(vm.visibleJobs.prefix(3))) { job in
+                NavigationLink(value: AdsRoute.job(job.id)) {
+                    JobCard(job: job)
+                }
+                .buttonStyle(.plain)
+            }
+            if vm.visibleJobs.count > 3 && !vm.jobsExpanded {
+                Button {
+                    vm.jobsExpanded = true
+                } label: {
+                    HStack { Spacer(); Text("Показать все вакансии (\(vm.visibleJobs.count))"); Spacer() }
+                }
+                .font(YMFont.callout)
+            }
         }
     }
 
@@ -276,6 +421,33 @@ struct AdsBoardView: View {
 enum AdsRoute: Hashable {
     case my
     case detail(Int)
+    /// Вакансия магазина из рубрики «Вакансии».
+    case job(Int)
+}
+
+/// Рубрика, где кроме объявлений показываем вакансии магазинов. Рубрики заводит
+/// администратор, отдельного признака нет — узнаём по названию/slug: «Вакансии»
+/// (vakansii, vacancy, jobs) — сама рубрика или подрубрика внутри выбранной;
+/// корневая «Работа» без подрубрик — тоже. «Резюме» и «Ищу работу» — нет.
+/// Паритет с Android (AdsScreen.isJobsCategory).
+private func isVacancyAdCategory(_ c: AdCategory) -> Bool {
+    let n = (c.name ?? "").lowercased(), s = (c.slug ?? "").lowercased()
+    return n.contains("ваканс") || s.contains("vakans") || s.contains("vacanc") || s == "jobs" || s == "job"
+}
+
+func isJobsAdCategory(_ cats: [AdCategory], _ id: Int) -> Bool {
+    guard id != 0 else { return false }
+    if let root = cats.first(where: { $0.stableId == id }) {
+        let kids = root.children ?? []
+        if isVacancyAdCategory(root) || kids.contains(where: isVacancyAdCategory) { return true }
+        if kids.isEmpty {
+            let n = (root.name ?? "").lowercased(), s = (root.slug ?? "").lowercased(), i = (root.icon ?? "").lowercased()
+            return n.contains("работ") || s.contains("rabot") || s == "work" || i == "briefcase"
+        }
+        return false
+    }
+    let child = cats.flatMap { $0.children ?? [] }.first { $0.stableId == id }
+    return child.map(isVacancyAdCategory) ?? false
 }
 
 /// Иконка корневой категории объявлений.

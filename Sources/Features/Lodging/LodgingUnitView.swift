@@ -38,11 +38,26 @@ final class LodgingUnitVM: ObservableObject {
     @Published var myName = ""
     @Published var myPhone = ""
 
+    /// Объект не загрузился (сеть, 5xx) — это не «снят с публикации».
+    @Published var loadError: String?
+
     func load(slug: String) async {
         loading = true
-        data = try? await API.shared.lodgingUnit(slug: slug)
+        // .task срабатывает и при возврате с «Моих поездок» / заведения: раньше
+        // сбой повторной загрузки стирал уже открытый объект, а сбой первой
+        // писал «Объект не найден» без повтора.
+        do {
+            data = try await API.shared.lodgingUnit(slug: slug)
+            loadError = nil
+        } catch is CancellationError {
+        } catch {
+            if data == nil { loadError = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить объект" }
+        }
         await reloadCalendar(slug: slug)
-        if let p: Profile = try? await API.shared.get("api/v1/profile") {
+        // Гостю профиль не запрашиваем: каждый показ объекта слал запрос без
+        // входа (401 → попытка продления → «выход» гостя). После входа .task
+        // срабатывает снова при возврате на экран — тогда и подставим.
+        if Session.shared.isLoggedIn, let p: Profile = try? await API.shared.get("api/v1/profile") {
             myName = p.name ?? ""
             myPhone = p.phone ?? ""
         }
@@ -74,7 +89,16 @@ final class LodgingUnitVM: ObservableObject {
             return
         } catch {
             quote = nil
-            quoteError = "Не удалось посчитать. Проверьте связь."
+            // Отказ сервера (422 «минимальный срок…», «даты прошли») — его текстом;
+            // «Проверьте связь» — только когда связи и правда нет.
+            let api = error as? APIError
+            var answered = api?.rejectStatus != nil
+            if let a = api, case .server = a { answered = true }
+            if answered, let a = api {
+                quoteError = a.errorDescription ?? "Не удалось посчитать"
+            } else {
+                quoteError = "Не удалось посчитать. Проверьте связь."
+            }
         }
         quoteLoading = false
     }
@@ -128,6 +152,8 @@ final class LodgingUnitVM: ObservableObject {
 
     func longRequest(slug: String, desiredFrom: String?, months: Int, adults: Int, children: Int,
                      name: String, phone: String, comment: String) async {
+        // Вторая заявка, пока первая ещё уходит, хозяину не нужна (как у брони).
+        guard !sending else { return }
         sending = true
         defer { sending = false }
         do {
@@ -162,6 +188,55 @@ struct LodgingUnitView: View {
     @State private var children = 0
     @State private var planId: Int?
     @State private var booked: LodgingBookResp?
+
+    /// Даты и число гостей из поиска. Раньше карточка открывалась пустой
+    /// («Выбрать даты», 2 взрослых), и выбранное в поиске приходилось вводить
+    /// заново. Без параметров — как прежде (из «Моих поездок», по ссылке).
+    init(slug: String, from: String? = nil, to: String? = nil, guests: Int? = nil) {
+        self.slug = slug
+        if let f = from, let t = to, LodgingDate.nights(f, t) >= 1 {
+            _from = State(initialValue: f)
+            _to = State(initialValue: t)
+        }
+        if let g = guests, g > 0 { _adults = State(initialValue: g) }
+    }
+    /// Данные гостя из шторки брони. Бронь стартует ПОСЛЕ закрытия шторки
+    /// (как пополнение в кошельке): быстрый ответ приходил, пока шторка ещё
+    /// уезжала, и «Забронировано» или ошибка не показывались вовсе.
+    private struct PendingBook { let name: String; let phone: String; let comment: String }
+    @State private var pendingBook: PendingBook?
+    /// Заявка на длительную аренду — тоже после закрытия шторки: ответ
+    /// («Заявка отправлена» или ошибка) приходил, пока шторка уезжала, и
+    /// алерт с ним не показывался — человек не знал, ушла ли заявка.
+    @State private var pendingLong: PendingBook?
+
+    private func startPendingBook() {
+        if let l = pendingLong {
+            pendingLong = nil
+            Task {
+                await vm.longRequest(slug: slug, desiredFrom: from,
+                                     months: vm.data?.unit?.longTerm?.minMonthsValue ?? 1,
+                                     adults: adults, children: children,
+                                     name: l.name, phone: l.phone, comment: l.comment)
+            }
+        }
+        guard let p = pendingBook else { return }
+        pendingBook = nil
+        guard let f = from, let t = to else { return }
+        Task {
+            if let resp = await vm.book(slug: slug, from: f, to: t,
+                                        adults: adults, children: children, planId: planId,
+                                        name: p.name, phone: p.phone, comment: p.comment) {
+                booked = resp
+                sheet = .booked
+                // Даты уже забронированы: прежний расчёт оставлял активной
+                // «Забронировать», и повторное нажатие оформляло вторую бронь
+                // (ключ повтора после успеха новый). Сбрасываем выбор дат.
+                from = nil
+                to = nil
+            }
+        }
+    }
 
     /// ОДНА шторка на экран (см. шапку файла).
     private enum Sheet: Int, Identifiable {
@@ -221,6 +296,10 @@ struct LodgingUnitView: View {
                 }
                 .padding(.horizontal, YMSpace.xl)
                 .padding(.top, YMSpace.md)
+            } else if let e = vm.loadError {
+                // Ошибка загрузки — с повтором.
+                ErrorRetryView(message: e) { Task { await vm.load(slug: slug) } }
+                    .padding(.top, 40)
             } else {
                 Text("Объект не найден или снят с публикации.")
                     .font(YMFont.callout)
@@ -241,7 +320,7 @@ struct LodgingUnitView: View {
             await vm.recalc(slug: slug, from: from, to: to,
                             adults: adults, children: children, planId: planId)
         }
-        .sheet(item: $sheet) { which in
+        .sheet(item: $sheet, onDismiss: startPendingBook) { which in
             switch which {
             case .dates:
                 LodgingDatesSheet(from: from, to: to,
@@ -258,16 +337,7 @@ struct LodgingUnitView: View {
                     phone: vm.myPhone,
                     note: "По телефону с вами свяжутся при опоздании или вопросах по заселению."
                 ) { name, phone, comment in
-                    guard let f = from, let t = to else { return }
-                    Task {
-                        let resp = await vm.book(slug: slug, from: f, to: t,
-                                                 adults: adults, children: children, planId: planId,
-                                                 name: name, phone: phone, comment: comment)
-                        if let resp = resp {
-                            booked = resp
-                            sheet = .booked
-                        }
-                    }
+                    pendingBook = PendingBook(name: name, phone: phone, comment: comment)
                 }
             case .long:
                 LodgingGuestSheet(
@@ -277,12 +347,8 @@ struct LodgingUnitView: View {
                     phone: vm.myPhone,
                     note: "Онлайн такая аренда не бронируется: хозяин свяжется с вами и договорится о просмотре."
                 ) { name, phone, comment in
-                    Task {
-                        await vm.longRequest(slug: slug, desiredFrom: from,
-                                             months: vm.data?.unit?.longTerm?.minMonthsValue ?? 1,
-                                             adults: adults, children: children,
-                                             name: name, phone: phone, comment: comment)
-                    }
+                    // Отправка — в onDismiss шторки (startPendingBook).
+                    pendingLong = PendingBook(name: name, phone: phone, comment: comment)
                 }
             case .booked:
                 if let b = booked {
@@ -403,7 +469,9 @@ struct LodgingUnitView: View {
 
             // Бронь требует аккаунта (сервер: ['auth']). Гостя ведём на вход,
             // а не показываем ему форму, которая закончится «сессия истекла».
-            Button(canBook ? "Забронировать" : "Выберите даты") {
+            // «Выберите даты» писалось и при выбранных датах — пока идёт расчёт
+            // или когда объект на них занят (причина выше); это сбивало с толку.
+            Button(canBook || (from != nil && to != nil) ? "Забронировать" : "Выберите даты") {
                 Haptics.medium()
                 if session.isLoggedIn { sheet = .booking } else { route = .auth }
             }
@@ -555,6 +623,9 @@ struct LodgingUnitView: View {
                 if session.isLoggedIn { sheet = .long } else { route = .auth }
             }
             .buttonStyle(YMSecondaryButtonStyle())
+            // Пока прежняя заявка/бронь уходит, новую форму не открываем:
+            // её отправка молча отбросилась бы.
+            .disabled(vm.sending)
             .padding(.top, YMSpace.xs)
             Text("Онлайн такая аренда не бронируется: хозяин свяжется с вами и договорится о просмотре.")
                 .font(YMFont.caption).foregroundStyle(YMColor.muted)

@@ -53,8 +53,13 @@ final class AdFormViewModel: ObservableObject {
     }
 
     func start(editAdId: Int) async {
+        // Рубрики не пришли (нет сети) — список выбора пуст, и «Сохранить»
+        // молча отвечало «Выберите категорию», хотя выбрать было не из чего.
+        var catsFailed = false
         if let r = try? await API.shared.adCategories() {
             cats = leaves(r.categories ?? []).map { (cat: $0.0, label: $0.1) }
+        } else {
+            catsFailed = true
         }
         if let w: WalletInfo = try? await API.shared.get("api/v1/wallet") { balance = w.balance ?? 0 }
         if let list: [City] = try? await API.shared.list("api/v1/cities") { cities = list }
@@ -79,6 +84,7 @@ final class AdFormViewModel: ObservableObject {
             chosen = cats.first { $0.cat.stableId == (a.categoryId ?? 0) }?.cat
         }
         if loadFailed { toast = "Не удалось загрузить объявление. Закройте форму и откройте снова" }
+        else if catsFailed { toast = "Не удалось загрузить рубрики. Закройте форму и откройте снова" }
         loading = false
     }
 
@@ -150,7 +156,9 @@ final class AdFormViewModel: ObservableObject {
     }
 
     func addPhotos(_ items: [PhotosPickerItem]) async {
-        guard !busy else { return }
+        // Фото выбрали во время сохранения/оплаты — выбор сбрасывается
+        // (picked = []), и раньше пропадал молча. Говорим, что повторить.
+        guard !busy else { toast = "Подождите окончания сохранения и выберите фото ещё раз"; return }
         busy = true
         defer { busy = false }
         guard let cat = chosen else { toast = "Сначала выберите категорию"; return }
@@ -158,25 +166,46 @@ final class AdFormViewModel: ObservableObject {
         if loadFailed { toast = "Объявление не загрузилось — откройте форму заново"; return }
         // Фото цепляются к объявлению, поэтому черновик должен существовать.
         if adId == 0, await save(silent: true) == 0 { return }
+        // Фото, которое не открылось (iCloud без сети, чужой формат), раньше
+        // пропускалось молча — человек думал, что загрузил все.
+        var unreadable = 0
+        var stopped = false
         for item in items {
-            if photos.count >= cat.photosLimit { toast = "Больше \(cat.photosLimit) фотографий нельзя"; break }
-            guard let raw = try? await item.loadTransferable(type: Data.self) else { continue }
+            if photos.count >= cat.photosLimit { toast = "Больше \(cat.photosLimit) фотографий нельзя"; stopped = true; break }
+            guard let raw = try? await item.loadTransferable(type: Data.self) else { unreadable += 1; continue }
             // Камера iPhone снимает в HEIC — сервер его не принимает; шлём JPEG.
-            let data = ImageUpload.jpeg(from: raw) ?? raw
+            // Перекодирование 48-Мп снимка — не на главном потоке: экран замирал на секунды.
+            let data = await Task.detached(priority: .userInitiated) { ImageUpload.jpeg(from: raw) ?? raw }.value
             do {
                 if let ph = try await API.shared.uploadAdPhoto(adId: adId, jpeg: data) { photos.append(ph) }
             } catch {
                 toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить фото"
+                stopped = true
                 break
             }
         }
+        if unreadable > 0 && !stopped { toast = "Не удалось открыть фото: \(unreadable). Выберите другое" }
     }
 
+    /// Фото, которые уже удаляются: двойное ✕ слало второй DELETE, тот отвечал
+    /// 404, и после удачного удаления всплывало «Не удалось удалить фото».
+    private var deletingPhotoIds = Set<Int>()
+
     func deletePhoto(_ p: AdPhoto) async {
-        guard adId > 0 else { return }
+        guard adId > 0, !deletingPhotoIds.contains(p.stableId) else { return }
+        deletingPhotoIds.insert(p.stableId)
+        defer { deletingPhotoIds.remove(p.stableId) }
         do { try await API.shared.adPhotoDelete(adId: adId, photoId: p.stableId)
              photos.removeAll { $0.stableId == p.stableId } }
-        catch { toast = "Не удалось удалить фото" }
+        catch {
+            // 404 — фото уже удалено (с сайта, другим устройством): убираем из
+            // формы, а не пишем «не удалось». Иначе — причина словами.
+            if (error as? APIError)?.rejectStatus == 404 {
+                photos.removeAll { $0.stableId == p.stableId }
+            } else {
+                toast = (error as? LocalizedError)?.errorDescription ?? "Не удалось удалить фото"
+            }
+        }
     }
 
     /// Оплатить и опубликовать. onDone получает id опубликованного объявления.
@@ -193,7 +222,12 @@ final class AdFormViewModel: ObservableObject {
             onDone(id)
         } catch {
             let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось опубликовать"
-            if msg.contains("хватает") { shortage = msg } else { toast = msg }
+            // Нехватку денег узнаём по типу ошибки (409 с суммами), а не только
+            // по слову в тексте: иной текст сервера уходил коротким тостом без
+            // подсказки пополнить кошелёк.
+            var isShortage = msg.contains("хватает")
+            if let e = error as? APIError, case .walletShortage = e { isShortage = true }
+            if isShortage { shortage = msg } else { toast = msg }
         }
     }
 }
@@ -215,8 +249,12 @@ struct AdFormView: View {
             .navigationTitle(editAdId > 0 ? "Правка объявления" : "Новое объявление")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) { Button("Закрыть") { dismiss() } }
+                ToolbarItem(placement: .navigationBarLeading) { Button("Закрыть") { dismiss() }.disabled(vm.busy) }
             }
+            // Пока идёт оплата/публикация или загрузка фото, форма не закрывается
+            // (ни «Закрыть», ни смахивание): раньше закрытая посреди оплаты форма
+            // прятала итог — списано ли и опубликовано ли.
+            .interactiveDismissDisabled(vm.busy)
             .task { await vm.start(editAdId: editAdId) }
             // Один параметр: двухпараметрический onChange — это iOS 17, а цель
             // развёртывания проекта 16.0 (project.yml), и сборка на нём падает.
@@ -238,7 +276,11 @@ struct AdFormView: View {
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(YMColor.text.opacity(0.9), in: Capsule())
                         .padding(.bottom, YMSpace.lg)
-                        .task { try? await Task.sleep(nanoseconds: 2_500_000_000); vm.toast = nil }
+                        // Свой таймер у каждого сообщения: таймер прежнего тоста гасил новый раньше срока.
+                        .task(id: t) {
+                            try? await Task.sleep(nanoseconds: 2_500_000_000)
+                            if !Task.isCancelled { vm.toast = nil }
+                        }
                 }
             }
         }
@@ -318,6 +360,11 @@ struct AdFormView: View {
                                             .font(.system(size: 20))
                                             .foregroundStyle(.white, YMColor.statusCancel)
                                     }
+                                    // В строке Form кнопки со стилем по умолчанию
+                                    // срабатывают ВСЕ сразу от касания по строке —
+                                    // одно касание удаляло все фото. borderless —
+                                    // каждая ✕ только своя (как в iOS-продавце).
+                                    .buttonStyle(.borderless)
                                     .offset(x: 6, y: -6)
                                 }
                             }

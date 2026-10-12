@@ -61,7 +61,10 @@ extension API {
 
     /// «Мои поездки»: брони жилья клиента.
     func lodgingTrips() async throws -> [LodgingTrip] {
-        try await get("api/v1/lodging/bookings")
+        // list, а не get: одна бронь с неожиданным полем (объект жилья, заведение)
+        // роняла разбор всего массива — «Мои поездки» показывали ошибку вместо
+        // остальных броней. list пропускает битую запись и пишет её в журнал.
+        try await list("api/v1/lodging/bookings")
     }
 
     func lodgingCancel(bookingId: Int) async throws -> LodgingCancelResp {

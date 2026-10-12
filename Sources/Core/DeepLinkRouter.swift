@@ -11,7 +11,10 @@ final class DeepLinkRouter: ObservableObject {
     /// Разбирает входящую ссылку:
     ///   https://yumurta.ru/r/КОД   / yumurta://r/КОД      — приглашение
     ///   https://yumurta.ru/shop/СЛАГ / yumurta://shop/СЛАГ — организация
-    func handle(url: URL) {
+    /// true — ссылку узнали и открыли внутри приложения (сторис по false
+    /// открывают её в браузере, чтобы «Подробнее» не молчало).
+    @discardableResult
+    func handle(url: URL) -> Bool {
         let parts = url.pathComponents.filter { $0 != "/" }
         // Организация: тот же экран, что открывается по тапу на уведомление
         // «новое заведение в городе».
@@ -26,9 +29,9 @@ final class DeepLinkRouter: ObservableObject {
         // пробелом раньше меняла адрес запроса или роняла приложение.
         if let slug = shopSlug, slug.range(of: "^[A-Za-z0-9_-]{1,120}$", options: .regularExpression) != nil {
             DispatchQueue.main.async { NavCoordinator.shared.openOrg(slug: slug) }
-            return
+            return true
         }
-        if shopSlug != nil { return }
+        if shopSlug != nil { return false }
         var code: String?
         if url.host == "r", let first = parts.first {            // yumurta://r/КОД
             code = first
@@ -38,6 +41,8 @@ final class DeepLinkRouter: ObservableObject {
         if let code = code, !code.isEmpty {
             let value = code.uppercased()
             DispatchQueue.main.async { self.referralCode = value }
+            return true
         }
+        return false
     }
 }

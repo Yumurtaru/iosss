@@ -19,6 +19,7 @@ struct ReferralView: View {
     /// Необязательный пред-заполненный код друга (например, из deeplink /r/CODE).
     var prefillCode: String? = nil
 
+    @EnvironmentObject private var session: Session
     @State private var info: ReferralInfo?
     @State private var loading = true
     @State private var loadError: String?
@@ -50,6 +51,11 @@ struct ReferralView: View {
         .navigationTitle("Пригласить друга")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            // Ссылку-приглашение /r/КОД чаще всего открывает тот, кто ещё не
+            // вошёл. Раньше гость получал «Сессия истекла» с вечным «Повторить»,
+            // и код друга пропадал. Теперь — вход; после него (.task срабатывает
+            // снова при возврате на экран) код применяется.
+            guard session.isLoggedIn else { loading = false; return }
             await load()
             // Код из ссылки применяем один раз. После «Код принят» поле очищается,
             // и при возврате на экран (.task снова) код уходил повторно — ответ
@@ -64,7 +70,9 @@ struct ReferralView: View {
 
     @ViewBuilder
     private var content: some View {
-        if loading {
+        if !session.isLoggedIn {
+            guestState
+        } else if loading {
             VStack(spacing: YMSpace.lg) {
                 SkeletonBox(radius: YMRadius.card).frame(height: 150)
                 SkeletonBox(radius: YMRadius.card).frame(height: 170)
@@ -81,6 +89,24 @@ struct ReferralView: View {
                 howItWorksCard
             }
         }
+    }
+
+    // MARK: - Гость (вход не выполнен)
+
+    private var guestState: some View {
+        let p = (prefillCode ?? "").trimmingCharacters(in: .whitespaces).uppercased()
+        return VStack(alignment: .leading, spacing: YMSpace.md) {
+            Text("🎁").font(.system(size: 34))
+            Text(p.isEmpty
+                 ? "Войдите или зарегистрируйтесь — здесь появится ваш код-приглашение."
+                 : "Код друга \(p) применится после входа или регистрации.")
+                .font(YMFont.body).foregroundStyle(YMColor.text)
+            NavigationLink { AuthView() } label: { Text("Войти") }
+                .buttonStyle(YMPrimaryButtonStyle())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(YMSpace.xl)
+        .ymCard()
     }
 
     // MARK: - Состояние ошибки
@@ -283,6 +309,8 @@ struct ReferralView: View {
         loading = true; loadError = nil
         do {
             info = try await API.shared.get("api/v1/referral")
+        } catch is CancellationError {
+            // Ушли с экрана посреди загрузки — это не ошибка («Не удалось загрузить»).
         } catch {
             loadError = (error as? APIError)?.errorDescription ?? "Не удалось загрузить"
         }
@@ -291,7 +319,9 @@ struct ReferralView: View {
 
     private func apply() async {
         let clean = friendCode.trimmingCharacters(in: .whitespaces).uppercased()
-        guard !clean.isEmpty else { return }
+        // Двойной тап «Применить» отправлял код дважды: второй ответ «код уже
+        // применён» затирал сообщение об успехе.
+        guard !clean.isEmpty, !applying else { return }
         applying = true; applyMsg = nil
         do {
             let res: ReferralApplyResp = try await API.shared.post(

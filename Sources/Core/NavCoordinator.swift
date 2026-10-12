@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SwiftUI
 
 /// Централизованный координатор навигации premium-клиента.
 ///
@@ -37,6 +38,18 @@ final class NavCoordinator: ObservableObject {
     /// на Главной, отдельной нижней вкладки нет (там уже пять).
     @Published var showLodging = false
 
+    /// Открыт профиль (шторка с Главной). Пуш и ссылка раньше открывали заказ,
+    /// чат или заведение ПОД этой шторкой: вкладка переключалась незаметно, а
+    /// чат и обложка заведения не показывались вовсе (с вьюхи, под которой уже
+    /// открыта шторка, SwiftUI второе окно не показывает). HomeView держит
+    /// шторку на этом флаге, и переходы из пуша сначала её закрывают.
+    @Published var profileOpen = false
+
+    /// Товар из пуша «цена снизилась / снова в наличии» (ключ product_id без
+    /// type). Раньше тап открывал приложение и ничего не показывал. Главная
+    /// открывает карточку и сбрасывает значение.
+    @Published var pendingProductId: Int?
+
     // ── Диалог конфликта корзины (single-store) ──
     /// Показать ли диалог конфликта.
     @Published var cartConflict = false
@@ -64,9 +77,13 @@ final class NavCoordinator: ObservableObject {
         guard slug.range(of: "^[A-Za-z0-9_-]{1,120}$", options: .regularExpression) != nil else { return }
         // Открыты корзина или чат — сначала закрываем их: с одной вьюхи SwiftUI
         // не покажет вторую шторку, и организация из пуша не открылась бы.
-        if showCart || chatOrderId != nil {
+        // То же с «Жильём» и профилем: ссылка или пуш при них не открывали
+        // заведение, а обложка всплывала позже сама, когда человек их закрывал.
+        if showCart || chatOrderId != nil || showLodging || profileOpen {
             showCart = false
             chatOrderId = nil
+            showLodging = false
+            profileOpen = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.pendingOrgSlug = slug
             }
@@ -74,7 +91,38 @@ final class NavCoordinator: ObservableObject {
             pendingOrgSlug = slug
         }
     }
+    /// Тап по push, когда поверх вкладок что-то открыто. Раньше «статус заказа»
+    /// переключал вкладку «Заказы» ПОД открытой корзиной/«Жильём»/организацией —
+    /// человек ничего не видел; чат не открывался из-под корзины и «Жилья» (с
+    /// одной вьюхи вторую шторку SwiftUI не показывает). Сначала закрываем, потом
+    /// переходим. closeAll = false — для чата: организацию не закрываем, у её
+    /// обложки свой показ чата.
+    func revealForPush(closeAll: Bool, then action: @escaping () -> Void) {
+        let covered = showCart || showLodging || profileOpen
+            || (closeAll && (pendingOrgSlug != nil || chatOrderId != nil))
+        guard covered else { action(); return }
+        showCart = false
+        showLodging = false
+        profileOpen = false
+        if closeAll { pendingOrgSlug = nil; chatOrderId = nil }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { action() }
+    }
     func openChat(orderId: Int) { chatOrderId = orderId }
     func openChatList() { chatOrderId = -1 }
     func closeChat() { chatOrderId = nil }
+}
+
+/// Экран открыт внутри шторки/обложки поверх вкладок (профиль, «Жильё»).
+/// Общие окна корзины и диалог «очистить корзину?» висят на корне вкладок и
+/// оттуда, пока открыта шторка, не показываются: «Корзина» в заведении из
+/// «Избранного» и «В корзину» с товаром другого заведения молчали. Такие
+/// экраны показывают эти окна сами.
+private struct YMNestedPresentationKey: EnvironmentKey {
+    static let defaultValue = false
+}
+extension EnvironmentValues {
+    var ymNestedPresentation: Bool {
+        get { self[YMNestedPresentationKey.self] }
+        set { self[YMNestedPresentationKey.self] = newValue }
+    }
 }

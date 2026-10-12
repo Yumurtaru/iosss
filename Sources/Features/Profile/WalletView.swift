@@ -165,6 +165,14 @@ struct WalletView: View {
             VStack(alignment: .leading, spacing: YMSpace.md) {
                 heroCard
 
+                // Обновление (жестом, после оплаты) не прошло, а старый баланс на
+                // экране — раньше сбой был не виден, и баланс казался актуальным.
+                if let e = vm.error {
+                    Text("Не удалось обновить баланс: " + e)
+                        .font(YMFont.caption)
+                        .foregroundStyle(YMColor.statusCancel)
+                }
+
                 if let n = vm.notice {
                     HStack(spacing: YMSpace.sm) {
                         if vm.awaitingTopupId != nil { ProgressView().scaleEffect(0.8) }
@@ -331,9 +339,18 @@ private struct TopupSheet: View {
 
     private let presets: [Decimal] = [500, 1000, 3000, 5000]
 
+    /// Строгий разбор: Decimal(string:) читает только начало строки, и
+    /// вставленное «150 000» становилось 150 ₽ (проходило проверку минимума),
+    /// а «1000,5,5» — 1000,5. Пробелы (и неразрывные) убираем, запятая → точка,
+    /// остальное должно быть числом целиком, не больше двух знаков после точки
+    /// («100,» при наборе — это ещё 100, кнопку не гасим).
     private var parsed: Decimal? {
-        let t = amountText.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
-        return t.isEmpty ? nil : Decimal(string: t)
+        let t = amountText
+            .filter { !$0.isWhitespace }
+            .replacingOccurrences(of: ",", with: ".")
+        guard !t.isEmpty,
+              t.range(of: #"^[0-9]+(\.[0-9]{0,2})?$"#, options: .regularExpression) != nil else { return nil }
+        return Decimal(string: t)
     }
 
     var body: some View {

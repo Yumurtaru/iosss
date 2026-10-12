@@ -22,6 +22,7 @@ struct CachedAsyncImage<Content: View>: View {
 
     @State private var phase: AsyncImagePhase
     @State private var shownURL: URL?
+    @ObservedObject private var net = NetworkMonitor.shared
 
     init(url: URL?, @ViewBuilder content: @escaping (AsyncImagePhase) -> Content) {
         self.url = url
@@ -43,7 +44,11 @@ struct CachedAsyncImage<Content: View>: View {
             content(phase)
             Color.clear
                 .frame(width: 0, height: 0)
-                .task(id: url) { await load() }
+                // Связь вернулась — несостоявшиеся загрузки повторяются сами:
+                // раньше фото, не скачанные без сети, оставались заглушками, пока
+                // карточку не прокрутят с экрана и обратно. Скачанные не трогаем
+                // (load() выходит сразу при показанной картинке).
+                .task(id: ImageLoadKey(url: url, online: net.online)) { await load() }
         }
     }
 
@@ -76,6 +81,12 @@ struct CachedAsyncImage<Content: View>: View {
             phase = .failure(error)
         }
     }
+}
+
+/// Ключ загрузки картинки: адрес и наличие сети (см. CachedAsyncImage.body).
+private struct ImageLoadKey: Hashable {
+    let url: URL?
+    let online: Bool
 }
 
 /// Сессия, кэши и раскодирование картинок — общие для всего приложения.
@@ -114,7 +125,19 @@ enum ImagePipeline {
         }
         guard let raw = UIImage(data: data) else { throw URLError(.cannotDecodeContentData) }
         // Раскодировать заранее, не на главном потоке — иначе подтормаживает прокрутка.
-        let img = await raw.byPreparingForDisplay() ?? raw
+        // Большой снимок (4000×3000 в отзыве или объявлении) раскрывался целиком —
+        // около 48 МБ на одну картинку, и несколько таких фото подряд выбивали
+        // приложение по памяти. Экрану телефона хватает 2000 точек по большей стороне.
+        let maxPixel: CGFloat = 2000
+        let longest = max(raw.size.width * raw.scale, raw.size.height * raw.scale)
+        var prepared: UIImage?
+        if longest > maxPixel, longest > 0 {
+            let k = maxPixel / longest
+            let target = CGSize(width: (raw.size.width * k).rounded(), height: (raw.size.height * k).rounded())
+            prepared = await raw.byPreparingThumbnail(ofSize: target)
+        }
+        if prepared == nil { prepared = await raw.byPreparingForDisplay() }
+        let img = prepared ?? raw
         let cost = Int(img.size.width * img.scale * img.size.height * img.scale * 4)
         memory.setObject(img, forKey: url as NSURL, cost: cost)
         return img

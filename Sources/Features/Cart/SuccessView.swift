@@ -25,20 +25,63 @@ struct SuccessView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var checkPopped = false
+    /// Конфетти крутилось без конца (TimelineView .animation — перерисовка каждый
+    /// кадр), пока экран открыт: батарея и нагрев. Гасим через несколько секунд.
+    @State private var confettiOn = true
 
     // Номер заказа: dailyNumber (виден клиенту) → id → 0.
-    private var orderNumber: Int { order.dailyNumber ?? order.id ?? 0 }
+    // Сервер отдаёт номер заказа в order_id, а не в id: без daily_number было «№0».
+    private var orderNumber: Int { order.dailyNumber ?? order.resolvedId ?? 0 }
 
-    // TODO(API): OrderCreateResult не содержит ETA. Показываем типовой диапазон;
-    // точное время доставки приходит на экране трекинга (TrackData.etaMinutes).
-    private let etaText = "25–35 мин"
+    /// П-22.2: срок от сервера. Предзаказ — его время; оба eta nil (старый
+    /// сервер, повтор duplicate) — ничего; равны — «~N мин»; иначе «N–M мин».
+    private var etaLine: String? {
+        if let p = order.preorderAt {
+            return "Предзаказ на \(SuccessView.preorderText(p))"
+        }
+        let lo = order.etaMin.flatMap { $0 > 0 ? $0 : nil }
+        let hi = order.etaMax.flatMap { $0 > 0 ? $0 : nil }
+        let span: String
+        switch (lo, hi) {
+        case (let a?, let b?) where a == b: span = "~\(a) мин"
+        case (let a?, let b?):          span = "\(min(a, b))–\(max(a, b)) мин"
+        case (let a?, nil):             span = "~\(a) мин"
+        case (nil, let b?):             span = "~\(b) мин"
+        default:                        return nil
+        }
+        switch order.deliveryType {
+        case "delivery":           return "Ожидаемая доставка: \(span)"
+        case "pickup", "dine_in":  return "Будет готов примерно через \(span)"
+        default:                   return "Ориентировочно: \(span)"
+        }
+    }
+
+    /// «2026-10-12 14:30:00» (время Москвы) → «12 октября, 14:30». Не разобрали — как есть.
+    private static func preorderText(_ raw: String) -> String {
+        let s = raw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "T", with: " ")
+        let inF = DateFormatter()
+        inF.locale = Locale(identifier: "en_US_POSIX")
+        inF.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
+        for fmt in ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"] {
+            inF.dateFormat = fmt
+            if let d = inF.date(from: String(s.prefix(fmt == "yyyy-MM-dd HH:mm" ? 16 : 19))) {
+                let outF = DateFormatter()
+                outF.locale = Locale(identifier: "ru_RU")
+                outF.timeZone = inF.timeZone   // время заведения (Москва), а не пояса телефона
+                outF.dateFormat = "d MMMM, HH:mm"
+                return outF.string(from: d)
+            }
+        }
+        return s
+    }
 
     var body: some View {
         ZStack {
             YMColor.bg.ignoresSafeArea()
 
-            if !reduceMotion {
+            if !reduceMotion && confettiOn {
                 ConfettiView().ignoresSafeArea().allowsHitTesting(false)
+                    .transition(.opacity)
             }
 
             VStack(spacing: 0) {
@@ -62,7 +105,13 @@ struct SuccessView: View {
                     .foregroundStyle(YMColor.text)
                     .padding(.top, YMSpace.xxl)
 
-                Text("Заведение уже приняло заказ №\(orderNumber).\nМы уведомим, когда курьер будет в пути.")
+                // Заказ только что создан: заведение его ещё не приняло, а у
+                // самовывоза и заказа за столиком курьера нет вовсе. Раньше здесь
+                // было «уже приняло… курьер будет в пути» и выдуманная плашка
+                // «Ожидаемая доставка · 25–35 мин» (сервер срок не присылает) —
+                // человек ждал курьера к самовывозу. Точный статус — в «Следить за заказом».
+                // Номера в ответе нет (старый сервер) — без «№0».
+                Text((orderNumber > 0 ? "Заказ №\(orderNumber)" : "Заказ") + " передан в заведение.\nМы сообщим, когда его примут.")
                     .font(YMFont.body)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(YMColor.muted)
@@ -70,19 +119,15 @@ struct SuccessView: View {
                     .padding(.top, YMSpace.sm)
                     .padding(.horizontal, YMSpace.xxl)
 
-                // ETA-плашка.
-                HStack(spacing: YMSpace.xs) {
-                    Text("Ожидаемая доставка ·")
-                        .font(.system(size: 14))
+                // П-22.2: срок/время предзаказа — только если сервер их прислал.
+                if let eta = etaLine {
+                    Text(eta)
+                        .font(YMFont.headline)
+                        .multilineTextAlignment(.center)
                         .foregroundStyle(YMColor.text)
-                    Text(etaText)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(YMColor.text)
+                        .padding(.top, YMSpace.md)
+                        .padding(.horizontal, YMSpace.xxl)
                 }
-                .padding(.horizontal, 18).padding(.vertical, 10)
-                .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
-                .padding(.top, YMSpace.xl)
 
                 Spacer()
 
@@ -108,6 +153,9 @@ struct SuccessView: View {
                 checkPopped = true
             } else {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) { checkPopped = true }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                withAnimation(.easeOut(duration: 0.6)) { confettiOn = false }
             }
         }
     }

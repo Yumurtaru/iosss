@@ -69,6 +69,12 @@ struct ProfileView: View {
     @State private var showLogoutConfirm = false
     @State private var showDeleteConfirm = false
     @State private var deleteError: String?
+    /// Удаление аккаунта в полёте: повторное «Удалить» слало второй DELETE
+    /// (уже без сессии — 401), а итог первого терялся.
+    @State private var deleting = false
+    /// Профиль не загрузился (нет сети) — раньше шапка молча показывала
+    /// «Профиль» и нули, без причины и без повтора.
+    @State private var profileFailed = false
 
     private var displayName: String { profile?.name?.isEmpty == false ? profile!.name! : "Профиль" }
     private var avatarLetter: String { String((profile?.name ?? "U").prefix(1)).uppercased() }
@@ -79,6 +85,17 @@ struct ProfileView: View {
                 VStack(spacing: 0) {
                     if session.isLoggedIn {
                         header
+                        if profileFailed && profile == nil {
+                            HStack(spacing: YMSpace.sm) {
+                                Text("Не удалось загрузить профиль. Проверьте связь.")
+                                    .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                                Spacer(minLength: 0)
+                                Button("Повторить") { Task { await load() } }
+                                    .font(YMFont.caption)
+                            }
+                            .padding(.horizontal, YMSpace.xl)
+                            .padding(.top, YMSpace.xs)
+                        }
                         // Карта клиента: штрихкод для кассы магазина. Блок сам
                         // ничего не рисует, если код не пришёл или невалиден.
                         if let code = profile?.clientCode {
@@ -107,12 +124,30 @@ struct ProfileView: View {
         .preferredColorScheme(themeScheme)
         .task { if session.isLoggedIn { await load() } }
         .onChange(of: session.isLoggedIn) { logged in
-            if logged { Task { await load() } } else { profile = nil }
+            if logged { Task { await load() } } else {
+                profile = nil
+                // Счётчики прежнего аккаунта не должны показываться следующему,
+                // пока у него грузится профиль.
+                ordersCount = 0; favCount = 0; bookingsCount = 0; unreadNotifs = 0
+                // Сессия кончилась на открытом разделе (кошелёк, бонусы, записи):
+                // экран прежнего аккаунта оставался в стеке, и после входа другого
+                // человека тот видел чужие данные. Возвращаемся к корню профиля.
+                if !path.isEmpty { path = NavigationPath() }
+            }
         }
         // Вернулись к корню профиля (например, из уведомлений) — счётчик обновляем.
         // Только счётчик уведомлений: полная перезагрузка дублировала запросы
         // и при сбое сети стирала шапку профиля.
-        .onChange(of: path.count) { n in if n == 0, session.isLoggedIn { Task { await loadUnread() } } }
+        // Шапку перечитываем тоже (после «Редактировать профиль» там было старое
+        // имя и телефон), но без стирания: не пришло — остаётся прежняя.
+        .onChange(of: path.count) { n in
+            if n == 0, session.isLoggedIn {
+                Task {
+                    await loadUnread()
+                    if let p: Profile = try? await API.shared.get("api/v1/profile"), session.isLoggedIn { profile = p }
+                }
+            }
+        }
         .confirmationDialog("Выйти из аккаунта?", isPresented: $showLogoutConfirm, titleVisibility: .visible) {
             Button("Выйти", role: .destructive) { logout() }
             Button("Отмена", role: .cancel) {}
@@ -336,11 +371,12 @@ struct ProfileView: View {
 
     // ── Удаление аккаунта ──
     private var deleteAccountButton: some View {
-        Button { showDeleteConfirm = true } label: {
-            Text("Удалить аккаунт")
+        Button { if !deleting { showDeleteConfirm = true } } label: {
+            Text(deleting ? "Удаляем аккаунт…" : "Удалить аккаунт")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(YMColor.statusCancel)
         }
+        .disabled(deleting)
         .padding(.top, YMSpace.xl)
     }
 
@@ -380,13 +416,19 @@ struct ProfileView: View {
         Task {
             // Ждём ответ не дольше 3 секунд: без сети выход не должен «висеть».
             let req = Task { try? await API.shared.postVoid("api/v1/auth/logout", body: body) }
-            await withTaskGroup(of: Void.self) { g in
-                g.addTask { await req.value }
-                g.addTask { try? await Task.sleep(nanoseconds: 3_000_000_000) }
-                await g.next()
-                g.cancelAll()
+            // Раньше ждали через группу задач — а группа ждёт ВСЕХ детей, и выход
+            // без сети висел до 40 с. Теперь ждём, что наступит раньше: ответ или
+            // 3 секунды. Сам запрос не отменяем — он уже несёт токен и доведёт
+            // выход на сервере (закрытие сессии, отвязку push) и после signOut.
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                let once = ResumeOnce(c)
+                Task { await req.value; once.fire() }
+                Task { try? await Task.sleep(nanoseconds: 3_000_000_000); once.fire() }
             }
             session.signOut(clearLocalData: true)
+            // Явный выход уже очистил корзину: что гость наберёт дальше, при
+            // следующем входе (любым аккаунтом) не стираем (см. AuthLastUser).
+            AuthLastUser.forget()
             profile = nil
         }
     }
@@ -394,6 +436,8 @@ struct ProfileView: View {
     private func deleteAccount() {
         // TODO(API): эндпоинт удаления аккаунта (напр. DELETE api/v1/profile) в контракте
         // ещё не подтверждён. Пока — graceful: пытаемся вызвать, при отсутствии просто выходим.
+        guard !deleting else { return }
+        deleting = true
         Task {
             // Маршрут удаления — DELETE /api/v1/account (routes/api_v1.php).
             // Раньше здесь стоял "api/v1/profile": такого метода у этого пути
@@ -405,30 +449,52 @@ struct ProfileView: View {
             // и он считал аккаунт удалённым.
             do {
                 try await API.shared.deleteVoid("api/v1/account")
-                await MainActor.run { session.signOut(clearLocalData: true); profile = nil }
+                await MainActor.run { deleting = false; session.signOut(clearLocalData: true); AuthLastUser.forget(); profile = nil }
             } catch {
                 let msg = (error as? LocalizedError)?.errorDescription ?? "Не удалось удалить аккаунт"
-                await MainActor.run { deleteError = msg }
+                await MainActor.run { deleting = false; deleteError = msg }
             }
         }
     }
 
     private func load() async {
-        profile = try? await API.shared.get("api/v1/profile")
         var q: [String: String] = [:]
         if let cid = session.cityId { q["city_id"] = String(cid) }
-        let orders: [Order] = (try? await API.shared.list("api/v1/orders", query: q)) ?? []
+        let query = q
+        // Шесть независимых запросов шли по очереди — на мобильной сети шапка и
+        // счётчики появлялись через несколько секунд. Теперь параллельно.
+        async let profileReq: Profile? = try? await API.shared.get("api/v1/profile")
         // Записи на услугу приходят в этом же списке (на сервере запись — это заказ),
         // но считаются отдельно, в счётчике «записи». Иначе один визит удваивал бы статистику.
-        ordersCount = orders.filter { $0.isAppointment != true }.count
-        let favShops: [Shop] = (try? await API.shared.list("api/v1/favorites")) ?? []
-        let favProducts: [Product] = (try? await API.shared.list("api/v1/product-favorites")) ?? []
-        favCount = favShops.count + favProducts.count
-        let appts: [Appointment] = (try? await API.shared.list("api/v1/appointments")) ?? []
-        bookingsCount = appts.count
+        async let ordersReq: [Order]? = try? await API.shared.list("api/v1/orders", query: query)
+        async let shopsReq: [Shop]? = try? await API.shared.list("api/v1/favorites")
+        async let productsReq: [Product]? = try? await API.shared.list("api/v1/product-favorites")
+        // П-21.3: записи постранично — счётчик по всем страницам, как в «Мои записи».
+        async let apptsReq: [Appointment]? = try? await API.shared.allPages("api/v1/appointments", key: { (a: Appointment) in "\(a.id)-\(a.orderId ?? 0)" })
         // meta.unread — непрочитанные ВСЕГО (волна А3); на странице их максимум 20.
         // Старый сервер unread не присылает — считаем по первой странице, как раньше.
-        let notifPage: Page<AppNotification>? = try? await API.shared.page("api/v1/notifications")
+        async let notifReq: Page<AppNotification>? = try? await API.shared.page("api/v1/notifications")
+
+        // Сбой (метро, смена вкладки без сети) не стирает уже показанное: раньше
+        // шапка превращалась в «Профиль» без телефона, а счётчики — в нули.
+        let loaded = await profileReq
+        if let p = loaded, session.isLoggedIn {
+            profile = p
+            AuthLastUser.seed(p.id)
+        }
+        profileFailed = loaded == nil
+        if let orders = await ordersReq {
+            ordersCount = orders.filter { $0.isAppointment != true }.count
+        }
+        let favShops = await shopsReq
+        let favProducts = await productsReq
+        if let favShops, let favProducts {
+            favCount = favShops.count + favProducts.count
+        }
+        if let appts = await apptsReq {
+            bookingsCount = appts.count
+        }
+        let notifPage = await notifReq
         unreadNotifs = notifPage.map { p in p.meta?.unread ?? p.items.filter { !$0.read }.count } ?? 0
     }
 
@@ -477,5 +543,16 @@ private enum ThemeOption: CaseIterable {
         case 2:  self = .dark
         default: self = .system
         }
+    }
+}
+
+/// Продолжение, которое возобновляется ровно один раз (кто первый — ответ или таймер).
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<Void, Never>?
+    init(_ c: CheckedContinuation<Void, Never>) { cont = c }
+    func fire() {
+        lock.lock(); let c = cont; cont = nil; lock.unlock()
+        c?.resume()
     }
 }

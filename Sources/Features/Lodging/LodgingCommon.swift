@@ -70,33 +70,50 @@ struct LodgingMonthGrid: View {
     let days: [String: LodgingDay]
     let onPick: (String) -> Void
 
-    private var cal: Calendar {
+    /// Один календарь на все сетки: раньше он создавался заново при каждом
+    /// обращении — по нескольку раз на каждую из ~120 клеток листа дат.
+    private static let utcCal: Calendar = {
         var c = Calendar(identifier: .gregorian)
         c.timeZone = TimeZone(identifier: "UTC")!
         c.firstWeekday = 2   // понедельник
         return c
-    }
+    }()
+    private var cal: Calendar { Self.utcCal }
 
     private var monthStart: Date {
-        let now = Date()
+        // «Сегодня» — по Москве, как и отсечка прошедших дней (LodgingDate.today).
+        // По UTC с полуночи до трёх ночи 1-го числа первым показывался прошлый
+        // месяц целиком серым.
+        let now = LodgingDate.api.date(from: LodgingDate.today) ?? Date()
         let comps = cal.dateComponents([.year, .month], from: now)
         let first = cal.date(from: comps) ?? now
         return cal.date(byAdding: .month, value: monthShift, to: first) ?? first
     }
 
     private var title: String {
+        Self.titleOut.string(from: monthStart).capitalized
+    }
+    /// Один форматтер на все месяцы: раньше каждое касание по дню пересоздавало
+    /// его в каждой из четырёх сеток листа дат.
+    private static let titleOut: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "ru_RU")
         f.timeZone = TimeZone(identifier: "UTC")
         f.dateFormat = "LLLL yyyy"
-        return f.string(from: monthStart).capitalized
-    }
+        return f
+    }()
 
     var body: some View {
         let daysInMonth = cal.range(of: .day, in: .month, for: monthStart)?.count ?? 30
         // weekday: 1=Вс … 7=Сб. Нам нужна неделя с понедельника.
         let firstWeekday = cal.component(.weekday, from: monthStart)
         let lead = (firstWeekday + 5) % 7
+        // Один раз на отрисовку месяца, а не дважды на каждую клетку.
+        let blocked = firstBlocked
+        // Начало месяца и «сегодня» — тоже один раз на месяц: раньше каждая
+        // клетка заново разбирала дату и форматировала «сегодня».
+        let start = monthStart
+        let today = LodgingDate.today
 
         VStack(alignment: .leading, spacing: YMSpace.sm) {
             Text(title).font(YMFont.headline).foregroundColor(YMColor.text)
@@ -109,22 +126,25 @@ struct LodgingMonthGrid: View {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 7), spacing: 2) {
                 ForEach(0..<lead, id: \.self) { _ in Color.clear.frame(height: 52) }
                 ForEach(1...daysInMonth, id: \.self) { day in
-                    let iso = isoFor(day)
+                    let iso = isoFor(day, start)
                     let info = days[iso]
                     // Без календаря объекта считаем день доступным: на экране
                     // поиска остатки ещё неизвестны, их проверит сервер.
                     let free = info?.canStay ?? true
-                    let past = iso < LodgingDate.today
+                    let past = iso < today
                     // Выбираем выезд: день выезда ночь не занимает и может быть
                     // занят (кто-то в этот день заезжает). Раньше такой день был
                     // серым, и бронь «10–12, а 12-го заезд другого гостя» сделать
                     // было нельзя. Зато все ночи до выезда должны быть свободны.
                     let pickingCheckout = from != nil && to == nil && iso > from!
                     let checkoutOk = pickingCheckout && !(info?.noDeparture ?? false)
-                        && (firstBlocked == nil || iso <= firstBlocked!)
+                        && (blocked == nil || iso <= blocked!)
                     // Свободный день за занятой ночью остаётся активным: нажатие
                     // по нему начинает новый выбор с этого дня (см. pick).
-                    let canPick = checkoutOk || free
+                    // День «без заезда» (cta) нельзя выбрать заездом: раньше он был
+                    // активен, и расчёт после выбора дат отвечал «нельзя». Выездом
+                    // такой день по-прежнему выбирается (checkoutOk).
+                    let canPick = checkoutOk || (free && !(info?.noArrival ?? false))
                     let selected = iso == from || iso == to
                     let inRange = from != nil && to != nil && iso >= from! && iso <= to!
                     LodgingDayCell(
@@ -146,8 +166,8 @@ struct LodgingMonthGrid: View {
         return days.filter { $0.key >= f && !$0.value.canStay }.keys.min()
     }
 
-    private func isoFor(_ day: Int) -> String {
-        var comps = cal.dateComponents([.year, .month], from: monthStart)
+    private func isoFor(_ day: Int, _ start: Date) -> String {
+        var comps = cal.dateComponents([.year, .month], from: start)
         comps.day = day
         guard let d = cal.date(from: comps) else { return "" }
         return LodgingDate.api.string(from: d)

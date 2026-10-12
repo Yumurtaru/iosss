@@ -8,7 +8,11 @@ final class NetworkMonitor: ObservableObject {
     private let monitor = NWPathMonitor()
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
-            DispatchQueue.main.async { self?.online = (path.status == .satisfied) }
+            // Пишем только при смене: @Published шлёт изменение и на то же
+            // значение, а за ним следят приложение и корень вкладок — каждое
+            // обновление пути (Wi-Fi ↔ LTE, смена интерфейса) перерисовывало всё.
+            let now = path.status == .satisfied
+            DispatchQueue.main.async { if self?.online != now { self?.online = now } }
         }
         monitor.start(queue: DispatchQueue(label: "network.monitor"))
     }

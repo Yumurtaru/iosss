@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UIKit
 
 
 final class Session: ObservableObject {
@@ -25,9 +26,34 @@ final class Session: ObservableObject {
         cityName = UserDefaults.standard.string(forKey: "cityName")
         // При 401 (истёкший токен) аккуратно выходим из аккаунта.
         API.shared.onUnauthorized = { [weak self] in self?.signOut() }
+        // Запуск в фоне до первой разблокировки после перезагрузки (push, прогрев
+        // iOS): Keychain и настройки ещё закрыты, токен читался как nil — и до
+        // выгрузки приложения человек выглядел вышедшим, хотя вход сохранён.
+        // Перечитываем, когда данные стали доступны / приложение стало активным.
+        for name in [UIApplication.protectedDataDidBecomeAvailableNotification,
+                     UIApplication.didBecomeActiveNotification] {
+            unlockObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main) { [weak self] _ in self?.restoreIfLocked() })
+        }
+    }
+    private var unlockObservers: [NSObjectProtocol] = []
+
+    /// Только «пустое» состояние: явный выход стирает и Keychain, поэтому
+    /// вышедший аккаунт отсюда не вернётся.
+    /// Явный выход в этом запуске: токен из связки ключей не возвращаем, даже
+    /// если запоздалое обновление токена успело его туда записать.
+    private var signedOutExplicitly = false
+    private func restoreIfLocked() {
+        guard !signedOutExplicitly else { return }
+        if token == nil, let t = TokenStore.access, !t.isEmpty { token = t }
+        if cityId == nil {
+            let c = UserDefaults.standard.integer(forKey: "cityId")
+            if c != 0 { cityId = c; cityName = cityName ?? UserDefaults.standard.string(forKey: "cityName") }
+        }
     }
     /// refresh — токен продления (30 дней): API тихо обновляет access при 401 (security-аудит).
     func signIn(_ token: String, refresh: String? = nil) {
+        signedOutExplicitly = false
         self.token = token
         TokenStore.access = token
         if let r = refresh, !r.isEmpty { TokenStore.refresh = r }
@@ -42,6 +68,7 @@ final class Session: ObservableObject {
     /// привязан к человеку (подписку после оплаты всё равно включит сервер
     /// по уведомлению ЮKassa).
     func signOut(clearLocalData: Bool = false) {
+        signedOutExplicitly = true
         let wasLoggedIn = token != nil
         token = nil
         TokenStore.clear()
@@ -62,6 +89,9 @@ final class Session: ObservableObject {
                 Cart.shared.clear()
                 SearchHistoryStore.clear()
                 RecentStore.clear()
+                // Комментарий к заказу и номер стола прежнего человека (черновик
+                // оформления) не должны подставиться следующему.
+                CheckoutDraft.clear()
             }
         }
     }

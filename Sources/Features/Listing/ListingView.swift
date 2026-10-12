@@ -24,6 +24,9 @@ import SwiftUI
 // MARK: - Sort options
 
 enum ListingSort: String, CaseIterable, Identifiable {
+    // А56: «По умолчанию» — порядок сервера (продвигаемые первыми, затем
+    // перемешанный раз в 3 дня). Первым пунктом и исходным значением.
+    case byDefault = "По умолчанию"
     case rating   = "По рейтингу"
     case nearest  = "Ближе ко мне"
     case fastest  = "Быстрее доставка"
@@ -33,6 +36,7 @@ enum ListingSort: String, CaseIterable, Identifiable {
     /// загруженную страницу.
     var apiValue: String {
         switch self {
+        case .byDefault: return "default"
         case .rating:   return "rating"
         case .nearest:  return "distance"
         case .fastest:  return "cook_time"
@@ -41,6 +45,7 @@ enum ListingSort: String, CaseIterable, Identifiable {
     }
     var icon: String {
         switch self {
+        case .byDefault: return "sparkles"
         case .rating:   return "star.fill"
         case .nearest:  return "location.fill"
         case .fastest:  return "bolt.fill"
@@ -67,8 +72,14 @@ final class ListingViewModel: ObservableObject {
     private var orgsGen = 0
     private var orgsPath = "api/v1/shops"
     private var orgsQuery: [String: String] = [:]
+    /// Запрос, по которому список `orgs` на экране. Новая выборка (другая
+    /// категория, фильтр, сортировка) не загрузилась — раньше под новыми чипами
+    /// оставались заведения прежней выборки, без слова об ошибке.
+    private var orgsLoadedKey: String?
     @Published var error: String?
-    @Published var sort: ListingSort = .rating
+    // А56: исходно — порядок сервера (раньше «По рейтингу» + локальная
+    // сортировка сдвигала продвигаемые заведения с первых мест).
+    @Published var sort: ListingSort = .byDefault
     // Фильтры-чипы: индекс → активность (по набору для контекста).
     @Published var activeFilters: Set<String> = []
 
@@ -94,16 +105,24 @@ final class ListingViewModel: ObservableObject {
     /// Показывать ряд категорий: только раздел организаций типа store/service
     /// (сервер org-categories/with-counts отдаёт данные лишь для них).
     var showCategoryRow: Bool {
-        screen == .category && (orgType == "store" || orgType == "service")
+        // Открыт из плитки категории — категория уже выбрана, ряд не нужен (как Android).
+        screen == .category && fixedCategory == nil && (orgType == "store" || orgType == "service")
     }
+    /// Категория, с которой экран открыт из «Категорий» (nil — весь раздел).
+    let fixedCategory: Int?
 
-    init(orgType: String, title: String, cityId: Int?) {
+    init(orgType: String, title: String, cityId: Int?, categoryId: Int? = nil) {
         screen = .category; self.orgType = orgType; self.cityId = cityId
         self.shop = nil; self.title = title
+        // Плитка категории раньше открывала ВЕСЬ раздел под названием категории:
+        // в «Аптеках» показывались все магазины. Фильтр уходит в запрос category_id.
+        self.fixedCategory = categoryId
+        self.pickedCategoryId = categoryId
     }
     init(shop: Shop) {
         screen = .shop; self.shop = shop; orgType = "store"; cityId = nil
         self.title = shop.name ?? "Магазин"
+        self.fixedCategory = nil
     }
 
     /// Фильтры-чипы по контексту.
@@ -165,10 +184,14 @@ final class ListingViewModel: ObservableObject {
                 guard gen == orgsGen else { return }
                 orgs = first.items
                 orgsHasMore = first.hasMore
+                orgsLoadedKey = Self.key(orgsPath, q)
             } catch is CancellationError {
             } catch {
                 // Ошибку устаревшего запроса не показываем поверх свежей выборки.
                 guard myGen == orgsGen else { return }
+                // Не та выборка, что на экране, — убираем её: покажется ошибка
+                // с «Повторить», а не чужой список под новым фильтром.
+                if orgsLoadedKey != Self.key(orgsPath, orgsQuery) { orgs = []; orgsHasMore = false }
                 self.error = error.localizedDescription
             }
         case .shop:
@@ -181,6 +204,10 @@ final class ListingViewModel: ObservableObject {
             }
         }
         loading = false
+    }
+
+    private static func key(_ path: String, _ q: [String: String]) -> String {
+        path + "?" + q.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&")
     }
 
     /// Следующая страница заведений. Зовёт подвал списка, когда он виден.
@@ -213,6 +240,8 @@ final class ListingViewModel: ObservableObject {
         // nil = поля нет (старый сервер) → заведение не отбрасываем.
         if activeFilters.contains("Бесплатная доставка") { list = list.filter { $0.freeDelivery ?? true } }
         switch sort {
+        // А56: «По умолчанию» — НЕ сортируем, показываем в порядке сервера.
+        case .byDefault: break
         case .rating:   list.sort { ($0.rating ?? 0) > ($1.rating ?? 0) }
         // Без координат и без среднего чека — в конец списка, а не в начало.
         case .nearest:  list.sort { ($0.distanceKm ?? .greatestFiniteMagnitude) < ($1.distanceKm ?? .greatestFiniteMagnitude) }
@@ -225,7 +254,8 @@ final class ListingViewModel: ObservableObject {
     var filteredProducts: [Product] {
         var list = products
         if activeFilters.contains("Халяль") { list = list.filter { $0.isHalal == true } }
-        if activeFilters.contains("Скидки") { list = list.filter { ($0.oldPrice ?? 0) > ($0.price ?? 0) } }
+        // Меню отдаёт старую цену в price_old — с одним oldPrice фильтр был всегда пуст.
+        if activeFilters.contains("Скидки") { list = list.filter { ($0.oldPriceAny ?? 0) > ($0.price ?? 0) } }
         // TODO(API): «Новинки» требует поля created_at/isNew в Product — его нет.
         if sort == .cheapest { list.sort { ($0.price ?? 0) < ($1.price ?? 0) } }
         return list
@@ -258,8 +288,8 @@ struct ListingView: View {
     @State private var route: ListingRoute?
     @State private var showBecomeSeller = false
 
-    init(orgType: String, title: String, cityId: Int?) {
-        _vm = StateObject(wrappedValue: ListingViewModel(orgType: orgType, title: title, cityId: cityId))
+    init(orgType: String, title: String, cityId: Int?, categoryId: Int? = nil) {
+        _vm = StateObject(wrappedValue: ListingViewModel(orgType: orgType, title: title, cityId: cityId, categoryId: categoryId))
     }
     init(shop: Shop) {
         _vm = StateObject(wrappedValue: ListingViewModel(shop: shop))
@@ -285,11 +315,20 @@ struct ListingView: View {
         .task {
             guard !didLoad else { return }
             didLoad = true
-            await vm.loadCategories()
-            // Координаты адреса доставки — до первой загрузки, чтобы сервер сразу
-            // вернул distance_km и сортировка «Ближе ко мне» работала с первого раза.
-            await vm.loadGeo()
-            await vm.load()
+            // Отдельная задача (как на Главной): ушли на другую вкладку во время
+            // первой загрузки — .task отменялся, список оставался пустым
+            // («Ничего не найдено»), а повторно он уже не грузился (didLoad).
+            await Task {
+                // Ряд категорий списку не нужен — грузим параллельно: раньше список
+                // ждал ещё и этот запрос, и скелетон висел на один запрос дольше.
+                let model = vm
+                async let cats: Void = model.loadCategories()
+                // Координаты адреса доставки — до первой загрузки, чтобы сервер сразу
+                // вернул distance_km и сортировка «Ближе ко мне» работала с первого раза.
+                await vm.loadGeo()
+                await vm.load()
+                await cats
+            }.value
         }
         // Смена сортировки и набора фильтров — это НОВЫЙ запрос к серверу:
         // он применяет их ко всей выборке, а не к загруженной странице.
@@ -297,7 +336,8 @@ struct ListingView: View {
         .onChange(of: vm.activeFilters) { _ in Task { await vm.load() } }
         .sheet(isPresented: $showSort) {
             SortSheet(selection: $vm.sort, options: vm.sortOptions)
-                .presentationDetents([.height(360)])
+                // А56: пунктов стало 5 — шторка выше, чтобы «Применить» не уезжала.
+                .presentationDetents([.height(420)])
                 .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showBecomeSeller) {

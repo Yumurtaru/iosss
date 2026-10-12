@@ -51,7 +51,13 @@ private final class ChatListViewModel: ObservableObject {
     @Published var failed = false
     private var didLoad = false
 
-    func firstLoad() async { guard !didLoad else { return }; didLoad = true; await load() }
+    /// Первый вход — со скелетоном; возврат из переписки — тихое обновление:
+    /// раньше список грузился один раз, и бейдж непрочитанных у только что
+    /// прочитанного чата висел, пока шторку не закроют.
+    func firstLoad() async {
+        guard !didLoad else { await load(); return }
+        didLoad = true; await load()
+    }
     func load() async {
         loading = true
         // Реальный список диалогов: заказы с перепиской + последнее сообщение + непрочитанные.
@@ -94,16 +100,32 @@ private struct ChatListScreen: View {
             .background(YMColor.bg.ignoresSafeArea())
             .navigationTitle("Чаты")
             .navigationBarTitleDisplayMode(.large)
-            .refreshable { await vm.load() }
+            // Гость: обновление жестом слало запрос без входа (401).
+            .refreshable { if session.isLoggedIn { await vm.load() } }
             .task { if session.isLoggedIn { await vm.firstLoad() } }
+            // Вошли прямо отсюда — список грузим сразу, а не после переоткрытия.
+            .onChange(of: session.isLoggedIn) { logged in
+                if logged { Task { await vm.firstLoad() } }
+                // Сессия кончилась при открытом списке: диалоги прежнего аккаунта
+                // оставались в памяти и показывались вошедшему следом, пока
+                // грузился его собственный список.
+                else { vm.dialogs = []; vm.failed = false }
+            }
             .navigationDestination(for: Int.self) { ChatThreadScreen(orderId: $0) }
     }
 
     @ViewBuilder private var content: some View {
         if !session.isLoggedIn {
-            emptyState(icon: "person.crop.circle.badge.questionmark",
-                       title: "Войдите в аккаунт",
-                       hint: "Чтобы переписываться с заведениями по заказам.")
+            // Раньше — тупик: «Войдите в аккаунт» без кнопки входа (гость
+            // попадает сюда по 💬 в карточке заведения).
+            VStack(spacing: YMSpace.lg) {
+                emptyState(icon: "person.crop.circle.badge.questionmark",
+                           title: "Войдите в аккаунт",
+                           hint: "Чтобы переписываться с заведениями по заказам.")
+                NavigationLink { AuthView() } label: { Text("Войти") }
+                    .buttonStyle(YMPrimaryButtonStyle())
+                    .padding(.horizontal, YMSpace.xxxl)
+            }
         } else if vm.loading && vm.dialogs.isEmpty {
             VStack(spacing: YMSpace.sm) {
                 ForEach(0..<4, id: \.self) { _ in SkeletonBox().frame(height: 72) }
@@ -120,12 +142,25 @@ private struct ChatListScreen: View {
                             ? "Оформите заказ — здесь появится переписка с заведением."
                             : "Попробуйте другой запрос.")
         } else {
+            // Обновление не прошло, а список уже есть — раньше сбой был незаметен,
+            // и непрочитанные/новые чаты просто не появлялись.
+            if vm.failed && !vm.loading {
+                Text("Не удалось обновить чаты. Потяните вниз, чтобы повторить.")
+                    .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, YMSpace.xl)
+            }
             VStack(spacing: 0) {
                 ForEach(filtered) { dialog in
-                    NavigationLink(value: dialog.orderId ?? 0) {
+                    // Диалог без заказа открывал чат «заказа 0» и опрашивал 404.
+                    if let oid = dialog.orderId, oid > 0 {
+                        NavigationLink(value: oid) {
+                            ChatListRow(dialog: dialog)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
                         ChatListRow(dialog: dialog)
                     }
-                    .buttonStyle(.plain)
                     if dialog.id != filtered.last?.id {
                         Divider().overlay(YMColor.hairline).padding(.leading, 82)
                     }
@@ -176,7 +211,8 @@ private struct ChatListRow: View {
                         .font(.system(size: 15.5, weight: .bold)).foregroundStyle(YMColor.text)
                         .lineLimit(1)
                     Spacer(minLength: 6)
-                    Text(DateFmt.time(dialog.lastAt))
+                    // Не только время: «14:05» у переписки недельной давности читалось как сегодня.
+                    Text(DateFmt.listTime(dialog.lastAt))
                         .font(YMFont.caption).foregroundStyle(unread > 0 ? YMColor.accent : YMColor.muted)
                 }
                 HStack(spacing: YMSpace.sm) {
@@ -211,6 +247,9 @@ private final class ChatThreadViewModel: ObservableObject {
     @Published var loading = true
     @Published var sending = false
     @Published var sendError: String?
+    /// История не загрузилась. Раньше сбой сети выглядел как пустой чат
+    /// («Напишите первое сообщение»), хотя переписка была.
+    @Published var historyFailed = false
 
     private var lastChatId = 0
     private var pollTimer: Timer?
@@ -219,22 +258,40 @@ private final class ChatThreadViewModel: ObservableObject {
 
     func initialLoad() async {
         loading = true
+        // Трек курьера экран чата не показывает — лишний запрос на каждое
+        // открытие переписки убран (track остаётся пустым, как и был не нужен).
         async let o: OrderDetail? = try? await API.shared.get("api/v1/orders/\(orderId)")
-        async let t: TrackData?   = try? await API.shared.get("api/v1/orders/\(orderId)/track")
-        order = await o
-        track = await t
+        // Повторный показ (возврат со входа) при сбое не стирает уже известный заказ.
+        if let fresh = await o { order = fresh }
         await fetchNew()
         loading = false
     }
 
     /// Инкрементальная подгрузка: первый запрос — вся история, дальше только after_id=N.
-    func fetchNew() async {
+    /// false — запрос не прошёл (флаг historyFailed выставлен).
+    /// Запрос истории в полёте — опрос не ставит следующий поверх (см. startPolling).
+    private var fetching = false
+
+    @discardableResult
+    func fetchNew() async -> Bool {
+        fetching = true
+        defer { fetching = false }
         let path = lastChatId > 0
             ? "api/v1/orders/\(orderId)/chat?after_id=\(lastChatId)"
             : "api/v1/orders/\(orderId)/chat"
-        guard let batch: [ChatMessage] = try? await API.shared.list(path), !batch.isEmpty else { return }
+        let batch: [ChatMessage]
+        do { batch = try await API.shared.list(path) }
+        catch is CancellationError { return false }
+        catch {
+            if lastChatId == 0 { historyFailed = true }
+            return false
+        }
+        historyFailed = false
+        guard !batch.isEmpty else { return true }
         if lastChatId == 0 {
-            messages = batch
+            // Локальные фото «отправляется/ошибка» не стираем первой порцией
+            // истории — раньше неудачное фото пропадало без следа.
+            messages = batch + messages.filter { $0.localState != nil }
         } else {
             // Опрос раз в 6 с и дозапрос после отправки могут уйти с одним и тем
             // же after_id — без фильтра сообщение задваивалось (и одинаковые id
@@ -243,12 +300,18 @@ private final class ChatThreadViewModel: ObservableObject {
             messages.append(contentsOf: batch.filter { m in m.id.map { !known.contains($0) } ?? true })
         }
         lastChatId = max(lastChatId, batch.compactMap { $0.id }.max() ?? 0)
+        return true
     }
 
     func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.fetchNew() }
+            Task { @MainActor in
+                // На медленной сети запрос (с повторами) длится дольше 6 с: раньше
+                // каждый тик ставил ещё один, и они копились десятками.
+                guard let self, !self.fetching else { return }
+                await self.fetchNew()
+            }
         }
     }
     func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
@@ -287,15 +350,24 @@ private final class ChatThreadViewModel: ObservableObject {
             if let i = messages.firstIndex(where: { $0.stableId == temp.stableId }) {
                 messages[i].localState = "failed"
             }
+            // Причину говорим словами: раньше был только красный значок у фото,
+            // и было непонятно — большой файл, нет связи или кончилась сессия.
+            if !(error is CancellationError) {
+                sendError = "Фото не отправлено: " + ((error as? LocalizedError)?.errorDescription ?? "попробуйте ещё раз")
+            }
         }
     }
 }
 
 private struct ChatThreadScreen: View {
     let orderId: Int
+    @EnvironmentObject private var session: Session
     @StateObject private var vm: ChatThreadViewModel
     @State private var draft = ""
     @State private var photoItems: [PhotosPickerItem] = []
+    @Environment(\.scenePhase) private var scenePhase
+    /// Переписка на экране (для паузы опроса в фоне).
+    @State private var visible = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -305,17 +377,48 @@ private struct ChatThreadScreen: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            orderLinkPlate
-            Divider().overlay(YMColor.hairline)
-            messagesList
-            inputBar
+        Group {
+            // Без входа (push о чате после выхода, сессия кончилась посреди
+            // переписки) история отвечала 401: экран писал «Проверьте связь»,
+            // а опрос раз в 6 с продолжал слать запросы. Теперь — вход;
+            // после него переписка грузится заново, набранный текст остаётся.
+            if session.isLoggedIn {
+                VStack(spacing: 0) {
+                    orderLinkPlate
+                    Divider().overlay(YMColor.hairline)
+                    messagesList
+                    inputBar
+                }
+                .task { await vm.initialLoad(); if !Task.isCancelled { vm.startPolling() } }   // экран успели закрыть — опрос не запускаем
+                .onAppear { visible = true }
+                .onDisappear { visible = false; vm.stopPolling() }
+            } else {
+                VStack(spacing: YMSpace.lg) {
+                    Text("Войдите, чтобы переписываться с заведением по заказу.")
+                        .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                        .multilineTextAlignment(.center)
+                    NavigationLink { AuthView() } label: { Text("Войти") }
+                        .buttonStyle(YMPrimaryButtonStyle())
+                        .padding(.horizontal, YMSpace.xxxl)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, YMSpace.xl)
+            }
         }
         .background(YMColor.bg.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .principal) { headerTitle } }
-        .task { await vm.initialLoad(); if !Task.isCancelled { vm.startPolling() } }   // экран успели закрыть — опрос не запускаем
-        .onDisappear { vm.stopPolling() }
+        // Свернули приложение — опрос не нужен; вернулись — сразу дозапрашиваем
+        // новые сообщения, а не ждём до 6 с следующего тика.
+        .onChange(of: scenePhase) { phase in
+            guard visible, session.isLoggedIn else { return }
+            if phase == .active {
+                vm.startPolling()
+                Task { await vm.fetchNew() }
+            } else if phase == .background {
+                vm.stopPolling()
+            }
+        }
     }
 
     // Шапка: лого + «● онлайн · обычно отвечает за 2 мин»
@@ -343,7 +446,9 @@ private struct ChatThreadScreen: View {
             StatusDot(color: OrderFlow.color(vm.order?.status),
                       pulsing: OrderFlow.isEnRoute(vm.order?.status), size: 6)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Заказ №\(vm.order?.dailyNumber ?? orderId) · \(OrderStatus.label(vm.order?.status, shopType: vm.order?.shopType))")
+                // Подпись сервера (status_title) — для кодов, которых нет в словаре:
+                // раньше здесь мог показаться код латиницей (как в списке и детали — уже нет).
+                Text("Заказ №\(vm.order?.dailyNumber ?? orderId) · \(OrderStatus.label(vm.order?.status, shopType: vm.order?.shopType, title: vm.order?.statusTitle))")
                     .font(.system(size: 13, weight: .bold)).foregroundStyle(YMColor.text)
                 if let o = vm.order {
                     Text("\(o.items?.count ?? 0) поз. · \(Money.format(Money.parse(o.total)))")
@@ -364,6 +469,15 @@ private struct ChatThreadScreen: View {
                     if vm.loading && vm.messages.isEmpty {
                         ForEach(0..<3, id: \.self) { _ in SkeletonBox().frame(height: 40) }
                             .padding(.horizontal, YMSpace.lg)
+                    } else if vm.messages.isEmpty && vm.historyFailed {
+                        VStack(spacing: YMSpace.sm) {
+                            Text("Не удалось загрузить переписку. Проверьте связь.")
+                                .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                                .multilineTextAlignment(.center)
+                            Button("Повторить") { Task { await vm.fetchNew() } }
+                                .font(YMFont.subhead).foregroundStyle(YMColor.accent)
+                        }
+                        .padding(.top, 48)
                     } else if vm.messages.isEmpty {
                         Text("Напишите первое сообщение заведению")
                             .font(YMFont.callout).foregroundStyle(YMColor.muted)
@@ -408,7 +522,9 @@ private struct ChatThreadScreen: View {
 
             Button {
                 let text = draft; draft = ""
-                Task { if !(await vm.send(text)) { draft = text } }   // не отправилось — возвращаем текст в поле
+                // Не отправилось — возвращаем текст в поле. Если человек уже начал
+                // новое сообщение, не затираем его, а ставим неотправленное перед ним.
+                Task { if !(await vm.send(text)) { draft = draft.isEmpty ? text : text + "\n" + draft } }
             } label: {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 18, weight: .heavy)).foregroundStyle(YMColor.onAccent)
@@ -433,7 +549,13 @@ private struct ChatThreadScreen: View {
             Task {
                 if let raw = try? await item.loadTransferable(type: Data.self) {
                     // HEIC с камеры сервер не принимает — отправляем JPEG.
-                    await vm.sendPhoto(ImageUpload.jpeg(from: raw) ?? raw)
+                    // Перекодирование — не на главном потоке (экран замирал).
+                    let jpeg = await Task.detached(priority: .userInitiated) { ImageUpload.jpeg(from: raw) ?? raw }.value
+                    await vm.sendPhoto(jpeg)
+                } else {
+                    // Фото не открылось (iCloud без сети, недоступный формат) —
+                    // раньше выбор просто молча пропадал.
+                    vm.sendError = "Не удалось открыть фото. Попробуйте ещё раз или выберите другое."
                 }
                 photoItems = []
             }
@@ -462,22 +584,37 @@ private struct ChatThreadScreen: View {
     /// Парсинг серверного времени: MySQL datetime "yyyy-MM-dd HH:mm:ss" или ISO8601.
     private func chatDate(_ s: String?) -> Date? {
         guard let s, !s.isEmpty, !s.hasPrefix("local-") else { return nil }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "Europe/Moscow")
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+        return ChatFmt.server.date(from: s) ?? ChatFmt.iso.date(from: s)
     }
 
     private func dayLabel(_ date: Date) -> String {
         let cal = Calendar.current
         if cal.isDateInToday(date) { return "Сегодня" }
         if cal.isDateInYesterday(date) { return "Вчера" }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "ru_RU")
-        f.dateFormat = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year) ? "d MMMM" : "d MMMM yyyy"
+        let f = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year) ? ChatFmt.day : ChatFmt.dayYear
         return f.string(from: date)
     }
+}
+
+/// Форматтеры чата — один раз на приложение: раньше каждый пузырь при каждой
+/// перерисовке создавал по два-три DateFormatter (это дорого), лента дёргалась.
+private enum ChatFmt {
+    static let server: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Europe/Moscow")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+    static let iso = ISO8601DateFormatter()
+    static let day: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU")
+        f.timeZone = .autoupdatingCurrent; f.dateFormat = "d MMMM"; return f
+    }()
+    static let dayYear: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU")
+        f.timeZone = .autoupdatingCurrent; f.dateFormat = "d MMMM yyyy"; return f
+    }()
 }
 
 // MARK: - ChatBubble (пузырь сообщения)

@@ -27,16 +27,49 @@ final class ReviewsScreenModel: ObservableObject {
         self.reviewsCount = reviewsCount
     }
 
+    // П-23.4 (А58): отзывы постранично по meta.has_more. Старый сервер meta
+    // не шлёт — одна страница, как раньше.
+    @Published var hasMore = false
+    @Published var moreFailed = false
+    @Published private(set) var page = 1
+    private var loadingMore = false
+    private var gen = 0
+
     func load() async {
         guard !slug.isEmpty else { loading = false; error = "Нет данных заведения"; return }
         loading = true; error = nil
+        gen += 1
+        let myGen = gen
+        page = 1; hasMore = false; moreFailed = false; loadingMore = false
         do {
-            reviews = try await API.shared.list("api/v1/shops/\(slug)/reviews")
+            let p: Page<Review> = try await API.shared.page("api/v1/shops/\(slug)/reviews")
+            guard myGen == gen else { return }
+            reviews = p.items
+            hasMore = p.hasMore && !p.items.isEmpty
         } catch is CancellationError {
         } catch {
             self.error = error.localizedDescription
         }
         loading = false
+    }
+
+    /// Следующая страница. Пустая страница = конец; дубли по id отбрасываем.
+    func loadMore() async {
+        guard hasMore, !loadingMore, !loading else { return }
+        loadingMore = true; moreFailed = false
+        let myGen = gen, next = page + 1
+        do {
+            let p: Page<Review> = try await API.shared.page("api/v1/shops/\(slug)/reviews",
+                                                            query: ["page": String(next)])
+            guard myGen == gen else { return }
+            let known = Set(reviews.compactMap(\.serverId))
+            reviews += p.items.filter { $0.serverId == nil || !known.contains($0.serverId!) }
+            page = next
+            hasMore = p.hasMore && !p.items.isEmpty
+        } catch {
+            if myGen == gen && !(error is CancellationError) { moreFailed = true }
+        }
+        if myGen == gen { loadingMore = false }
     }
 }
 
@@ -68,8 +101,15 @@ struct ReviewsScreen: View {
                     } else if vm.reviews.isEmpty {
                         emptyBox
                     } else {
-                        VStack(spacing: 10) {
-                            ForEach(vm.reviews) { r in OrgReviewCard(review: r) }
+                        // П-23.4: Lazy — чтобы подвал догрузки срабатывал, только когда виден.
+                        LazyVStack(spacing: 10) {
+                            // По позиции, а не по Review.id («автор-дата»): у двух отзывов
+                            // «Гость» с одной секундой (или без даты) id совпадал, и
+                            // SwiftUI показывал одну карточку дважды (у старого сервера id нет).
+                            ForEach(Array(vm.reviews.enumerated()), id: \.offset) { _, r in OrgReviewCard(review: r) }
+                            if vm.hasMore {
+                                LoadMoreFooter(page: vm.page, failed: vm.moreFailed) { await vm.loadMore() }
+                            }
                         }
                     }
 

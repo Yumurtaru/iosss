@@ -52,11 +52,15 @@ final class HomeViewModel: ObservableObject {
             session.cityId = first.id
             session.cityName = session.cityName ?? first.name
         }
-        async let bannersTask: [Banner] = (try? await API.shared.list("api/v1/banners")) ?? []
-        banners = await bannersTask
-        await loadRecommendations(session: session)
-        await loadSections(session: session, myGen: myGen)
+        // Баннеры здесь больше не запрашиваем: ленту сторис грузит сама
+        // StoriesView (по городу), а этот запрос шёл без города, и его ответ
+        // никто не читал — лишний запрос на каждом входе и обновлении.
+        // Три независимых запроса — параллельно: раньше шли друг за другом,
+        // и скелетон Главной висел сумму их времён.
+        async let rec: Void = loadRecommendations(session: session)
+        async let sec: Void = loadSections(session: session, myGen: myGen)
         await loadShops(session: session, myGen: myGen)
+        _ = await (rec, sec)
         if myGen == gen { loading = false }
     }
 
@@ -66,8 +70,18 @@ final class HomeViewModel: ObservableObject {
     private func loadRecommendations(session: Session) async {
         var q: [String: String] = [:]
         if let cid = session.cityId { q["city_id"] = String(cid) }
+        // Пока шёл запрос, сменился аккаунт — подборка прежнего человека не нужна.
+        let t = session.token
         let resp: RecommendationsResp? = try? await API.shared.get("api/v1/recommendations", query: q)
+        guard session.token == t else { return }
         recommendations = resp?.popular ?? []
+    }
+
+    /// Сменился аккаунт (вход/выход): личную подборку перечитываем, прежнюю
+    /// убираем сразу — она собрана по заказам другого человека.
+    func reloadRecommendations(session: Session) async {
+        recommendations = []
+        await loadRecommendations(session: session)
     }
 
     /// Смена типа-чипа: перегружаем только зависящие от типа секции/список.
@@ -76,8 +90,10 @@ final class HomeViewModel: ObservableObject {
         gen += 1
         let myGen = gen
         loading = true; error = nil
-        await loadSections(session: session, myGen: myGen)
+        // Параллельно, как и в load(): секции и список друг от друга не зависят.
+        async let sec: Void = loadSections(session: session, myGen: myGen)
         await loadShops(session: session, myGen: myGen)
+        await sec
         if myGen == gen { loading = false }
     }
 
@@ -93,6 +109,10 @@ final class HomeViewModel: ObservableObject {
 
     // Список организаций. Рестораны/магазины/услуги → /organizations; «Все» → /shops.
     private func loadShops(session: Session, myGen: Int) async {
+        // Для какого раздела и города список уже на экране. При сбое загрузки
+        // ДРУГОГО раздела (или города) старый список не оставляем: под чипом
+        // «Магазины» висели рестораны, под новым городом — заведения прежнего.
+        let key = "\(kind.rawValue)|\(session.cityId ?? 0)"
         do {
             var q: [String: String] = [:]
             if let cid = session.cityId { q["city_id"] = String(cid) }
@@ -116,13 +136,16 @@ final class HomeViewModel: ObservableObject {
             let list: [Shop] = try await API.shared.list(path, query: q)
             guard myGen == gen else { return }
             shops = list
+            shopsKey = key
         } catch is CancellationError {
             // отмена (быстрый повторный запрос) — молча
         } catch {
             guard myGen == gen else { return }
+            if shopsKey != key { shops = [] }
             self.error = error.localizedDescription
         }
     }
+    private var shopsKey: String?
 }
 
 // MARK: - HomeView
@@ -134,9 +157,18 @@ struct HomeView: View {
     @StateObject private var vm = HomeViewModel()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    // Локальное состояние избранного (сеть избранного — следующая волна).
+    // Избранное — с сервером, как в Поиске и разделе «Избранное». Раньше
+    // сердечки на Главной жили только на экране: нажатие ничего не сохраняло,
+    // а уже добавленное в избранное здесь не отмечалось.
     @State private var favShops: Set<Int> = []
-    @State private var favPopular: Set<String> = []
+    /// id товаров «Популярное» / «Рекомендуем» в избранном.
+    @State private var favPopular: Set<Int> = []
+    /// id, по которым запрос ♥ ещё в пути: двойной тап слал POST и DELETE
+    /// вперемешку, а loadFavs затирал ещё не подтверждённую отметку.
+    @State private var favBusyShops: Set<Int> = []
+    @State private var favBusyProducts: Set<Int> = []
+    /// Гость нажал ♥ — сначала вход.
+    @State private var showAuth = false
     @State private var appeared = false
     /// Чип, выбранный до нажатия на «Жильё» — к нему возвращаемся (см. ChipRow).
     @State private var lastKind: OrgKind = .all
@@ -156,7 +188,8 @@ struct HomeView: View {
     // Смена города с шапки Главной.
     @State private var showCitySheet = false
     // Профиль открывается из шапки (кнопка в правом углу) — модально.
-    @State private var showProfile = false
+    // Флаг живёт в NavCoordinator (profileOpen): пуш и ссылка закрывают
+    // шторку перед переходом, иначе заказ/чат открывались под ней.
 
     var body: some View {
         NavigationStack {
@@ -170,8 +203,8 @@ struct HomeView: View {
                         .padding(.top, 14)
 
                     // Сторис-лента (баннеры города). Пусто/ошибка → сама рисует EmptyView.
+                    // Отступ сверху (6) перенесён внутрь StoriesView — только при баннерах.
                     StoriesView(cityId: session.cityId)
-                        .padding(.top, 6)
 
                     ChipRow(selected: $vm.kind) { k in
                         // «Жильё» — не фильтр, а отдельный раздел: у него свой
@@ -222,8 +255,15 @@ struct HomeView: View {
             }
             .background(YMColor.bg.ignoresSafeArea())
             .navigationBarHidden(true)
-            .refreshable { await vm.load(session: session) }
-            .task { await vm.firstLoad(session: session) }
+            // Отдельная задача: отмена задачи экрана (переход на другую вкладку
+            // по push при холодном старте, жест обновления) раньше обрывала
+            // загрузку, все try? давали [] — и главная оставалась пустой до
+            // ручного обновления, потому что первая загрузка уже «случилась».
+            .refreshable { await Task { await vm.load(session: session) }.value }
+            .task { await Task { await vm.firstLoad(session: session) }.value }
+            // Отметки избранного: по входу/выходу и при возврате на Главную
+            // (сердечко могли поменять в заведении или в Поиске).
+            .task(id: session.isLoggedIn) { await loadFavs() }
             // Город выбирается в онбординге ПОСЛЕ первой загрузки главной (HomeView рендерится
             // под онбордингом). Поэтому при смене cityId (онбординг / шторка города) —
             // перезагружаем данные под новый город, иначе организации не появляются.
@@ -250,18 +290,33 @@ struct HomeView: View {
                     currentId: session.cityId,
                     currentName: session.cityName
                 ) { id, name in
+                    // Запасная строка «текущий город» без id (список не загрузился):
+                    // раньше уходил city_id=0, и Главная грузила не тот город.
+                    guard id > 0 else { showCitySheet = false; return }
                     session.cityName = name
                     session.cityId = id            // смена cityId → onChange выше перезагрузит данные
                     showCitySheet = false
                 }
             }
             // Профиль модально (вкладки профиля больше нет — доступ из шапки).
-            .sheet(isPresented: $showProfile) {
+            .sheet(isPresented: $coord.profileOpen) {
                 ProfileView()
                     .environmentObject(session)
                     .environmentObject(Cart.shared)
                     .environmentObject(DeepLinkRouter.shared)
                     .environmentObject(NavCoordinator.shared)
+                    // Заведение и товар из «Избранного» внутри шторки: общие окна
+                    // корзины отсюда не видны — эти экраны показывают их сами.
+                    .environment(\.ymNestedPresentation, true)
+            }
+            // Пуш «цена снизилась / снова в наличии» (product_id) — карточка товара.
+            // onAppear — холодный старт: значение выставлено до появления экрана.
+            .onChange(of: coord.pendingProductId) { id in openPendingProduct(id) }
+            .onAppear { openPendingProduct(coord.pendingProductId) }
+            // «Рекомендуем вам» — личная подборка по заказам: после выхода и входа
+            // другим человеком на Главной оставалась подборка прежнего.
+            .onChange(of: session.token) { _ in
+                Task { await vm.reloadRecommendations(session: session) }
             }
         }
     }
@@ -280,7 +335,9 @@ struct HomeView: View {
                     showCitySheet = true   // шторка выбора города
                 } label: {
                     HStack(spacing: 5) {
-                        Text(session.cityName ?? "Москва")
+                        // Город ещё не выбран (первый запуск без сети) — раньше здесь
+                        // стояла «Москва», хотя заведения были не московские.
+                        Text(session.cityName ?? "Выберите город")
                             .font(.system(size: 19, weight: .bold))
                             .foregroundStyle(YMColor.text)
                         Text("▾")
@@ -302,7 +359,7 @@ struct HomeView: View {
     private var avatar: some View {
         Button {
             Haptics.selection()
-            showProfile = true
+            coord.profileOpen = true
         } label: {
             Image(systemName: "person.fill")
                 .font(.system(size: 17, weight: .semibold))
@@ -333,7 +390,7 @@ struct HomeView: View {
                                 rating: nil,
                                 photoURL: API.imageURL(item.photo),
                                 tone: idx,
-                                isFav: favBinding(popular: item.uid)
+                                isFav: favBinding(product: item.id)
                             ) {
                                 route = .product(item.id)   // → карточка товара
                             }
@@ -357,7 +414,7 @@ struct HomeView: View {
                                 rating: nil,
                                 photoURL: API.imageURL(item.photo),
                                 tone: idx,
-                                isFav: favBinding(popular: item.uid)
+                                isFav: favBinding(product: item.id)
                             ) {
                                 route = .product(item.id)   // → карточка товара
                             }
@@ -407,6 +464,14 @@ struct HomeView: View {
             if vm.popular.isEmpty && vm.shops.isEmpty {
                 emptyState
             }
+        }
+        // Вход для ♥ гостя. Шторка — на содержимом, а не на корне экрана:
+        // там уже висят выбор города и профиль.
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                AuthView(onAuthed: { showAuth = false })
+            }
+            .environmentObject(session)
         }
     }
 
@@ -494,15 +559,67 @@ struct HomeView: View {
         .padding(.top, 50)
     }
 
-    // MARK: Fav bindings (локально)
+    private func openPendingProduct(_ id: Int?) {
+        guard let id, id > 0 else { return }
+        coord.pendingProductId = nil
+        route = .product(id)
+    }
+
+    // MARK: Fav bindings (с сервером, откат при ошибке)
 
     private func favBinding(shop id: Int) -> Binding<Bool> {
-        Binding(get: { favShops.contains(id) },
-                set: { if $0 { favShops.insert(id) } else { favShops.remove(id) } })
+        Binding(get: { favShops.contains(id) }, set: { on in
+            guard session.isLoggedIn else { showAuth = true; return }
+            // Предыдущий запрос по этому заведению ещё идёт — тап игнорируем.
+            guard !favBusyShops.contains(id) else { return }
+            favBusyShops.insert(id)
+            if on { favShops.insert(id) } else { favShops.remove(id) }
+            Task {
+                do {
+                    if on { try await API.shared.postVoid("api/v1/favorites/\(id)") }
+                    else  { try await API.shared.deleteVoid("api/v1/favorites/\(id)") }
+                } catch {
+                    await MainActor.run { if on { favShops.remove(id) } else { favShops.insert(id) } }
+                }
+                await MainActor.run { _ = favBusyShops.remove(id) }
+            }
+        })
     }
-    private func favBinding(popular uid: String) -> Binding<Bool> {
-        Binding(get: { favPopular.contains(uid) },
-                set: { if $0 { favPopular.insert(uid) } else { favPopular.remove(uid) } })
+    private func favBinding(product id: Int) -> Binding<Bool> {
+        Binding(get: { favPopular.contains(id) }, set: { on in
+            guard session.isLoggedIn else { showAuth = true; return }
+            // Предыдущий запрос по этому товару ещё идёт — тап игнорируем.
+            guard !favBusyProducts.contains(id) else { return }
+            favBusyProducts.insert(id)
+            if on { favPopular.insert(id) } else { favPopular.remove(id) }
+            Task {
+                do {
+                    if on { try await API.shared.postVoid("api/v1/product-favorites/\(id)") }
+                    else  { try await API.shared.deleteVoid("api/v1/product-favorites/\(id)") }
+                } catch {
+                    await MainActor.run { if on { favPopular.remove(id) } else { favPopular.insert(id) } }
+                }
+                await MainActor.run { _ = favBusyProducts.remove(id) }
+            }
+        })
+    }
+
+    /// Отметки избранного с сервера. Гостю — пусто (сердечки прежнего аккаунта
+    /// не остаются). Сбой — прежние отметки не трогаем.
+    private func loadFavs() async {
+        guard session.isLoggedIn else { favShops = []; favPopular = []; return }
+        // Для id с запросом «в пути» оставляем локальную отметку — ответ
+        // сервера мог быть снят до этого нажатия.
+        if let ids: [Int] = try? await API.shared.list("api/v1/product-favorites/ids") {
+            var next = Set(ids)
+            for b in favBusyProducts { if favPopular.contains(b) { next.insert(b) } else { next.remove(b) } }
+            favPopular = next
+        }
+        if let favs: [Shop] = try? await API.shared.list("api/v1/favorites") {
+            var next = Set(favs.map { $0.id })
+            for b in favBusyShops { if favShops.contains(b) { next.insert(b) } else { next.remove(b) } }
+            favShops = next
+        }
     }
 }
 
@@ -520,6 +637,9 @@ private struct CityPickerSheet: View {
     @State private var cities: [City] = []
     @State private var query = ""
     @State private var loading = true
+    /// Список не загрузился (сеть/сервер). Раньше это выглядело как
+    /// «Город не найден» (или один текущий город), и повторить было нельзя.
+    @State private var loadFailed = false
 
     // Fallback: если сервер пуст/ошибка — хотя бы текущий город.
     private var source: [City] {
@@ -555,6 +675,19 @@ private struct CityPickerSheet: View {
                         }
                     }
                     .padding(.horizontal, YMSpace.xl)
+                } else if loadFailed && cities.isEmpty {
+                    VStack(spacing: YMSpace.sm) {
+                        Text("Не удалось загрузить список городов. Проверьте интернет.")
+                            .font(YMFont.callout)
+                            .foregroundStyle(YMColor.muted)
+                            .multilineTextAlignment(.center)
+                        Button("Повторить") { Task { await loadCities() } }
+                            .font(YMFont.callout.weight(.bold))
+                            .foregroundStyle(YMColor.accent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, YMSpace.xl)
+                    .padding(.top, 40)
                 } else if filtered.isEmpty {
                     Text("Город не найден")
                         .font(YMFont.callout)
@@ -619,8 +752,13 @@ private struct CityPickerSheet: View {
     }
 
     private func loadCities() async {
-        let list: [City] = (try? await API.shared.list("api/v1/cities", query: ["with_orgs": "1"])) ?? []
-        cities = list
+        loading = true; loadFailed = false
+        do {
+            cities = try await API.shared.list("api/v1/cities", query: ["with_orgs": "1"])
+        } catch is CancellationError {
+        } catch {
+            loadFailed = true
+        }
         loading = false
     }
 }

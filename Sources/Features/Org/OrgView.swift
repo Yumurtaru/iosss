@@ -38,6 +38,10 @@ final class OrgViewModel: ObservableObject {
     @Published var productCategories: [Category] = []
     @Published var loading = true
     @Published var error: String?
+    /// Меню не загрузилось при загруженной карточке. Раньше ошибка глоталась
+    /// (try?), и меню показывало «В этом разделе пока пусто» без «Повторить».
+    @Published var productsError: String?
+    @Published var productsReloading = false
 
     /// В избранном ли эта организация (синхронизируется с сервером при загрузке).
     @Published var isFav = false
@@ -70,9 +74,33 @@ final class OrgViewModel: ObservableObject {
         loading = true; error = nil
         do {
             async let d: ShopDetail = API.shared.get("api/v1/shops/\(slug)")
-            async let p: [Product] = API.shared.list("api/v1/shops/\(slug)/products")
+            // Меню целиком, со всех страниц (см. fetchShopMenu).
+            // Первая страница — сразу (карточка не ждёт всё меню), остальные — в фоне.
+            async let p = fetchShopMenu(slug: slug, pages: 1...1)
             detail = try await d
-            products = (try? await p) ?? []
+            do {
+                let first = try await p
+                products = first.items
+                productsError = nil
+                if first.hasMore {
+                    let s = slug
+                    Task { @MainActor in
+                        // Остальные страницы: при сбое — ещё одна попытка через 2 с, иначе
+                        // всё после первых 200 позиций молча пропадало до перезахода.
+                        var rest: (items: [Product], hasMore: Bool)? = try? await fetchShopMenu(slug: s, pages: 2...20)
+                        if rest == nil, !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 2_000_000_000)
+                            rest = try? await fetchShopMenu(slug: s, pages: 2...20)
+                        }
+                        guard let rest else { return }
+                        let known = Set(products.map(\.id))
+                        products += rest.items.filter { !known.contains($0.id) }
+                    }
+                }
+            } catch is CancellationError {
+            } catch {
+                productsError = error.localizedDescription
+            }
         } catch is CancellationError {
             // отмена — молча
         } catch {
@@ -101,6 +129,20 @@ final class OrgViewModel: ObservableObject {
         Task { @MainActor in await loadFavState() }
         // Отзывы — в фоне, не задерживая показ карточки.
         Task { @MainActor in await loadReviews() }
+    }
+
+    /// «Повторить» под меню, когда карточка загрузилась, а меню — нет.
+    func reloadProducts() async {
+        guard !productsReloading else { return }
+        productsReloading = true
+        do {
+            products = try await fetchShopMenu(slug: slug).items
+            productsError = nil
+        } catch is CancellationError {
+        } catch {
+            productsError = error.localizedDescription
+        }
+        productsReloading = false
     }
 
     /// Синхронизация состояния избранного с сервером. Тот же механизм, что в DiscoverView:
@@ -147,6 +189,39 @@ final class OrgViewModel: ObservableObject {
     }
 }
 
+/// Меню заведения целиком. GET api/v1/shops/{slug}/products отдаёт страницами
+/// (meta.has_more, справка), а карточка заведения брала только первую — у
+/// большого меню хвост позиций просто не показывался.
+/// Страницы по 200 (П-23.4: page + per_page). Дубли по id
+/// отбрасываем; страница без новых позиций — конец (сервер не знает page);
+/// не больше 20 страниц. Сбой догрузки не прячет уже полученное.
+func fetchShopMenu(slug: String, pages: ClosedRange<Int> = 1...20) async throws -> (items: [Product], hasMore: Bool) {
+    var all: [Product] = []
+    var seen = Set<Int>()
+    var page = pages.lowerBound
+    var more = false
+    while true {
+        // П-23.4: страницы по 200 (максимум сервера) и догрузка по has_more:
+        // первая страница большого меню приходит быстро, остальное — в фоне.
+        // Без параметров сервер отдаёт всё одним куском (до 2000) — так было раньше.
+        var q: [String: String] = ["per_page": "200"]
+        q["page"] = String(page)
+        let p: Page<Product>
+        do {
+            p = try await API.shared.page("api/v1/shops/\(slug)/products", query: q)
+        } catch {
+            if page == pages.lowerBound || error is CancellationError { throw error }
+            break
+        }
+        let fresh = p.items.filter { seen.insert($0.id).inserted }
+        all += fresh
+        more = p.hasMore && !fresh.isEmpty
+        guard more, page < pages.upperBound else { break }
+        page += 1
+    }
+    return (all, more)
+}
+
 // MARK: - OrgView
 
 struct OrgView: View {
@@ -162,6 +237,12 @@ struct OrgView: View {
     @State private var pushedProduct: Int?
     @State private var pushedService: ServiceItem?
     @State private var showAuth = false
+    /// Заведение открыто внутри шторки профиля («Избранное») или «Жилья»: общие
+    /// корзина и чат висят на корне вкладок и оттуда сейчас не покажутся —
+    /// «Корзина» и 💬 раньше молчали. Тогда показываем их отсюда.
+    @Environment(\.ymNestedPresentation) private var nested
+    @State private var localCart = false
+    @State private var localChat = false
 
     private let heroHeight: CGFloat = 308
 
@@ -245,6 +326,14 @@ struct OrgView: View {
 
     private var seedCover: String? { vm.seed?.cover ?? vm.seed?.banner ?? vm.seed?.logo }
 
+    /// «оценка / оценки / оценок».
+    private static func ratingsWord(_ n: Int) -> String {
+        let m10 = n % 10, m100 = n % 100
+        if m10 == 1 && m100 != 11 { return "оценка" }
+        if (2...4).contains(m10) && !(12...14).contains(m100) { return "оценки" }
+        return "оценок"
+    }
+
     // MARK: Sheet (поднятая шторка r28)
 
     private var sheet: some View {
@@ -272,8 +361,8 @@ struct OrgView: View {
             }
             .padding(.top, 20)
 
-            // Баннер нерабочего времени: «Сейчас закрыто. Откроется <день> в <время>» + предзаказ.
-            // Кнопки заказа/корзины остаются рабочими (предзаказ = обычное оформление).
+            // Баннер нерабочего времени: «Сейчас закрыто. Откроется <день> в <время>».
+            // Корзину собрать можно, оформить — когда заведение откроется.
             if !isOpen {
                 ClosedBanner(opensLabel: OrgHours.nextOpenLabel(vm.detail?.hours))
                     .padding(.top, 12)
@@ -293,8 +382,10 @@ struct OrgView: View {
                     HStack(spacing: 5) {
                         Text("★").foregroundStyle(YMColor.accent)
                         Text(String(format: "%.1f", r)).foregroundStyle(YMColor.text)
-                        if let rc = vm.seed?.reviewsCount, rc > 0 {
-                            Text("· \(rc) оценок").foregroundStyle(YMColor.muted)
+                        // Счёт из карточки (у входа по ссылке/push seed нет) и со
+                        // склонением: было «1 оценок», «3 оценок».
+                        if let rc = vm.detail?.reviewsCount ?? vm.seed?.reviewsCount, rc > 0 {
+                            Text("· \(rc) \(Self.ratingsWord(rc))").foregroundStyle(YMColor.muted)
                         }
                     }
                     .font(.system(size: 13.5, weight: .semibold))
@@ -357,7 +448,9 @@ struct OrgView: View {
                 loading: vm.reviewsLoading,
                 error: vm.reviewsError,
                 avgRating: rating,
-                reviewsCount: vm.detail?.reviewsCount ?? vm.seed?.reviewsCount
+                reviewsCount: vm.detail?.reviewsCount ?? vm.seed?.reviewsCount,
+                // Отзывы не загрузились — повтор прямо здесь.
+                onRetry: { Task { await vm.loadReviews() } }
             )
             .padding(.top, 20)
 
@@ -493,7 +586,24 @@ struct OrgView: View {
                         pushedProduct = p.id   // «+» ведёт на карточку (модификаторы/степпер там)
                     }
                 }
-                if shownProducts.isEmpty {
+                if shownProducts.isEmpty, vm.products.isEmpty, let pe = vm.productsError {
+                    // Меню не загрузилось — это не «пусто»: даём повторить.
+                    VStack(spacing: YMSpace.sm) {
+                        Text("Не удалось загрузить меню: \(pe)")
+                            .font(YMFont.callout)
+                            .foregroundStyle(YMColor.muted)
+                            .multilineTextAlignment(.center)
+                        if vm.productsReloading {
+                            ProgressView().tint(YMColor.accent)
+                        } else {
+                            Button("Повторить") { Task { await vm.reloadProducts() } }
+                                .buttonStyle(YMSecondaryButtonStyle())
+                                .frame(maxWidth: 200)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 24)
+                } else if shownProducts.isEmpty {
                     Text("В этом разделе пока пусто")
                         .font(YMFont.callout)
                         .foregroundStyle(YMColor.muted)
@@ -535,7 +645,12 @@ struct OrgView: View {
             HStack(spacing: 10) {
                 circleControl("square.and.arrow.up") { share() }
                 // Избранное организации — красное сердечко (heart.fill, YMColor.statusCancel).
-                HeartButton(isFav: $vm.isFav, size: 38, favColor: YMColor.statusCancel)
+                // Гостю — сначала вход: раньше сердечко загоралось, запрос получал
+                // 401 и молча гасло обратно, без объяснения.
+                HeartButton(isFav: Binding(
+                    get: { vm.isFav },
+                    set: { v in if Session.shared.isLoggedIn { vm.isFav = v } else { showAuth = true } }
+                ), size: 38, favColor: YMColor.statusCancel)
                     .onChange(of: vm.isFav) { _ in Task { await vm.toggleFav() } }
             }
         }
@@ -567,7 +682,7 @@ struct OrgView: View {
                     Haptics.light()
                     // Чат в этом API привязан к заказу — из карточки организации
                     // открываем общий список чатов (диалоги по заказам заведения).
-                    coord.openChatList()
+                    if nested { localChat = true } else { coord.openChatList() }
                 } label: {
                     Text("💬")
                         .font(.system(size: 22))
@@ -583,10 +698,37 @@ struct OrgView: View {
             if cart.count > 0 {
                 StickyCartBar(count: cart.count, total: Money.dec(cart.total)) {
                     // Открыть глобальный флоу корзины (Корзина → Оформление → Успех).
-                    coord.openCart()
+                    if nested { localCart = true } else { coord.openCart() }
                 }
                 .padding(.bottom, 8)
             }
+        }
+        // Корзина и чаты, когда заведение открыто в шторке (см. nested).
+        // Висят на нижней панели, а не на корне: там уже шторка входа.
+        .fullScreenCover(isPresented: $localCart) {
+            CartFlow(
+                onClose: { localCart = false },
+                onTrackOrder: { id in
+                    localCart = false
+                    // Заказ — во вкладке «Заказы»: шторку профиля/«Жильё» закрываем.
+                    coord.revealForPush(closeAll: true) { coord.pendingOrderDetail = id }
+                }
+            )
+            .environmentObject(Cart.shared)
+            .environmentObject(DeepLinkRouter.shared)
+            .environmentObject(coord)
+            .environmentObject(Session.shared)
+        }
+        .sheet(isPresented: $localChat) {
+            NavigationStack {
+                ChatView.list
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Закрыть") { localChat = false }
+                        }
+                    }
+            }
+            .environmentObject(Session.shared)
         }
     }
 
@@ -686,13 +828,16 @@ struct OrgView: View {
         guard let slug = vm.detail?.slug ?? vm.seed?.slug,
               let url = URL(string: "\(API.base)/shop/\(slug)") else { return }
         let av = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-        // Presenter из активной сцены (self-contained экран).
-        UIApplication.shared.connectedScenes
+        // Presenter — самый верхний экран: карточка бывает в шторке или
+        // обложке (из push, «Избранного», «Жилья»), и корневой контроллер,
+        // уже что-то показывающий, молча не открывал «Поделиться».
+        var top = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
             .first { $0.isKeyWindow }?
-            .rootViewController?
-            .present(av, animated: true)
+            .rootViewController
+        while let p = top?.presentedViewController { top = p }
+        top?.present(av, animated: true)
     }
 }
 
@@ -823,7 +968,11 @@ struct ClosedBanner: View {
                     .font(.system(size: 14.5, weight: .bold))
                     .foregroundStyle(YMColor.text)
             }
-            Text("Можно оформить предзаказ — приготовим и доставим к открытию.")
+            // Предзаказ приложение не отправляет, и оформление закрытого заведения
+            // заблокировано («Заказ можно оформить, когда заведение откроется»).
+            // Раньше баннер обещал «предзаказ к открытию» — человек собирал корзину
+            // и упирался в серую кнопку.
+            Text("Оформить заказ можно будет, когда заведение откроется.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(YMColor.muted)
         }
@@ -842,9 +991,18 @@ struct ClosedBanner: View {
 /// Без падений при пустых/битых данных. Паритет с Android isOpenNow/nextOpenLabel.
 enum OrgHours {
     /// Открыто ли сейчас. nil = нет данных (вызывающий решает — считать открытым).
+    /// Часы работы заданы временем площадки (Москва), а не телефона: у
+    /// покупателя в другом поясе «Откроется сегодня/завтра в …» и запасной
+    /// расчёт «открыто» считались по его часам.
+    private static var cal: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
+        return c
+    }
+
     static func isOpenNow(_ hours: [ShopHour]?) -> Bool? {
         guard let hours, !hours.isEmpty else { return nil }
-        let cal = Calendar.current
+        let cal = Self.cal
         let now = Date()
         let dow = weekdayToServer(cal.component(.weekday, from: now)) // 1=Пн..7=Вс
         guard let today = hours.first(where: { norm($0.dayOfWeek) == dow }) else { return nil }
@@ -860,7 +1018,7 @@ enum OrgHours {
     /// «сегодня в HH:MM» / «завтра в HH:MM» / «в <день недели> в HH:MM». nil = нет данных.
     static func nextOpenLabel(_ hours: [ShopHour]?) -> String? {
         guard let hours, !hours.isEmpty else { return nil }
-        let cal = Calendar.current
+        let cal = Self.cal
         let now = Date()
         let todayDow = weekdayToServer(cal.component(.weekday, from: now))
         let cur = String(format: "%02d:%02d", cal.component(.hour, from: now), cal.component(.minute, from: now))

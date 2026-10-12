@@ -97,8 +97,12 @@ struct PlusView: View {
             if pendingPaymentId != nil { await tryActivate() }
         }
         // Возврат из браузера оплаты → пробуем активировать подписку.
+        // Уведомление ЮKassa доходит до сервера с задержкой (бывает 10–20 с):
+        // единственная проверка сразу после возврата из банка почти всегда
+        // отвечала «не подтверждена», и подписка включалась лишь при следующем
+        // открытии экрана. Теперь проверяем ещё несколько раз с паузой 3 с.
         .onChange(of: scenePhase) { phase in
-            if phase == .active, pendingPaymentId != nil { Task { await tryActivate() } }
+            if phase == .active, pendingPaymentId != nil { Task { await tryActivate(attempts: 6) } }
         }
     }
 
@@ -138,7 +142,8 @@ struct PlusView: View {
                 .font(YMFont.title2)
                 .foregroundStyle(YMColor.onAccent)
             Text(active
-                 ? "Действует до \(String(i.until?.prefix(10) ?? "—"))"
+                 // «2026-11-09» → «09.11.2026»: ISO-дату человеку не показываем.
+                 ? "Действует до \(DateFmt.day(i.until) ?? String(i.until?.prefix(10) ?? "—"))"
                  : "Подписка для тех, кто заказывает часто")
                 .font(YMFont.callout)
                 .foregroundStyle(YMColor.onAccent.opacity(0.85))
@@ -235,7 +240,7 @@ struct PlusView: View {
             if pendingPaymentId != nil && !payAgainAllowed {
                 // Проверка уже идёт (вернулись из банка) — дождёмся её, а не
                 // разрешаем новый платёж без проверки.
-                if activating { return }
+                if activating { message = "Проверяем прошлую оплату…"; return }
                 if await tryActivate() { return }
                 payAgainAllowed = true
                 message = "Прошлая оплата ещё не подтверждена. Если вы её не завершили — нажмите ещё раз, чтобы оплатить заново."
@@ -260,27 +265,36 @@ struct PlusView: View {
     /// true — подписка активирована. Параллельные проверки (каждый возврат в
     /// приложение) не запускаем.
     @discardableResult
-    private func tryActivate() async -> Bool {
+    private func tryActivate(attempts: Int = 1) async -> Bool {
         guard !activating else { return false }
-        guard let pid = Self.storedPending() else { if pendingPaymentId != nil { setPending(nil) }; return false }
+        guard Self.storedPending() != nil else { if pendingPaymentId != nil { setPending(nil) }; return false }
         activating = true
         defer { activating = false }
-        do {
-            let r: PlusActivateResp = try await API.shared.post("api/v1/plus/activate",
-                                                                body: PlusActivateBody(paymentId: pid))
-            if r.active == true {
-                setPending(nil)
-                payAgainAllowed = false
-                message = "Yumurta Plus активна ✨"
-                Haptics.success()
-                await load()
-                return true
-            } else {
-                message = "Оплата ещё не подтверждена — проверим при следующем открытии"
+        var notConfirmed = false
+        for attempt in 0..<max(1, attempts) {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if Task.isCancelled { break }
             }
-        } catch {
-            // оплата ещё не прошла — оставляем pendingPaymentId, проверим при следующем возврате
+            guard let pid = Self.storedPending() else { if pendingPaymentId != nil { setPending(nil) }; return false }
+            do {
+                let r: PlusActivateResp = try await API.shared.post("api/v1/plus/activate",
+                                                                    body: PlusActivateBody(paymentId: pid))
+                if r.active == true {
+                    setPending(nil)
+                    payAgainAllowed = false
+                    message = "Yumurta Plus активна ✨"
+                    Haptics.success()
+                    await load()
+                    return true
+                } else {
+                    notConfirmed = true
+                }
+            } catch {
+                // оплата ещё не прошла — оставляем pendingPaymentId, проверим при следующем возврате
+            }
         }
+        if notConfirmed { message = "Оплата ещё не подтверждена — проверим при следующем открытии" }
         return false
     }
 

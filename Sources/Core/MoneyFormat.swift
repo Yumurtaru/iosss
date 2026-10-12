@@ -47,23 +47,31 @@ enum Money {
     /// теперь показываем целиком: «1 310,5 ₽» для денег выглядит обрезанным.
     /// Целые суммы, как и прежде, идут без копеек — так на всех экранах.
     static func format(_ value: Decimal) -> String {
-        let whole = value == value.rounded(0)
+        // Сначала до копеек «от нуля» (как PHP round на сервере и итог корзины):
+        // NumberFormatter округлял 72,465 и 0,125 «к чётному» через Double, и цена
+        // на карточке товара расходилась с корзиной и заказом на копейку.
+        let v = value.rounded(2)
+        let whole = v == v.rounded(0)
+        let f = whole ? rubWhole : rubFrac
+        let n = f.string(from: v as NSDecimalNumber) ?? "\(v)"
+        return "\(n)\u{00A0}₽"
+    }
+
+    // Форматтеры создаются один раз: format вызывается в каждой строке списков
+    // при каждой перерисовке, а NumberFormatter создавать дорого.
+    private static func rub(fraction: Int) -> NumberFormatter {
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.locale = Locale(identifier: "ru_RU")
         f.groupingSeparator = "\u{00A0}"
         f.decimalSeparator = ","
-        f.minimumFractionDigits = whole ? 0 : 2
-        f.maximumFractionDigits = whole ? 0 : 2
-        let n = f.string(from: value as NSDecimalNumber) ?? "\(value)"
-        return "\(n)\u{00A0}₽"
+        f.minimumFractionDigits = fraction
+        f.maximumFractionDigits = fraction
+        return f
     }
-
-    /// Деньги НА ПРОВОД: всегда "0.00" — точка разделителем, два знака, без
-    /// пробелов и ₽ (канон SKILL.md, так же как number_format на сервере).
-    /// `format` для этого не годится: он печатает «1 000,50 ₽» под русскую
-    /// локаль, и сервер разобрал бы такую строку как 1.
-    static func wire(_ value: Decimal) -> String {
+    private static let rubWhole = rub(fraction: 0)
+    private static let rubFrac = rub(fraction: 2)
+    private static let wireFmt: NumberFormatter = {
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -72,7 +80,16 @@ enum Money {
         f.decimalSeparator = "."
         f.minimumFractionDigits = 2
         f.maximumFractionDigits = 2
-        return f.string(from: value as NSDecimalNumber) ?? "0.00"
+        return f
+    }()
+
+    /// Деньги НА ПРОВОД: всегда "0.00" — точка разделителем, два знака, без
+    /// пробелов и ₽ (канон SKILL.md, так же как number_format на сервере).
+    /// `format` для этого не годится: он печатает «1 000,50 ₽» под русскую
+    /// локаль, и сервер разобрал бы такую строку как 1.
+    static func wire(_ value: Decimal) -> String {
+        // Копейки — тем же округлением «от нуля», что и format (см. выше).
+        wireFmt.string(from: value.rounded(2) as NSDecimalNumber) ?? "0.00"
     }
 }
 

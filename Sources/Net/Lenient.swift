@@ -49,8 +49,13 @@ struct LenientInt: Codable, Hashable {
         let c = try decoder.singleValueContainer()
         if c.decodeNil() { wrappedValue = nil }
         else if let i = try? c.decode(Int.self) { wrappedValue = i }
-        else if let d = try? c.decode(Double.self) { wrappedValue = Int(d) }
-        else if let s = try? c.decode(String.self) { wrappedValue = Int(s) ?? Double(s).map { Int($0) } }
+        // Int(exactly:) вместо Int(d): «nan», «inf», «1e20» роняли приложение.
+        else if let d = try? c.decode(Double.self) { wrappedValue = Int(exactly: d.rounded(.towardZero)) }
+        else if let s = try? c.decode(String.self) { wrappedValue = Int(s) ?? Double(s).flatMap { Int(exactly: $0.rounded(.towardZero)) } }
+        // Флаги-«целые» (is_closed, is_read, is_default…) сервер может отдать и
+        // логическим true/false: раньше это давало nil — выходной день считался
+        // рабочим («Откроется сегодня в 10:00»), прочитанное — непрочитанным.
+        else if let b = try? c.decode(Bool.self) { wrappedValue = b ? 1 : 0 }
         else { wrappedValue = nil }
     }
     func encode(to encoder: Encoder) throws {
@@ -73,7 +78,14 @@ struct LenientDecimal: Codable, Hashable {
         if c.decodeNil() { wrappedValue = nil }
         else if let s = try? c.decode(String.self), let d = Decimal(string: s) { wrappedValue = d } // без потери точности
         else if let i = try? c.decode(Int.self) { wrappedValue = Decimal(i) }
-        else if let dbl = try? c.decode(Double.self) { wrappedValue = Decimal(dbl) }               // запасной путь
+        // Запасной путь — сумма JSON-числом с дробью (по справке так приходят total и
+        // др.). Decimal(Double) даёт хвост: 150.65 → 150.6499999…; через кратчайшую
+        // строковую запись Double — ровно 150.65.
+        // Экспоненту («1e-05») строкой не разбираем — там прежний путь.
+        else if let dbl = try? c.decode(Double.self) {
+            let s = String(dbl)
+            wrappedValue = s.contains("e") ? Decimal(dbl) : (Decimal(string: s) ?? Decimal(dbl))
+        }
         else { wrappedValue = nil }
     }
     func encode(to encoder: Encoder) throws {

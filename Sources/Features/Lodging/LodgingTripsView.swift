@@ -43,6 +43,10 @@ final class LodgingTripsVM: ObservableObject {
             await load()
         } catch {
             message = error.localizedDescription
+            // Повторная отмена (уже отменена с другого устройства, хозяин
+            // отклонил, брони нет) — карточка устарела: перечитываем список,
+            // иначе «Отменить» оставалась и снова отвечала отказом.
+            if let s = (error as? APIError)?.rejectStatus, [404, 409, 422].contains(s) { await load() }
         }
     }
 }
@@ -64,6 +68,14 @@ struct LodgingTripsView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: YMSpace.md) {
+                // Обновление не прошло, а брони уже на экране: раньше сбой был
+                // незаметен — человек считал статусы актуальными.
+                if let e = vm.loadError, !vm.trips.isEmpty, !vm.loading {
+                    Text("Не удалось обновить: " + e)
+                        .font(YMFont.caption)
+                        .foregroundStyle(YMColor.statusCancel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 ForEach(vm.trips) { t in
                     LodgingTripCard(
                         trip: t,
@@ -120,6 +132,9 @@ struct LodgingTripsView: View {
         .task { if session.isLoggedIn { await vm.load() } }
         .onChange(of: session.isLoggedIn) { logged in
             if logged { Task { await vm.load() } }
+            // Сессия кончилась (или выход) на открытом экране: брони прежнего
+            // аккаунта оставались видны под надписью «Войдите в аккаунт».
+            else { vm.trips = []; vm.loadError = nil }
         }
         .refreshable { if session.isLoggedIn { await vm.load() } }
         .confirmationDialog(
@@ -215,8 +230,18 @@ private struct LodgingTripCard: View {
                 .font(YMFont.caption).foregroundStyle(YMColor.muted)
 
             if let ph = trip.shop?.phone, !ph.isEmpty {
-                Text("Телефон объекта: " + ph)
-                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                // Номер был простым текстом: ни позвонить, ни скопировать —
+                // перед заездом гость перепечатывал его вручную.
+                let digits = ph.filter { $0.isNumber || $0 == "+" }
+                if !digits.isEmpty, let url = URL(string: "tel:" + digits) {
+                    Link(destination: url) {
+                        Text("Телефон объекта: " + ph)
+                            .font(YMFont.caption).foregroundStyle(YMColor.accent)
+                    }
+                } else {
+                    Text("Телефон объекта: " + ph)
+                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

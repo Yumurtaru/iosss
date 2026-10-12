@@ -82,7 +82,9 @@ struct LodgingItem: Codable, Hashable, Identifiable {
     /// срок, то есть врала.
     let reasonText: String?
 
-    var id: String { unit?.slug ?? UUID().uuidString }
+    // Без slug id раньше был новым UUID при каждом обращении: ForEach пересоздавал
+    // карточки, а склейка страниц в «Показать ещё» дублировала их.
+    var id: String { unit?.slug ?? "unit-\(unit?.id ?? 0)-\(unit?.title ?? "")" }
     var isAvailable: Bool { available ?? true }
 }
 

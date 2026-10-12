@@ -185,7 +185,9 @@ private struct LevelRow: View {
                     .font(YMFont.headline)
                     .fontWeight(isCurrent ? .bold : .semibold)
                     .foregroundStyle(YMColor.text)
-                Text("от \(level.min ?? 0) заказов")
+                // «от 1 заказов», «от 21 заказов», «от 0 заказов» — склоняем
+                // (после «от» — родительный падеж: 1 заказа, 5 заказов).
+                Text(minText)
                     .font(YMFont.caption)
                     .foregroundStyle(YMColor.muted)
             }
@@ -202,6 +204,13 @@ private struct LevelRow: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(name), кэшбэк \(level.cashback ?? 0)%\(isCurrent ? ", текущий уровень" : "")")
+    }
+
+    private var minText: String {
+        let n = max(0, level.min ?? 0)
+        if n == 0 { return "Начальный уровень" }
+        let word = (n % 10 == 1 && n % 100 != 11) ? "заказа" : "заказов"
+        return "от \(n) \(word)"
     }
 
     private var icon: String {
