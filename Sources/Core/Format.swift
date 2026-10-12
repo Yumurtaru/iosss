@@ -105,3 +105,16 @@ enum OrderStatus {
         }
     }
 }
+
+/// Непустые строки через разделитель: `joinedNonEmpty([a, b], separator: " · ")`.
+/// Отдельная функция вместо цепочки `[a, b].compactMap { $0 }.filter { … }`:
+/// на Xcode 26 такие цепочки упирались в лимит проверки типов и роняли сборку
+/// («unable to type-check this expression in reasonable time», сборка 74).
+func joinedNonEmpty(_ parts: [String?], separator: String) -> String {
+    var out: [String] = []
+    for p in parts {
+        guard let s = p, !s.isEmpty else { continue }
+        out.append(s)
+    }
+    return out.joined(separator: separator)
+}

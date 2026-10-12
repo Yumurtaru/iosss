@@ -1020,14 +1020,26 @@ private struct SuccessBookingSheet: View {
         // Дата приходит как в базе («2026-10-12») — человеку пишем «12 октября»;
         // время «19:00:00» — без секунд. Неожиданный вид печатаем как есть.
         if let d = r.date, !d.isEmpty { when.append(DateFmt.day(d) != nil ? fmtDateHuman(String(d.prefix(10))) : d) }
-        let t = [r.time, r.timeEnd].compactMap { $0 }.filter { !$0.isEmpty }
-            .map { s in s.count == 8 && s.filter({ ch in ch == ":" }).count == 2 ? String(s.prefix(5)) : s }
+        // Без цепочки compactMap/filter/map: на Xcode 26 она не укладывалась в
+        // лимит проверки типов и роняла сборку 74.
+        let times: [String?] = [r.time, r.timeEnd]
+        var t: [String] = []
+        for p in times {
+            guard let s = p, !s.isEmpty else { continue }
+            t.append(Self.hhmm(s))
+        }
         if !t.isEmpty { when.append(t.joined(separator: "–")) }
         var what: [String] = []
         if (r.guests ?? 1) > 1 { what.append("\(r.guests ?? 1) чел.") }
         if (r.slots ?? 1) > 1 { what.append("\(r.slots ?? 1) ч") }
         let all = [when.joined(separator: ", "), what.joined(separator: " · ")].filter { !$0.isEmpty }
         return all.isEmpty ? nil : all.joined(separator: " · ")
+    }
+
+    /// «19:00:00» → «19:00»; другой вид — как есть.
+    private static func hhmm(_ s: String) -> String {
+        let colons = s.filter { $0 == ":" }.count
+        return (s.count == 8 && colons == 2) ? String(s.prefix(5)) : s
     }
 
     var body: some View {

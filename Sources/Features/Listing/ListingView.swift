@@ -394,7 +394,7 @@ struct ListingView: View {
 
     private var subtitle: String? {
         if vm.screen == .shop {
-            return [vm.shop?.category, vm.shop?.address].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+            return joinedNonEmpty([vm.shop?.category, vm.shop?.address], separator: " · ")
         }
         let n = vm.orgs.count
         return n > 0 ? "\(n) \(orgWord(n))" : nil

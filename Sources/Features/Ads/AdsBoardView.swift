@@ -65,13 +65,17 @@ final class AdsBoardViewModel: ObservableObject {
 
     var visibleJobs: [Job] {
         guard showJobs else { return [] }
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return (shopJobs ?? []).filter { j in
-            q.isEmpty
-                || (j.title ?? "").lowercased().contains(q)
-                || (j.shop ?? "").lowercased().contains(q)
-                || (j.category ?? "").lowercased().contains(q)
+        let all: [Job] = shopJobs ?? []
+        let q: String = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if q.isEmpty { return all }
+        // Простыми шагами, без длинной цепочки `||` с `??`: Xcode 26 такие
+        // выражения не успевает проверить (сборка 74).
+        var out: [Job] = []
+        for j in all {
+            let hay: String = joinedNonEmpty([j.title, j.shop, j.category], separator: " ").lowercased()
+            if hay.contains(q) { out.append(j) }
         }
+        return out
     }
 
     /// Город из настроек → пусто — вся площадка (как в «Профиль → Вакансии»).
@@ -431,8 +435,11 @@ enum AdsRoute: Hashable {
 /// корневая «Работа» без подрубрик — тоже. «Резюме» и «Ищу работу» — нет.
 /// Паритет с Android (AdsScreen.isJobsCategory).
 private func isVacancyAdCategory(_ c: AdCategory) -> Bool {
-    let n = (c.name ?? "").lowercased(), s = (c.slug ?? "").lowercased()
-    return n.contains("ваканс") || s.contains("vakans") || s.contains("vacanc") || s == "jobs" || s == "job"
+    let n: String = (c.name ?? "").lowercased()
+    let s: String = (c.slug ?? "").lowercased()
+    if n.contains("ваканс") { return true }
+    if s.contains("vakans") || s.contains("vacanc") { return true }
+    return s == "jobs" || s == "job"
 }
 
 func isJobsAdCategory(_ cats: [AdCategory], _ id: Int) -> Bool {
@@ -441,8 +448,11 @@ func isJobsAdCategory(_ cats: [AdCategory], _ id: Int) -> Bool {
         let kids = root.children ?? []
         if isVacancyAdCategory(root) || kids.contains(where: isVacancyAdCategory) { return true }
         if kids.isEmpty {
-            let n = (root.name ?? "").lowercased(), s = (root.slug ?? "").lowercased(), i = (root.icon ?? "").lowercased()
-            return n.contains("работ") || s.contains("rabot") || s == "work" || i == "briefcase"
+            let n: String = (root.name ?? "").lowercased()
+            let s: String = (root.slug ?? "").lowercased()
+            let i: String = (root.icon ?? "").lowercased()
+            if n.contains("работ") || s.contains("rabot") { return true }
+            return s == "work" || i == "briefcase"
         }
         return false
     }
@@ -564,7 +574,7 @@ struct AdGridCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(ad.priceText ?? "").font(YMFont.headline).foregroundStyle(YMColor.text)
                 Text(ad.title ?? "").font(YMFont.body).foregroundStyle(YMColor.text).lineLimit(2)
-                Text([ad.categoryName, ad.city].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "))
+                Text(joinedNonEmpty([ad.categoryName, ad.city], separator: " · "))
                     .font(YMFont.caption).foregroundStyle(YMColor.muted).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
