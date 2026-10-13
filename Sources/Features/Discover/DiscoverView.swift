@@ -109,6 +109,15 @@ private struct SearchSection: View {
     // Навигация внутри своего NavigationStack: одно состояние на переход.
     @State private var route: DiscoverRoute?
 
+    /// Переход с корня таба. Тап по вкладке снимает стек, но SwiftUI не всегда
+    /// сбрасывает navigationDestination(isPresented:) — route оставался «висеть»,
+    /// и тап по найденному ничего не открывал. Сначала сбрасываем, потом идём.
+    private func go(_ r: DiscoverRoute) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
+
     private var trimmed: String { q.trimmingCharacters(in: .whitespaces) }
     private var showResults: Bool { !shops.isEmpty || !products.isEmpty }
     private var showSuggestState: Bool { trimmed.count < 2 }
@@ -279,7 +288,7 @@ private struct SearchSection: View {
             if !recent.isEmpty {
                 sectionKicker("Недавно смотрели")
                 ForEach(recent) { r in
-                    Button { route = .product(r.id) } label: {
+                    Button { go(.product(r.id)) } label: {
                         HStack(spacing: YMSpace.md) {
                             PhotoPlaceholder(url: API.imageURL(r.photo), label: "ФОТО", radius: 12, tone: r.id)
                                 .frame(width: 44, height: 44)
@@ -324,7 +333,7 @@ private struct SearchSection: View {
     }
 
     private func productResultCard(_ p: Product, tone: Int) -> some View {
-        Button { route = .product(p.id) } label: {
+        Button { go(.product(p.id)) } label: {
             VStack(alignment: .leading, spacing: 7) {
                 PhotoPlaceholder(url: API.imageURL(p.photo), label: "ФОТО", radius: 16, tone: tone)
                     .frame(width: 150, height: 96)
@@ -360,7 +369,7 @@ private struct SearchSection: View {
     }
 
     private func orgResultRow(_ s: Shop, tone: Int) -> some View {
-        Button { route = .shop(s) } label: {
+        Button { go(.shop(s)) } label: {
             HStack(spacing: YMSpace.md) {
                 PhotoPlaceholder(url: API.imageURL(s.logo ?? s.cover), label: "ЛОГО", radius: 12, tone: tone)
                     .frame(width: 44, height: 44)
@@ -548,6 +557,15 @@ private struct CategoriesSection: View {
     // Листинг организаций выбранной категории (orgType + заголовок).
     @State private var route: DiscoverRoute?
 
+    /// Переход с корня таба. Тап по вкладке снимает стек, но SwiftUI не всегда
+    /// сбрасывает navigationDestination(isPresented:) — route оставался «висеть»,
+    /// и тап по найденному ничего не открывал. Сначала сбрасываем, потом идём.
+    private func go(_ r: DiscoverRoute) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -575,9 +593,9 @@ private struct CategoriesSection: View {
                                     Haptics.selection()
                                     // id категории — в листинг: раньше открывался весь
                                     // раздел под названием категории (как Android — с фильтром).
-                                    route = .listing(orgType: tab.apiType,
-                                                     title: cat.name ?? tab.title,
-                                                     categoryId: cat.id)
+                                    go(.listing(orgType: tab.apiType,
+                                                title: cat.name ?? tab.title,
+                                                categoryId: cat.id))
                                 }
                             }
                         }

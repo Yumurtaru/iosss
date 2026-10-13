@@ -12,9 +12,8 @@ import SwiftUI
 //  Деньги — только Decimal через Money.format(Money.parse(...)). Токены — YM*.
 //
 //  API: экран заказ не создаёт (это делает CheckoutView) — читает Cart.shared.
-//  Плашка «Комментарий к заказу…» здесь — дизайнерская подсказка (по макету):
-//  фактический ввод комментария выполняется на экране оформления (CheckoutView),
-//  т.к. Core/Cart не хранит поле comment (инвариант single-store, без правок ядра).
+//  «Комментарий к заказу…» — настоящее поле ввода. Текст хранится в
+//  CheckoutDraft (привязан к заведению корзины) и подхватывается оформлением.
 //
 
 struct CartView: View {
@@ -23,6 +22,8 @@ struct CartView: View {
     var onClose: () -> Void = {}
     /// «Меню» у баннера заведения. nil — как раньше, закрыть корзину.
     var onMenu: (() -> Void)? = nil
+    /// Комментарий к заказу — тот же черновик, что на оформлении (CheckoutDraft).
+    @State private var comment = ""
 
     var body: some View {
         ZStack {
@@ -78,10 +79,9 @@ struct CartView: View {
                         }
                     }
 
-                    // Плашка похожа на поле ввода, но нажатие на неё ничего не
-                    // делало. Комментарий вводится на оформлении — туда и ведём.
-                    Button(action: { Haptics.light(); onCheckout() }) { commentHint.contentShape(Rectangle()) }
-                        .buttonStyle(.plain)
+                    // Раньше это была плашка-подсказка без ввода: нажатие не давало
+                    // написать комментарий. Теперь поле, текст уходит в оформление.
+                    commentField
                         .padding(.top, YMSpace.lg)
 
                     totalsCard
@@ -91,6 +91,8 @@ struct CartView: View {
                 }
                 .padding(.horizontal, YMSpace.xl)
             }
+            // Клавиатура комментария убирается жестом прокрутки.
+            .scrollDismissesKeyboard(.interactively)
             bottomCTA
         }
     }
@@ -133,16 +135,26 @@ struct CartView: View {
         return s.isEmpty ? "•" : String(s.prefix(1)).uppercased()
     }
 
-    // Плашка-подсказка «Комментарий к заказу…» (dashed) — 1:1 с макетом.
-    private var commentHint: some View {
+    // Поле «Комментарий к заказу…» (dashed, как в макете и на оформлении).
+    private var commentField: some View {
         HStack(spacing: YMSpace.sm) {
             Image(systemName: "square.and.pencil")
                 .font(.system(size: 15))
                 .foregroundStyle(YMColor.muted)
-            Text("Комментарий к заказу…")
+            TextField("Комментарий к заказу…", text: $comment, axis: .vertical)
                 .font(.system(size: 13.5))
-                .foregroundStyle(YMColor.muted)
-            Spacer()
+                .foregroundStyle(YMColor.text)
+                .tint(YMColor.accent)
+                .lineLimit(1...4)
+                .onChange(of: comment) { v in
+                    CheckoutDraft.shopId = cart.shopId
+                    CheckoutDraft.comment = v
+                }
+        }
+        .onAppear {
+            if CheckoutDraft.shopId != nil, CheckoutDraft.shopId == cart.shopId, comment.isEmpty {
+                comment = CheckoutDraft.comment
+            }
         }
         .padding(14)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))

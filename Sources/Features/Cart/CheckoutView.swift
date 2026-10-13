@@ -65,11 +65,13 @@ private struct OrderBody: Encodable {
     /// Android их уже шлёт). Nil-поля в JSON не попадают.
     let tableNumber: String?
     let promoCode: String?
+    /// Предзаказ у закрытого заведения: "YYYY-MM-DD HH:MM" по Москве (ОТВЕТЫ-САЙТА п. 7 к П-24).
+    let preorderAt: String?
     enum CodingKeys: String, CodingKey {
         case shopId = "shop_id", items, deliveryType = "delivery_type", paymentType = "payment_type",
              address, comment, deliveryPrice = "delivery_price", lat, lng,
              spendPointsAll = "spend_points_all", idempotencyKey = "idempotency_key",
-             tableNumber = "table_number", promoCode = "promo_code"
+             tableNumber = "table_number", promoCode = "promo_code", preorderAt = "preorder_at"
     }
 }
 /// Ответ POST api/v1/promo/check.
@@ -164,6 +166,11 @@ struct CheckoutView: View {
     /// Сумма товаров, по которой считан quote (после скидок и баллов).
     @State private var quotedGoods: Double?
     @State private var comment = ""
+    /// «Когда»: как можно скорее (false) или ко времени (true), как на сайте.
+    /// У закрытого заведения — только ко времени (предзаказ).
+    @State private var byTime = false
+    /// Выбранное время: "YYYY-MM-DD HH:MM" по Москве или nil.
+    @State private var preorderAt: String?
     @State private var placing = false
     @State private var errorText: String?
     /// Почему не посчиталась доставка (обрыв связи, 5xx). Раньше ошибка
@@ -351,6 +358,18 @@ struct CheckoutView: View {
     /// временем, а не временем телефона).
     private var shopClosed: Bool { shop?.isOpen == false }
 
+    /// Нужно ли время: закрыто (предзаказ) или выбрано «Ко времени».
+    private var needTime: Bool { shopClosed || byTime }
+    /// Дни и время — по графику заведения.
+    private var preorderDays: [PreorderDay] {
+        needTime ? PreorderSlots.build(shop?.statusSchedule) : []
+    }
+    /// Выбранное время ещё есть в графике (день мог смениться, пока экран открыт).
+    private var preorderValid: Bool {
+        guard let p = preorderAt else { return false }
+        return PreorderSlots.contains(preorderDays, p)
+    }
+
     private func loadShop(_ slug: String) async {
         do {
             let loaded: ShopDetail = try await API.shared.get("api/v1/shops/\(slug)")
@@ -363,11 +382,10 @@ struct CheckoutView: View {
     }
 
     private var ctaEnabled: Bool {
-        // shopClosed — сервер всё равно откажет («Заведение сейчас закрыто —
-        // оформите предзаказ»), а предзаказ приложение не отправляет. Активная
-        // кнопка под надписью «заказ можно оформить, когда откроется» только
-        // путала бы человека.
-        !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin && !quoteMissing && !shopClosed
+        // Заведение закрыто — заказ уходит предзаказом (preorder_at); без
+        // выбранного времени сервер откажет, поэтому кнопка ждёт выбора.
+        !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin && !quoteMissing
+            && (!needTime || preorderValid)
             && (cart.shopSlug == nil || shop != nil) && !promoPending
     }
 
@@ -482,18 +500,18 @@ struct CheckoutView: View {
                     }
                     .padding(.bottom, YMSpace.sm)
                 }
-                if shopClosed, let st = shop?.statusText, !st.isEmpty {
-                    Text(st + ". Заказ можно оформить, когда заведение откроется.")
-                        .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.bottom, YMSpace.sm)
-                }
+
 
                 SectionKicker("Способ получения").padding(.top, YMSpace.xs).padding(.bottom, YMSpace.sm)
                 YMSegmented(options: allowedFulfillment, selection: $fulfillment) { $0.title }
 
                 if fulfillment == .dineIn {
                     tableField.padding(.top, YMSpace.md)
+                }
+                // «Когда» — как на сайте: как можно скорее или ко времени (день и
+                // время в часы работы). Закрыто — только ко времени (предзаказ).
+                if shop != nil {
+                    whenSection.padding(.top, YMSpace.md)
                 }
                 if fulfillment == .delivery {
                     addressSelector.padding(.top, YMSpace.md)
@@ -839,6 +857,38 @@ struct CheckoutView: View {
 
     // MARK: - Bottom CTA «Оформить заказ · СУММА»
 
+    private static let whenOptions: [Bool] = [false, true]
+    private static func whenTitle(_ byTime: Bool) -> String {
+        byTime ? "Ко времени" : "Как можно скорее"
+    }
+
+    private var whenTitle: String {
+        switch fulfillment {
+        case .delivery: return "Когда доставить"
+        case .dineIn: return "Когда придёте"
+        default: return "Когда приготовить"
+        }
+    }
+
+    private var whenSection: some View {
+        VStack(alignment: .leading, spacing: YMSpace.sm) {
+            SectionKicker(whenTitle)
+            if !shopClosed {
+                YMSegmented(options: Self.whenOptions, selection: $byTime, title: Self.whenTitle)
+            }
+            if needTime {
+                PreorderPickerView(statusText: shop?.statusText, days: preorderDays,
+                                   selection: $preorderAt, closed: shopClosed)
+            }
+        }
+    }
+
+    private var ctaTitle: String {
+        let sum = Money.format(grandTotal)
+        if shopClosed { return "Оформить предзаказ · " + sum }
+        return "Оформить заказ · " + sum
+    }
+
     private var bottomCTA: some View {
         VStack(spacing: YMSpace.md) {
             HStack {
@@ -862,7 +912,7 @@ struct CheckoutView: View {
                 Button(action: placeOrder) {
                     HStack(spacing: YMSpace.sm) {
                         if placing { ProgressView().tint(YMColor.onAccent) }
-                        Text(placing ? "Оформляем…" : "Оформить заказ · \(Money.format(grandTotal))")
+                        Text(placing ? "Оформляем…" : ctaTitle)
                     }
                 }
                 .buttonStyle(YMPrimaryButtonStyle())
@@ -1053,7 +1103,8 @@ struct CheckoutView: View {
             idempotencyKey: cart.checkoutKey,
             tableNumber: fulfillment == .dineIn && !tableNumber.trimmingCharacters(in: .whitespaces).isEmpty
                 ? String(tableNumber.trimmingCharacters(in: .whitespaces).prefix(20)) : nil,
-            promoCode: appliedCode
+            promoCode: appliedCode,
+            preorderAt: needTime ? preorderAt : nil
         )
 
         Task {
@@ -1346,5 +1397,211 @@ private struct CheckoutRow: View {
     }
     private var quantityLabel: String {
         line.isFractional ? fmtQty(line.qty, line.unit) : "× \(Int(line.qty.rounded()))"
+    }
+}
+
+// MARK: - Предзаказ у закрытого заведения
+
+/// День предзаказа: дата "YYYY-MM-DD", подпись и слоты "HH:MM".
+struct PreorderDay: Identifiable, Hashable {
+    let date: String
+    let label: String
+    let slots: [String]
+    var id: String { date }
+}
+
+/// Слоты предзаказа по графику заведения. Сервер (ОТВЕТЫ-САЙТА п. 7 к П-24):
+/// preorder_at = "YYYY-MM-DD HH:MM" по Москве, окно — до «сейчас + 7 суток»,
+/// время сверяется с графиком (границы включительно), графика нет — часы не
+/// проверяются. Слоты — как на сайте (/api/checkout/slots): шаг 30 минут от
+/// времени открытия, слот целиком в часах работы, не раньше чем через 20 минут
+/// от «сейчас»; время московское независимо от пояса телефона. Тот же выбор —
+/// «Ко времени» у открытого заведения. Паритет с Android (Preorder.kt).
+enum PreorderSlots {
+    static let step = 30
+    static let lead = 20
+    static let dayCount = 7
+    private static let weekdays: [String] = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
+    private static let months: [String] = ["янв", "фев", "мар", "апр", "мая", "июн",
+                                           "июл", "авг", "сен", "окт", "ноя", "дек"]
+
+    /// "HH:MM[:SS]" → минуты от полуночи; мусор → nil.
+    static func minutes(_ raw: String?) -> Int? {
+        guard let s = raw?.trimmingCharacters(in: .whitespaces), !s.isEmpty else { return nil }
+        let parts = s.split(separator: ":")
+        guard parts.count >= 2, let h = Int(parts[0]), let m = Int(parts[1]) else { return nil }
+        guard (0...24).contains(h), (0...59).contains(m) else { return nil }
+        return h * 60 + m
+    }
+
+    /// Отрезок работы: [start, end) в минутах этого дня, сетка слотов от base.
+    struct Shift { let start: Int; let end: Int; let base: Int }
+
+    /// Смены в день недели dow (0 = Вс … 6 = Сб). «Ночная» смена (18:00–02:00)
+    /// даёт этому дню отрезок до полуночи, следующему — хвост. Графика нет совсем —
+    /// весь день; день без часов — открыт.
+    static func shifts(_ schedule: [ScheduleDay]?, dow: Int) -> [Shift] {
+        var byDow: [Int: ScheduleDay] = [:]
+        for d in schedule ?? [] {
+            let k: Int = (((d.dow ?? 0) % 7) + 7) % 7
+            byDow[k] = d
+        }
+        var anyHours = false
+        for d in byDow.values where d.isClosed == true || minutes(d.open) != nil { anyHours = true }
+        if !anyHours { return [Shift(start: 0, end: 1440, base: 0)] }
+        var out: [Shift] = []
+        if let p = byDow[(dow + 6) % 7], p.isClosed != true,
+           let o = minutes(p.open), let c = minutes(p.close), c <= o, c > 0 {
+            out.append(Shift(start: 0, end: c, base: o % step))
+        }
+        if let t = byDow[dow], t.isClosed != true {
+            if let o = minutes(t.open), let c = minutes(t.close) {
+                if c > o {
+                    out.append(Shift(start: o, end: c, base: o))
+                } else {
+                    out.append(Shift(start: o, end: 1440 + c, base: o))   // через полночь
+                }
+            } else {
+                out.append(Shift(start: 0, end: 1440, base: 0))          // день без часов — открыт
+            }
+        }
+        return out
+    }
+
+    static func build(_ schedule: [ScheduleDay]?, now: Date = Date()) -> [PreorderDay] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
+        let hm = cal.dateComponents([.hour, .minute], from: now)
+        let nowMin: Int = (hm.hour ?? 0) * 60 + (hm.minute ?? 0)
+        let earliest: Int = nowMin + lead
+        var result: [PreorderDay] = []
+        for d in 0..<dayCount {
+            guard let day = cal.date(byAdding: .day, value: d, to: now) else { continue }
+            let dc = cal.dateComponents([.year, .month, .day, .weekday], from: day)
+            let dow: Int = (dc.weekday ?? 1) - 1               // Calendar: 1 = Вс
+            let from: Int = d == 0 ? earliest : 0
+            var mins = Set<Int>()
+            for sh in shifts(schedule, dow: dow) {
+                // Первый слот сетки смены — не раньше начала и не раньше «from».
+                var t: Int = max(sh.start, from)
+                let r: Int = (((t - sh.base) % step) + step) % step
+                if r != 0 { t += step - r }
+                while t + step <= sh.end && t < 1440 {
+                    mins.insert(t)
+                    t += step
+                }
+            }
+            var slots: [String] = []
+            for m in mins.sorted() { slots.append(String(format: "%02d:%02d", m / 60, m % 60)) }
+            if slots.isEmpty { continue }
+            let y: Int = dc.year ?? 0
+            let mo: Int = dc.month ?? 1
+            let dm: Int = dc.day ?? 1
+            let label: String
+            switch d {
+            case 0: label = "Сегодня"
+            case 1: label = "Завтра"
+            default: label = weekdays[dow] + ", " + String(dm) + " " + months[max(0, min(11, mo - 1))]
+            }
+            result.append(PreorderDay(date: String(format: "%04d-%02d-%02d", y, mo, dm), label: label, slots: slots))
+        }
+        return result
+    }
+
+    /// "YYYY-MM-DD HH:MM" — то, что уходит в preorder_at.
+    static func value(_ date: String, _ time: String) -> String { date + " " + time }
+
+    static func contains(_ days: [PreorderDay], _ v: String) -> Bool {
+        for d in days {
+            for t in d.slots where value(d.date, t) == v { return true }
+        }
+        return false
+    }
+}
+
+/// Выбор дня и времени предзаказа.
+private struct PreorderPickerView: View {
+    let statusText: String?
+    let days: [PreorderDay]
+    @Binding var selection: String?
+    /// true — заведение закрыто: заголовок «Предзаказ» и причина.
+    var closed: Bool = true
+
+    private var currentDay: PreorderDay? {
+        let selDate: String? = selection.map { String($0.prefix(10)) }
+        if let d = days.first(where: { $0.date == selDate }) { return d }
+        return days.first
+    }
+
+    private var intro: String {
+        let st = (statusText ?? "").trimmingCharacters(in: .whitespaces)
+        let head = st.isEmpty ? "Заведение сейчас закрыто" : st
+        return head + ". Выберите день и время — в часы работы заведения."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: YMSpace.sm) {
+            if closed {
+                Text("Предзаказ").font(YMFont.headline).foregroundStyle(YMColor.text)
+                Text(intro).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Выберите день и время — в часы работы заведения.")
+                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
+            }
+            if days.isEmpty {
+                Text("В ближайшие 7 дней свободного времени нет — заведение не работает.")
+                    .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let day = currentDay {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: YMSpace.sm) {
+                        ForEach(days) { d in
+                            PreorderChip(title: d.label, selected: d.date == day.date) {
+                                // Другой день — ставим его ближайшее время.
+                                if d.date != day.date, let first = d.slots.first {
+                                    selection = PreorderSlots.value(d.date, first)
+                                }
+                            }
+                        }
+                    }
+                }
+                FlexibleWrap(spacing: YMSpace.sm) {
+                    ForEach(day.slots, id: \.self) { t in
+                        PreorderChip(title: t, selected: selection == PreorderSlots.value(day.date, t)) {
+                            selection = PreorderSlots.value(day.date, t)
+                        }
+                    }
+                }
+                if selection == nil {
+                    Text("Выберите время, чтобы оформить заказ.")
+                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                }
+            }
+        }
+        .padding(YMSpace.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+    }
+}
+
+private struct PreorderChip: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    var body: some View {
+        Button {
+            Haptics.selection()
+            action()
+        } label: {
+            Text(title)
+                .font(.system(size: 13.5, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? YMColor.onAccent : YMColor.text)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(selected ? YMColor.accent : YMColor.surface2,
+                            in: RoundedRectangle(cornerRadius: YMRadius.chip, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }

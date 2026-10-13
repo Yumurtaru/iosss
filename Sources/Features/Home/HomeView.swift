@@ -185,6 +185,16 @@ struct HomeView: View {
     }
     @State private var route: HomeRoute?
 
+    /// Переход с корня таба. Тап по вкладке снимает стек, но SwiftUI не всегда
+    /// сбрасывает navigationDestination(isPresented:) — route оставался «висеть»,
+    /// и повторное присваивание не меняло Binding: тап по организации или
+    /// популярному товару ничего не открывал. Сначала сбрасываем, потом идём.
+    private func go(_ r: HomeRoute) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
+
     // Смена города с шапки Главной.
     @State private var showCitySheet = false
     // Профиль открывается из шапки (кнопка в правом углу) — модально.
@@ -239,7 +249,7 @@ struct HomeView: View {
                         .frame(maxWidth: .infinity, maxHeight: 0, alignment: .leading)
                         .clipped()
 
-                    PromoBanner(action: { route = .about })
+                    PromoBanner(action: { go(.about) })
                         .padding(.top, 12)
 
                     if vm.loading {
@@ -392,7 +402,7 @@ struct HomeView: View {
                                 tone: idx,
                                 isFav: favBinding(product: item.id)
                             ) {
-                                route = .product(item.id)   // → карточка товара
+                                go(.product(item.id))   // → карточка товара
                             }
                         }
                     }
@@ -416,7 +426,7 @@ struct HomeView: View {
                                 tone: idx,
                                 isFav: favBinding(product: item.id)
                             ) {
-                                route = .product(item.id)   // → карточка товара
+                                go(.product(item.id))   // → карточка товара
                             }
                         }
                     }
@@ -430,7 +440,7 @@ struct HomeView: View {
                 SectionHeader(title: sectionTitle, actionTitle: "Все") {
                     // «Все» → раздел листингом; для «Все» (kind=.all) уводим на Поиск, как раньше.
                     if let type = sectionOrgType {
-                        route = .listing(orgType: type, title: sectionTitle)
+                        go(.listing(orgType: type, title: sectionTitle))
                     } else {
                         router.requestedTab = 1
                     }
@@ -440,7 +450,7 @@ struct HomeView: View {
                     ForEach(Array(vm.shops.enumerated()), id: \.element.id) { idx, shop in
                         VStack(spacing: YMSpace.lg) {
                             OrgCard(shop: shop, tone: idx, isFav: favBinding(shop: shop.id)) {
-                                route = .shop(shop)   // → карточка организации
+                                go(.shop(shop))   // → карточка организации
                             }
                             .opacity(appeared || reduceMotion ? 1 : 0)
                             .offset(y: appeared || reduceMotion ? 0 : 12)
@@ -451,7 +461,7 @@ struct HomeView: View {
                             )
                             // Промо-карточка «Стать продавцом» после каждых 3 заведений.
                             if (idx + 1) % 3 == 0 {
-                                BecomeSellerPromoCard { route = .becomeSeller }
+                                BecomeSellerPromoCard { go(.becomeSeller) }
                             }
                         }
                     }
@@ -562,7 +572,7 @@ struct HomeView: View {
     private func openPendingProduct(_ id: Int?) {
         guard let id, id > 0 else { return }
         coord.pendingProductId = nil
-        route = .product(id)
+        go(.product(id))
     }
 
     // MARK: Fav bindings (с сервером, откат при ошибке)

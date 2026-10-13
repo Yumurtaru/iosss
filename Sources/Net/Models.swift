@@ -246,6 +246,15 @@ struct ShopDetail: Codable, Identifiable {
     /// Какие способы оплаты заведение принимает (cash / card_courier / sbp / online_card).
     /// Без них экран рисовал все варианты, а сервер отказывал уже на последнем шаге.
     let paymentMethods: [String]?
+    /// График по дням (0 = Вс … 6 = Сб) — для предзаказа у закрытого заведения.
+    let statusSchedule: [ScheduleDay]?
+}
+/// День графика заведения: open/close — "HH:MM[:SS]" или nil (часы не заданы).
+struct ScheduleDay: Codable, Hashable {
+    @LenientInt var dow: Int?
+    @LenientBool var isClosed: Bool?
+    let open: String?
+    let close: String?
 }
 /// Зона доставки заведения. Сервер отдаёт массив `delivery_zones` в карточке магазина.
 struct DeliveryZone: Codable, Identifiable, Hashable {
