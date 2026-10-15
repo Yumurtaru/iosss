@@ -131,6 +131,9 @@ struct ProductView: View {
     @State private var isFav = false
     // Флаг: isFav меняется программно (загрузка с сервера) — не слать тоггл в ответ.
     @State private var favSyncing = false
+    /// Запрос избранного ещё идёт — новый тап по ♥ игнорируем (как на Главной):
+    /// двойной тап слал POST и DELETE разом, и на сервере оставалось не то, что на экране.
+    @State private var favBusy = false
     @State private var photoIndex = 0
 
     // product state
@@ -237,6 +240,7 @@ struct ProductView: View {
     private func toggleFav() {
         guard !favSyncing, let id = favTargetId else { return }
         let on = isFav
+        favBusy = true
         Task {
             do {
                 if on { try await API.shared.postVoid("api/v1/product-favorites/\(id)") }
@@ -251,6 +255,7 @@ struct ProductView: View {
                     DispatchQueue.main.async { favSyncing = false }
                 }
             }
+            await MainActor.run { favBusy = false }
         }
     }
 
@@ -282,7 +287,8 @@ struct ProductView: View {
         return TabView(selection: $photoIndex) {
             ForEach(Array(photos.enumerated()), id: \.offset) { i, p in
                 PhotoPlaceholder(url: API.imageURL(p.isEmpty ? nil : p),
-                                 label: "ГАЛЕРЕЯ · СВАЙП", radius: 0, tone: i)
+                                 // Подпись видна, когда фото нет: служебное «ГАЛЕРЕЯ · СВАЙП» из макета не показываем.
+                                 label: "ФОТО", radius: 0, tone: i)
                     .frame(maxWidth: .infinity)
                     .tag(i)
             }
@@ -338,7 +344,8 @@ struct ProductView: View {
                 serviceSections
             }
 
-            Color.clear.frame(height: 120)
+            // Запас под нижнюю панель; с подсказкой «Выберите …» она выше.
+            Color.clear.frame(height: missingRequiredGroup == nil ? 120 : 170)
         }
         .padding(.horizontal, YMSpace.xl)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -733,7 +740,9 @@ struct ProductView: View {
                 // 401 и молча гасло обратно, без объяснения.
                 HeartButton(isFav: Binding(
                     get: { isFav },
-                    set: { v in if Session.shared.isLoggedIn { isFav = v } else { showAuth = true } }
+                    set: { v in
+                        if !Session.shared.isLoggedIn { showAuth = true } else if !favBusy { isFav = v }
+                    }
                 ), size: 38, favColor: YMColor.statusCancel)
                     .onChange(of: isFav) { _ in toggleFav() }
             }
@@ -748,10 +757,30 @@ struct ProductView: View {
         VStack {
             Spacer()
             if vm.mode == .product {
+                requiredHint
                 productBottomBar
             } else {
                 serviceBottomBar
             }
+        }
+    }
+
+    /// Обязательный выбор не сделан — «В корзину» серая. Раньше у кнопки не
+    /// было ни слова (пометка «Обязательно» могла остаться выше за экраном),
+    /// и казалось, что кнопка не работает. Подсказка — прямо над кнопкой.
+    @ViewBuilder private var requiredHint: some View {
+        if !isStopped, let g = missingRequiredGroup {
+            Text("Выберите «\(g)», чтобы добавить в корзину")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(YMColor.text)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(YMColor.surface2, in: Capsule())
+                .overlay(Capsule().strokeBorder(YMColor.hairline, lineWidth: 1))
+                .padding(.horizontal, YMSpace.xl)
+                // Подсказка не должна перехватывать тап по варианту под ней.
+                .allowsHitTesting(false)
         }
     }
 
@@ -819,8 +848,11 @@ struct ProductView: View {
         } label: {
             HStack(spacing: 8) {
                 Text(vm.booked ? "Вы записаны ✓" : "Записаться")
-                Text("·").opacity(0.6)
-                Text("от \(Money.format(Money.dec(vm.service?.price)))")
+                // Цены нет (null/0) — без «· от 0 ₽» на кнопке.
+                if servicePrice > 0 {
+                    Text("·").opacity(0.6)
+                    Text("от \(Money.format(servicePrice))")
+                }
             }
         }
         .buttonStyle(YMPrimaryButtonStyle())
@@ -882,6 +914,8 @@ struct ProductView: View {
         if vm.mode == .product, let unit = vm.detail?.unit ?? vm.seedProduct?.unit, !unit.isEmpty { return unit }
         return nil
     }
+    /// Цена услуги для кнопки «Записаться · от …» (0 — цены нет).
+    private var servicePrice: Decimal { Money.dec(vm.service?.price) }
     private var descText: String? {
         vm.mode == .product ? (vm.detail?.description ?? vm.seedProduct?.description) : vm.service?.description
     }
@@ -942,7 +976,9 @@ struct ProductView: View {
     }
 
     /// Позиция закончилась: сервер отдаёт stopped в карточке товара.
-    private var isStopped: Bool { vm.detail?.stopped == true }
+    /// А65: категория выключена продавцом (category_off) — тоже «нет в наличии»,
+    /// заказ сервер отклонит (409).
+    private var isStopped: Bool { vm.detail?.stopped == true || vm.detail?.categoryOff == true }
 
     /// Количество задаётся чипами-пресетами, а не степпером. Чипы уместны
     /// только когда пресетов хотя бы два: дробный товар без пресетов
@@ -996,6 +1032,25 @@ struct ProductView: View {
             }
         }
         return true
+    }
+
+    /// Название первой обязательной группы, где выбор ещё не сделан (правило —
+    /// как в requiredChosen). nil — всё выбрано или карточка не загружена.
+    private var missingRequiredGroup: String? {
+        guard let d = vm.detail else { return nil }
+        for g in d.modifierGroups ?? [] where g.isRequired == true {
+            let opts = g.options ?? []
+            if opts.isEmpty { continue }
+            let isRadio = (g.type ?? "") == "single" || (g.maxQty ?? 0) == 1
+            if isRadio {
+                if selectedRadio[g.id] == nil { return g.name ?? "вариант" }
+            } else {
+                let need = min(max(1, g.minQty ?? 1), opts.count)
+                let have = opts.filter({ checkedAddons.contains($0.id) }).count
+                if have < need { return g.name ?? "добавки" }
+            }
+        }
+        return nil
     }
 
     private func addToCart() {

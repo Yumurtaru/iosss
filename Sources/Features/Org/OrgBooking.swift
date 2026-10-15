@@ -75,6 +75,9 @@ struct OrgBookingSection: View {
     /// Сохранённые адреса клиента — чтобы не набирать заново то, что уже есть
     /// в профиле. Грузим только если среди услуг есть выездные.
     @State private var savedAddresses: [Address] = []
+    /// А63: «Комментарий мастеру» (до 300 знаков) — сервер сохраняет и
+    /// показывает мастеру. Очищается после успешной записи.
+    @State private var masterComment = ""
     @State private var actionMessage: String?
     /// Человек и часов в брони. Сбрасываются при смене услуги: у каждой свои
     /// пределы, и «3 человека» от игрового зала на массаже неуместны.
@@ -305,6 +308,7 @@ struct OrgBookingSection: View {
             price: price, travel: travel, fee: fee, total: total,
             atClient: atClient,
             address: $visitAddress,
+            comment: $masterComment,
             saved: savedAddresses,
             onPickSaved: { applyAddress($0) },
             confirming: confirming,
@@ -382,6 +386,9 @@ struct OrgBookingSection: View {
             apptKey = (params, UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())
         }
         let key = apptKey?.key
+        // А63: комментарий не входит в params ключа повтора — повтор после
+        // обрыва с поправленным текстом не должен создать вторую запись.
+        let note = String(masterComment.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
         Task {
             do {
                 let atClient = selected?.isAtClient ?? false
@@ -395,11 +402,13 @@ struct OrgBookingSection: View {
                         // обычной услуги тело запроса остаётся прежним.
                         guests: (sel?.needsGuests ?? false) ? guests : nil,
                         slots: (sel?.needsHours ?? false) ? hours : nil,
-                        idempotencyKey: key))
+                        idempotencyKey: key,
+                        comment: note.isEmpty ? nil : note))
                 let taken = guests
                 await MainActor.run {
                     apptKey = nil
                     confirming = false
+                    masterComment = ""
                     // Окно убираем из списка только если мест больше не осталось:
                     // в игровом зале после брони на 3 человека остаётся ещё 5.
                     if slot.capacityValue > 1, slot.freeValue - taken > 0 {
@@ -434,7 +443,9 @@ struct OrgBookingSection: View {
 
     private func clientFee(_ price: Decimal) -> Decimal {
         guard let d = detail else { return 0 }
-        if (d.serviceFeePayer ?? "client") != "client" { return 0 }
+        // Как на сервере (api_v1.php, запись): сбор не берётся только при payer == "shop";
+        // пустое поле — это клиент (раньше давало 0, а сервер сбор добавлял).
+        if (d.serviceFeePayer ?? "") == "shop" { return 0 }
         if (d.serviceFeeType ?? "percent") == "fixed" {
             return Money.dec(d.serviceFeeFixed)
         }
@@ -838,6 +849,8 @@ private struct ConfirmBookingSheet: View {
     /// Услуга выездная — просим адрес и не даём подтвердить без улицы и дома.
     let atClient: Bool
     @Binding var address: VisitAddress
+    /// А63: «Комментарий мастеру» (до 300 знаков).
+    @Binding var comment: String
     /// Адреса из профиля — подставить в один тап.
     var saved: [Address] = []
     var onPickSaved: (Address) -> Void = { _ in }
@@ -889,6 +902,8 @@ private struct ConfirmBookingSheet: View {
 
                 if atClient { addressBlock.padding(.top, 12) }
 
+                commentBlock.padding(.top, 12)
+
                 priceRow(atClient ? "Стоимость услуги" : "Стоимость", price, bold: false).padding(.top, 12)
                 if travel > 0 { priceRow("Выезд мастера", travel, bold: false) }
                 if fee > 0 { priceRow("Сервисный сбор", fee, bold: false) }
@@ -921,7 +936,9 @@ private struct ConfirmBookingSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollDismissesKeyboard(.interactively)
-        .presentationDetents(atClient ? [.large] : [.medium])
+        // С полем комментария средней высоты мало (клавиатура закрывает
+        // кнопку) — можно растянуть шторку.
+        .presentationDetents(atClient ? [.large] : [.medium, .large])
         // Пока запись отправляется, шторку не смахнуть: «Отмена» уже выключена,
         // а жестом окно закрывалось, человек выбирал другое время, и пришедший
         // ответ первой записи подменял новое окно экраном «Вы записаны».
@@ -965,24 +982,52 @@ private struct ConfirmBookingSheet: View {
                 }
             }
 
-            addrField("Улица", text: $address.street)
+            // П-25 №6: пределы адреса выезда — как хранит сервер (лишнее он режет молча).
+            addrField("Улица", text: $address.street, limit: 190)
             HStack(spacing: 8) {
-                addrField("Дом", text: $address.house)
-                addrField("Кв.", text: $address.apartment, numeric: true)
+                addrField("Дом", text: $address.house, limit: 30)
+                addrField("Кв.", text: $address.apartment, numeric: true, limit: 30)
             }
             HStack(spacing: 8) {
-                addrField("Подъезд", text: $address.entrance, numeric: true)
-                addrField("Этаж", text: $address.floor, numeric: true)
+                addrField("Подъезд", text: $address.entrance, numeric: true, limit: 20)
+                addrField("Этаж", text: $address.floor, numeric: true, limit: 20)
             }
-            addrField("Комментарий для мастера", text: $address.comment)
+            // «Комментарий для мастера» переименован: рядом теперь отдельное
+            // поле «Комментарий мастеру» (А63), а это — про адрес.
+            addrField("Комментарий к адресу (домофон, как пройти)", text: $address.comment, limit: 500)
+        }
+        .padding(14)
+        .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    // MARK: Комментарий мастеру (А63)
+
+    private var commentBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Комментарий мастеру")
+                .font(.system(size: 13, weight: .heavy))
+                .foregroundStyle(YMColor.text)
+            TextField("Пожелания, важные детали", text: $comment, axis: .vertical)
+                .lineLimit(1...4)
+                .font(.system(size: 14.5))
+                .foregroundStyle(YMColor.text)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .disabled(confirming)
+                .ymMaxLength($comment, 300)
+            Text("Необязательно · до 300 знаков")
+                .font(.system(size: 11.5))
+                .foregroundStyle(YMColor.muted)
         }
         .padding(14)
         .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func addrField(_ placeholder: String, text: Binding<String>,
-                           numeric: Bool = false) -> some View {
+                           numeric: Bool = false, limit: Int = 500) -> some View {
         TextField(placeholder, text: text)
+            .ymMaxLength(text, limit)
             .keyboardType(numeric ? .numbersAndPunctuation : .default)
             .font(.system(size: 14.5))
             .foregroundStyle(YMColor.text)
@@ -1031,7 +1076,13 @@ private struct SuccessBookingSheet: View {
         if !t.isEmpty { when.append(t.joined(separator: "–")) }
         var what: [String] = []
         if (r.guests ?? 1) > 1 { what.append("\(r.guests ?? 1) чел.") }
-        if (r.slots ?? 1) > 1 { what.append("\(r.slots ?? 1) ч") }
+        // Число окон — не часы: два окна по 30 мин печатались «2 ч» рядом с
+        // «19:00–20:00». Длину берём из hours сервера; нет его — как раньше.
+        if (r.slots ?? 1) > 1 {
+            let h = r.hours ?? 0
+            let mins = Int((h * 60).rounded())
+            what.append(h > 0 ? OrgBookingSection.hoursLabel(mins) : "\(r.slots ?? 1) ч")
+        }
         let all = [when.joined(separator: ", "), what.joined(separator: " · ")].filter { !$0.isEmpty }
         return all.isEmpty ? nil : all.joined(separator: " · ")
     }

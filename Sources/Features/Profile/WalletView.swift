@@ -55,7 +55,17 @@ final class WalletViewModel: ObservableObject {
             let body = WalletTopupBody(amount: Money.wire(amount), method: method)
             let created: WalletTopupCreated = try await API.shared.post("api/v1/wallet/topup", body: body)
             guard let link = created.confirmationUrl, let url = URL(string: link) else {
-                notice = "Сервер не вернул ссылку на оплату. Попробуйте позже."
+                // Паритет с Android: прошлое пополнение на ту же сумму уже оплачено —
+                // сервер отвечает status = confirmed без ссылки (routes/wallet.php,
+                // POST …/topup). Раньше писали «не вернул ссылку», хотя деньги
+                // зачислены. Есть номер пополнения — проверяем его статус.
+                if let id = created.topupId, id > 0 {
+                    awaitingTopupId = id
+                    notice = "Ожидаем оплату. Баланс обновится сам, как только ЮKassa подтвердит платёж."
+                    watch(id: id)
+                } else {
+                    notice = "Сервер не вернул ссылку на оплату. Попробуйте позже."
+                }
                 return
             }
             payLink = PayLink(url: url)
@@ -123,6 +133,9 @@ struct WalletView: View {
     @StateObject private var vm = WalletViewModel()
     @State private var showTopup = false
     @State private var pendingTopup: (amount: Decimal, method: String)?
+    /// Паритет с Android: прошлое пополнение ещё ждёт ЮKassa — спрашиваем, прежде
+    /// чем создать второй платёж (вернувшись со страницы оплаты, платили дважды).
+    @State private var confirmNewTopup = false
 
     var body: some View {
         Group {
@@ -184,7 +197,8 @@ struct WalletView: View {
 
                 if vm.info?.enabled == true {
                     Button {
-                        if !vm.creating { showTopup = true }
+                        if vm.creating { return }
+                        if vm.awaitingTopupId != nil { confirmNewTopup = true } else { showTopup = true }
                     } label: {
                         Text(vm.creating ? "Создаём платёж…" : "Пополнить")
                             .font(YMFont.headline)
@@ -232,6 +246,12 @@ struct WalletView: View {
             .padding(.bottom, YMSpace.xxxl)
         }
         .refreshable { await vm.load() }
+        .confirmationDialog("Платёж ещё проверяется", isPresented: $confirmNewTopup, titleVisibility: .visible) {
+            Button("Новое пополнение") { showTopup = true }
+            Button("Подождать", role: .cancel) {}
+        } message: {
+            Text("Прошлое пополнение ждёт подтверждения ЮKassa. Если вы его уже оплатили, баланс обновится сам — второй платёж не нужен.")
+        }
     }
 
     private var heroCard: some View {
@@ -338,6 +358,9 @@ private struct TopupSheet: View {
     @State private var localError: String?
 
     private let presets: [Decimal] = [500, 1000, 3000, 5000]
+    private var allowedPresets: [Decimal] {
+        presets.filter { p in p >= min && p <= max }
+    }
 
     /// Строгий разбор: Decimal(string:) читает только начало строки, и
     /// вставленное «150 000» становилось 150 ₽ (проходило проверку минимума),
@@ -360,8 +383,12 @@ private struct TopupSheet: View {
                     TextField("Сумма, ₽", text: $amountText)
                         .keyboardType(.decimalPad)
                     HStack(spacing: 8) {
-                        ForEach(presets, id: \.self) { p in
-                            Button(Money.format(p)) { amountText = Money.wire(p) }
+                        // Только суммы в пределах сервера (min_topup…max_topup):
+                        // кнопка «500 ₽» при минимуме 1000 ₽ вела к отказу.
+                        // Пресеты целые: в поле — «3000», как стартовое «1000»,
+                        // а не «3000.00».
+                        ForEach(allowedPresets, id: \.self) { p in
+                            Button(Money.format(p)) { amountText = NSDecimalNumber(decimal: p).stringValue }
                                 .font(YMFont.caption)
                                 .buttonStyle(.bordered)
                         }
@@ -392,6 +419,8 @@ private struct TopupSheet: View {
                     }
                 }
             }
+            // У цифровой клавиатуры суммы нет «Готово» — убирается жестом прокрутки.
+            .scrollDismissesKeyboard(.interactively)
             .scrollContentBackground(.hidden)
             .background(YMColor.bg.ignoresSafeArea())
             .navigationTitle("Пополнение кошелька")

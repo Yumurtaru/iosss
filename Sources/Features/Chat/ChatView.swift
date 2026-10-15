@@ -80,7 +80,16 @@ private struct ChatListScreen: View {
     private var filtered: [ChatDialog] {
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return vm.dialogs }
         let q = query.lowercased()
-        return vm.dialogs.filter { ($0.shopName ?? "").lowercased().contains(q) }
+        // Паритет с Android: ищем и по номеру заказа («12» или «№12»), он виден в строке.
+        var num = query.trimmingCharacters(in: .whitespaces)
+        if num.hasPrefix("№") { num.removeFirst() }
+        let numQ = num
+        return vm.dialogs.filter { d in
+            if (d.shopName ?? "").lowercased().contains(q) { return true }
+            if numQ.isEmpty { return false }
+            let shown = d.dailyNumber ?? d.orderId ?? 0
+            return String(shown) == numQ
+        }
     }
 
     // Без своего NavigationStack: список показывается в шторке, которая уже
@@ -211,6 +220,12 @@ private struct ChatListRow: View {
                         .font(.system(size: 15.5, weight: .bold)).foregroundStyle(YMColor.text)
                         .lineLimit(1)
                     Spacer(minLength: 6)
+                    // Паритет с Android: номер заказа — два заказа в одном заведении
+                    // давали две одинаковые строки, и было не понять, какой чат о каком.
+                    if let n = dialog.dailyNumber ?? dialog.orderId, n > 0 {
+                        Text("№\(n)")
+                            .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    }
                     // Не только время: «14:05» у переписки недельной давности читалось как сегодня.
                     Text(DateFmt.listTime(dialog.lastAt))
                         .font(YMFont.caption).foregroundStyle(unread > 0 ? YMColor.accent : YMColor.muted)
@@ -408,6 +423,10 @@ private struct ChatThreadScreen: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .principal) { headerTitle } }
+        // Чат открыт шторкой: долистал историю до верха, потянул ещё — шторка
+        // закрывалась вместе с набранным сообщением. Пока в поле есть текст,
+        // закрываем только кнопкой «Закрыть».
+        .interactiveDismissDisabled(!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         // Свернули приложение — опрос не нужен; вернулись — сразу дозапрашиваем
         // новые сообщения, а не ждём до 6 с следующего тика.
         .onChange(of: scenePhase) { phase in
@@ -419,6 +438,15 @@ private struct ChatThreadScreen: View {
                 vm.stopPolling()
             }
         }
+        // Push о новом сообщении по ЭТОМУ заказу при открытой переписке:
+        // дозапрашиваем сразу, а не ждём до 6 с следующего тика опроса.
+        .onReceive(NotificationCenter.default.publisher(for: .ymOrderPushed)) { n in
+            guard (n.object as? Int) == orderId, visible, session.isLoggedIn else { return }
+            Task { await vm.fetchNew() }
+        }
+        // Ссылки в сообщениях: заведение yumurta.ru/shop/… — экран в приложении,
+        // остальное — браузер/система (раньше ссылки в чате не нажимались вовсе).
+        .environment(\.openURL, OpenURLAction { url in ChatLinks.open(url) })
     }
 
     // Шапка: лого + «● онлайн · обычно отвечает за 2 мин»
@@ -492,6 +520,9 @@ private struct ChatThreadScreen: View {
                 .padding(.horizontal, YMSpace.lg)
                 .padding(.vertical, YMSpace.md)
             }
+            // Поле многострочное: «Ввод» — это новая строка, и клавиатуру было
+            // не убрать вовсе — она закрывала половину переписки. Теперь жестом.
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: vm.messages.count) { _ in
                 guard let last = vm.messages.last else { return }
                 withAnimation(YMMotion.adaptive(YMMotion.spring, reduceMotion: reduceMotion)) {
@@ -516,6 +547,9 @@ private struct ChatThreadScreen: View {
                 TextField("Сообщение…", text: $draft, axis: .vertical)
                     .font(YMFont.body).foregroundStyle(YMColor.text)
                     .lineLimit(1...4)
+                    // Сервер молча обрезает сообщение до 1000 символов
+                    // (POST orders/{id}/chat, api_v1.php) — хвост пропадал без следа.
+                    .ymMaxLength($draft, 1000)
             }
             .padding(.horizontal, 14).frame(minHeight: 40)
             .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
@@ -543,7 +577,8 @@ private struct ChatThreadScreen: View {
         .alert(vm.sendError ?? "", isPresented: Binding(
             get: { vm.sendError != nil },
             set: { if !$0 { vm.sendError = nil } }
-        )) { Button("OK", role: .cancel) {} }
+        // «Понятно», как в остальных окнах приложения, а не английское «OK».
+        )) { Button("Понятно", role: .cancel) {} }
         .onChange(of: photoItems) { _ in
             guard let item = photoItems.first else { return }
             Task {
@@ -617,6 +652,52 @@ private enum ChatFmt {
     }()
 }
 
+// MARK: - Ссылки в сообщениях
+
+/// Ссылки в тексте чата. Раньше текст был простым Text: ссылку от заведения
+/// (меню, оплата, страница на yumurta.ru) нельзя было открыть — только
+/// перепечатать вручную.
+private enum ChatLinks {
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Текст сообщения с нажимаемыми ссылками (подчёркнуты).
+    static func linked(_ text: String) -> AttributedString {
+        var out = AttributedString(text)
+        guard let detector, text.contains(".") else { return out }
+        let all = NSRange(text.startIndex..., in: text)
+        for m in detector.matches(in: text, options: [], range: all) {
+            // Только веб-ссылки: mailto:, tg: и прочие схемы детектор тоже
+            // находит, а открывать их из чата не нужно.
+            guard let url = m.url, ["http", "https"].contains((url.scheme ?? "").lowercased()),
+                  let sr = Range(m.range, in: text),
+                  let ar = Range<AttributedString.Index>(sr, in: out) else { continue }
+            out[ar][AttributeScopes.FoundationAttributes.LinkAttribute.self] = url
+            out[ar][AttributeScopes.SwiftUIAttributes.UnderlineStyleAttribute.self] = .single
+        }
+        return out
+    }
+
+    /// Заведение на yumurta.ru (или yumurta://shop/…) — экран в приложении,
+    /// как по ссылке снаружи; прочие http(s) — браузер, другие схемы — нет.
+    static func open(_ url: URL) -> OpenURLAction.Result {
+        if isOwnShopLink(url), DeepLinkRouter.shared.handle(url: url) { return .handled }
+        let scheme = (url.scheme ?? "").lowercased()
+        return scheme == "http" || scheme == "https" ? .systemAction : .discarded
+    }
+
+    /// Только свой домен: DeepLinkRouter хост не проверяет, и чужая ссылка
+    /// вида …/shop/x открыла бы «заведение x» вместо сайта.
+    private static func isOwnShopLink(_ url: URL) -> Bool {
+        let scheme = (url.scheme ?? "").lowercased()
+        let host = (url.host ?? "").lowercased()
+        if scheme == "yumurta" { return host == "shop" }
+        guard scheme == "https" || scheme == "http",
+              host == "yumurta.ru" || host == "www.yumurta.ru" else { return false }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        return parts.count >= 2 && parts[0] == "shop"
+    }
+}
+
 // MARK: - ChatBubble (пузырь сообщения)
 
 /// Пузырь сообщения. Мои — золотые (радиус 16/16/4/16, тики ✓✓), их — surface.
@@ -649,9 +730,11 @@ private struct ChatBubble: View {
                 VStack(alignment: .leading, spacing: 6) {
                     if hasImage { bubbleImage }
                     if hasText {
-                        Text(message.message ?? "")
+                        // Ссылки в тексте нажимаются (подчёркнуты, цвет — tint).
+                        Text(ChatLinks.linked(message.message ?? ""))
                             .font(YMFont.body)
                             .foregroundStyle(mine ? YMColor.onAccent : YMColor.text)
+                            .tint(mine ? YMColor.onAccent : YMColor.accent)
                     }
                 }
                 .padding(hasImage ? 4 : 9)

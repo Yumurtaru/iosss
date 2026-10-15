@@ -26,6 +26,8 @@ enum OrderFlow {
     /// шаги одни и те же, слова разные (кафе готовит, магазин собирает,
     /// салон работает). Параметр необязательный — старые вызовы не ломаются.
     static func stepTitle(_ key: String, shopType: String? = nil) -> String {
+        // А64: бронь жилья — «Бронь создана / Подтверждена / Завершена».
+        if shopType == "lodging", let l = OrderStatus.lodgingLabel(key) { return l }
         switch key {
         case "new":
             return shopType == "service" ? "Запись создана" : "Заказ оформлен"
@@ -89,6 +91,25 @@ enum OrderFlow {
         let i = stepIndex(raw)
         guard i >= 0 else { return 0.05 }
         return Double(i) / Double(steps.count - 1)
+    }
+
+    /// А64: у брони жилья три шага (new → accepted → done), без готовки и
+    /// доставки: «Подтверждена» — половина ленты, а не пятая часть.
+    static func progress(_ raw: String?, shopType: String?) -> Double {
+        guard shopType == "lodging", !isCancelled(raw) else { return progress(raw) }
+        switch normalize(raw) {
+        case "new":      return 0.05
+        case "accepted": return 0.5
+        case "done":     return 1
+        default:         return progress(raw)
+        }
+    }
+
+    /// Шаги таймлайна, которые этому заказу не нужны. Бронь жилья: только
+    /// new → accepted → done («Готовится», «В пути» у проживания — ошибка).
+    static func isLodgingSkipped(_ key: String, shopType: String?) -> Bool {
+        guard shopType == "lodging" else { return false }
+        return key == "preparing" || key == "ready" || key == "in_delivery"
     }
 
     /// Семантический цвет статуса (light+dark из токенов).
@@ -285,6 +306,9 @@ struct OrdersView: View {
     @State private var tab: Tab = .active
     // Деталь заказа пушится внутри собственного стека таба (self-contained).
     @State private var pushedOrder: Int?
+    /// Деталь реально на экране — тогда новый заказ меняем на месте (.id),
+    /// а не закрываем и открываем заново (мигание, на iOS 16 пуш мог потеряться).
+    @State private var detailShown = false
     @Environment(\.scenePhase) private var scenePhase
     /// Приложение действительно уходило в фон (а не просто .inactive).
     @State private var wasBg = false
@@ -340,6 +364,8 @@ struct OrdersView: View {
                     // экран должен пересоздаться — иначе @StateObject показывал A.
                     OrderDetailView(id: id, onChat: { orderId in coord.openChat(orderId: orderId) })
                         .id(id)
+                        .onAppear { detailShown = true }
+                        .onDisappear { detailShown = false }
                 }
             }
         }
@@ -362,14 +388,24 @@ struct OrdersView: View {
         // деталь отвечала «Сессия истекла» с бесконечным «Повторить».
         // Остаёмся на списке — там «Войти».
         guard session.isLoggedIn else { return }
-        pushedOrder = id
+        pushOrder(id)
         Task { await vm.load() } // всегда свежий список после оформления
     }
 
     /// Открыть деталь заказа (внутренний пуш + внешний колбэк для совместимости).
     private func openDetail(_ id: Int) {
-        pushedOrder = id
+        pushOrder(id)
         onOpen(id)
+    }
+
+    /// Повторный тап по вкладке «Заказы» снимает деталь со стека, а сеттер
+    /// navigationDestination(isPresented:) SwiftUI не зовёт — pushedOrder
+    /// оставался «висеть», и тап по заказу больше ничего не открывал (как на
+    /// Главной). Сначала сбрасываем, потом открываем.
+    private func pushOrder(_ id: Int) {
+        if pushedOrder == nil || detailShown { pushedOrder = id; return }
+        pushedOrder = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { pushedOrder = id }
     }
 
     @ViewBuilder private var content: some View {
@@ -409,6 +445,15 @@ struct OrdersView: View {
                            hint: tab == .active
                                 ? "Оформите заказ — здесь появится живой статус доставки."
                                 : "Завершённые заказы будут храниться здесь.")
+                // Новый покупатель (заказов ещё нет вовсе): раньше экран советовал
+                // «оформите заказ», но вёл в никуда — даём путь в каталог.
+                if vm.orders.isEmpty && !vm.loadFailed {
+                    Button { Haptics.light(); DeepLinkRouter.shared.requestedTab = 0 } label: {
+                        Text("Перейти в каталог")
+                    }
+                    .buttonStyle(YMPrimaryButtonStyle())
+                    .padding(.horizontal, YMSpace.xxxl)
+                }
             } else {
                 ForEach(list) { order in
                     OrderCard(order: order) { openDetail(order.id) }
@@ -480,14 +525,28 @@ private struct OrderCard: View {
         return OrderStatus.label(order.status, shopType: order.shopType)
     }
 
+    /// VoiceOver: время предзаказа тоже читается (лейбл карточки заменяет детей).
+    private var a11yText: String {
+        let base = "\(order.shopName ?? "Заказ") \(number), \(statusText), \(money)"
+        guard let pre = preorderText else { return base }
+        return base + ", ко времени " + pre
+    }
+
+    /// «15 окт, 19:30» у предзаказа; nil — заказ не ко времени или отменён.
+    private var preorderText: String? {
+        if cancelled { return nil }
+        return DateFmt.preorder(order.preorderAt)
+    }
+
     /// Подпись справа в строке статуса.
     /// Для отменённых/доставленных — их статус; иначе — реальная дата/время заказа
     /// из created_at в формате «DD.MM, HH:mm» (паритет с Android formatOrderWhen).
     private var etaText: String {
-        if cancelled { return "отменён" }
+        // А64: бронь жилья — «отменена» / «завершена», а не «доставлен».
+        if cancelled { return order.shopType == "lodging" ? "отменена" : "отменён" }
         // Самовывоз, заказ за столиком и запись не «доставлены».
         if OrderFlow.isDone(order.status) {
-            if order.shopType == "service" { return "завершена" }
+            if order.shopType == "service" || order.shopType == "lodging" { return "завершена" }
             if let dt = order.deliveryType, !dt.isEmpty, dt != "delivery" { return "выполнен" }
             return "доставлен"
         }
@@ -537,8 +596,18 @@ private struct OrderCard: View {
                     Text(etaText).font(YMFont.caption).foregroundStyle(YMColor.muted)
                 }
 
+                // Предзаказ (П-24 №7): заказ «ко времени» — время видно сразу,
+                // ETA у такого заказа нет. Отменённому строка не нужна.
+                if let pre = preorderText {
+                    Label("Ко времени: \(pre)", systemImage: "clock.fill")
+                        .font(YMFont.subhead.weight(.semibold))
+                        .foregroundStyle(YMColor.accent)
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                }
+
                 // ── Золотая живая лента статуса ──
-                GoldStatusRibbon(progress: OrderFlow.progress(order.status),
+                GoldStatusRibbon(progress: OrderFlow.progress(order.status, shopType: order.shopType),
                                  pulsing: enRoute,
                                  cancelled: cancelled)
             }
@@ -547,7 +616,7 @@ private struct OrderCard: View {
         .buttonStyle(CardPressStyle())
         .ymCard(radius: YMRadius.card)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(order.shopName ?? "Заказ") \(number), \(statusText), \(money)")
+        .accessibilityLabel(a11yText)
     }
 }
 

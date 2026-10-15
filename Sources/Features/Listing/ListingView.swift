@@ -288,6 +288,15 @@ struct ListingView: View {
     @State private var route: ListingRoute?
     @State private var showBecomeSeller = false
 
+    /// Переход как на Главной (go): если SwiftUI снял экран, не вызвав сеттер
+    /// (тап по вкладке, программный возврат), route «висел», и новое
+    /// присваивание ничего не открывало. Сначала сбрасываем, потом идём.
+    private func go(_ r: ListingRoute) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
+
     init(orgType: String, title: String, cityId: Int?, categoryId: Int? = nil) {
         _vm = StateObject(wrappedValue: ListingViewModel(orgType: orgType, title: title, cityId: cityId, categoryId: categoryId))
     }
@@ -474,7 +483,7 @@ struct ListingView: View {
                     ForEach(Array(vm.sortedOrgs.enumerated()), id: \.element.id) { idx, shop in
                         OrgListRow(shop: shop) {
                             Haptics.light()
-                            route = .shop(shop)
+                            go(.shop(shop))
                         }
                         // Промо-карточка «Стать продавцом» после каждых 3 заведений.
                         if (idx + 1) % 3 == 0 {
@@ -497,9 +506,9 @@ struct ListingView: View {
                     ForEach(vm.filteredProducts) { p in
                         ProductGridCard(product: p) {
                             Haptics.light()
-                            route = .product(p.id)
+                            go(.product(p.id))
                         } onAdd: {
-                            route = .product(p.id)
+                            go(.product(p.id))
                         }
                     }
                 }
@@ -541,15 +550,21 @@ struct ListingView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: YMSpace.sm) {
-            Text("Ничего не найдено")
+        // Без фильтров «Попробуйте изменить фильтры» сбивало: менять нечего,
+        // в разделе (новый город, пустая категория) просто пока никого нет.
+        let filtered = !vm.activeFilters.isEmpty
+            || (vm.pickedCategoryId != nil && vm.pickedCategoryId != vm.fixedCategory)
+        return VStack(spacing: YMSpace.sm) {
+            Text(filtered ? "Ничего не найдено" : "Здесь пока пусто")
                 .font(YMFont.title3)
                 .foregroundStyle(YMColor.text)
-            Text("Попробуйте изменить фильтры.")
+            Text(filtered ? "Попробуйте изменить фильтры." : "Загляните позже или выберите другой раздел.")
                 .font(YMFont.callout)
                 .foregroundStyle(YMColor.muted)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
+        .padding(.horizontal, YMSpace.lg)
         .padding(.top, 60)
     }
 }
@@ -563,6 +578,13 @@ struct OrgListRow: View {
 
     private var isOpen: Bool { shop.isOpen ?? true }
 
+    /// Время на фото: delivery_time (если когда-нибудь придёт) или avg_cook_time.
+    private var cookTimeText: String? {
+        if let t = shop.deliveryTime, !t.isEmpty { return t }
+        guard let m = shop.avgCookTime, m > 0 else { return nil }
+        return "\(m) мин"
+    }
+
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 12) {
@@ -570,7 +592,9 @@ struct OrgListRow: View {
                     PhotoPlaceholder(url: API.imageURL(shop.cover ?? shop.banner ?? shop.logo),
                                      label: "ФОТО", radius: YMRadius.control, tone: shop.id)
                         .frame(width: 76, height: 76)
-                    if let t = shop.deliveryTime, !t.isEmpty {
+                    // Паритет с Android: delivery_time сервер не отдаёт, время
+                    // приготовления приходит в avg_cook_time — бейдж «N мин».
+                    if let t = cookTimeText {
                         Text(t)
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.white)
@@ -594,11 +618,17 @@ struct OrgListRow: View {
                             .font(.system(size: 13, weight: .bold))
                         }
                     }
-                    if let cat = shop.category, !cat.isEmpty {
+                    // Паритет с Android: category сервер не шлёт — тип заведения словами.
+                    if let cat = shop.category ?? orgTypeLabel(shop.type), !cat.isEmpty {
                         Text(cat)
                             .font(.system(size: 12.5))
                             .foregroundStyle(YMColor.muted)
                             .lineLimit(1)
+                    }
+                    // Паритет с Android: платное продвижение помечаем «Реклама» —
+                    // сервер ставит такие заведения первыми (is_promoted).
+                    if (shop.isPromoted ?? 0) == 1 {
+                        StatusPill(text: "Реклама", kind: .pending, solid: false)
                     }
                     HStack(spacing: 8) {
                         Text(isOpen ? "Открыто" : "Закрыто")
@@ -609,6 +639,13 @@ struct OrgListRow: View {
                             Text("· \(fulfillment)")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(YMColor.muted)
+                        }
+                        // Паритет с Android: адрес заведения в той же строке.
+                        if let addr = shop.address, !addr.isEmpty {
+                            Text("· \(addr)")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(YMColor.muted)
+                                .lineLimit(1)
                         }
                     }
                     .padding(.top, 2)
@@ -760,5 +797,17 @@ struct SortSheet: View {
             Spacer(minLength: 8)
         }
         .background(YMColor.bg.ignoresSafeArea())
+    }
+}
+
+/// Тип заведения словами, как на Android (orgTypeLabel). Неизвестный код — nil:
+/// служебное слово («lodging», «cafe») человеку не показываем.
+func orgTypeLabel(_ type: String?) -> String? {
+    switch (type ?? "").trimmingCharacters(in: .whitespaces).lowercased() {
+    case "store", "shop":       return "Магазин"
+    case "restaurant", "cafe":  return "Ресторан"
+    case "service":             return "Услуги"
+    case "lodging":             return "Жильё"
+    default:                    return nil
     }
 }

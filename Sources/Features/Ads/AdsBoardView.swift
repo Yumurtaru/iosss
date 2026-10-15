@@ -97,7 +97,13 @@ final class AdsBoardViewModel: ObservableObject {
     }
 
     func start() async {
-        guard !started else { return }
+        guard !started else {
+            // Вернулись из объявления в «Избранных»: там могли снять сердечко,
+            // а снятое объявление оставалось в списке до обновления жестом.
+            // Догруженные «Показать ещё» страницы не обрезаем до первой.
+            if favOnly && page == 1 { await load(reset: true) }
+            return
+        }
         started = true
         if let r = try? await API.shared.adCategories() {
             cats = r.categories ?? []
@@ -189,6 +195,10 @@ struct AdsBoardView: View {
     /// форму и получал «Сессия истекла», а «Мои» — ошибку с бесполезным «Повторить».
     @EnvironmentObject private var session: Session
     @State private var showAuth = false
+    /// Что гость хотел сделать до входа. Раньше после входа он оказывался на
+    /// ленте и нажимал «Подать объявление» / «Мои» второй раз.
+    private enum AfterAuth { case form, my }
+    @State private var afterAuth: AfterAuth?
 
     private let columns = [GridItem(.flexible(), spacing: YMSpace.md), GridItem(.flexible(), spacing: YMSpace.md)]
 
@@ -198,7 +208,7 @@ struct AdsBoardView: View {
                 content
                 if vm.enabled {
                     Button {
-                        if session.isLoggedIn { showForm = true } else { showAuth = true }
+                        if session.isLoggedIn { showForm = true } else { afterAuth = .form; showAuth = true }
                     } label: {
                         Label("Подать объявление", systemImage: "plus")
                             .font(YMFont.headline)
@@ -232,7 +242,7 @@ struct AdsBoardView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        if session.isLoggedIn { path.append(AdsRoute.my) } else { showAuth = true }
+                        if session.isLoggedIn { path.append(AdsRoute.my) } else { afterAuth = .my; showAuth = true }
                     } label: { Text("Мои") }
                 }
             }
@@ -247,9 +257,16 @@ struct AdsBoardView: View {
                 AdFormView(editAdId: 0) { newId in
                     showForm = false
                     path.append(AdsRoute.detail(newId))
+                    // Лента под объявлением грузится один раз: после «Назад»
+                    // только что опубликованного объявления в ней не было.
+                    Task { await vm.load(reset: true) }
                 }
             }
             .task { await vm.start() }
+            // Push «объявление скоро уйдёт в архив» (ad_id): раньше открывалась
+            // общая лента, а «Продлить» есть только в «Мои» — туда и ведём.
+            .onAppear { consumePushIntent() }
+            .onReceive(NotificationCenter.default.publisher(for: AdsPushIntent.note)) { _ in consumePushIntent() }
             // Вышли из аккаунта в режиме «Избранные» — ручка избранного отвечает
             // 401, и лента застревала на ошибке. Возвращаем общую ленту.
             .onChange(of: session.isLoggedIn) { logged in
@@ -257,12 +274,29 @@ struct AdsBoardView: View {
             }
         }
         // Вход — отдельной шторкой на самом стеке: шторка формы висит уровнем ниже.
-        .sheet(isPresented: $showAuth) {
+        // Шторка входа закрылась: вошли — продолжаем начатое (форма открывается
+        // уже после закрытия шторки, иначе вторая шторка не показалась бы).
+        .sheet(isPresented: $showAuth, onDismiss: {
+            let pending = afterAuth
+            afterAuth = nil
+            guard session.isLoggedIn, let next = pending else { return }
+            switch next {
+            case .form: showForm = true
+            case .my:   path.append(AdsRoute.my)
+            }
+        }) {
             NavigationStack {
                 AuthView(onAuthed: { showAuth = false })
             }
             .environmentObject(session)
         }
+    }
+
+    /// «Мои» поверх того, что открыто: стек не сбрасываем — открытые
+    /// экраны (и их несохранённое) остаются под ним.
+    private func consumePushIntent() {
+        guard AdsPushIntent.take(), session.isLoggedIn else { return }
+        path.append(AdsRoute.my)
     }
 
     @ViewBuilder
@@ -304,11 +338,16 @@ struct AdsBoardView: View {
                     } else if vm.items.isEmpty && !vm.visibleJobs.isEmpty {
                         EmptyView()
                     } else if vm.items.isEmpty {
+                        // Без поиска и рубрики пустая лента — это «объявлений ещё нет»
+                        // (новый город, доска только открылась), а не «ничего не нашлось,
+                        // измените запрос», которого человек не вводил.
                         AdsEmptyView(
-                            title: vm.favOnly ? "В избранном пусто" : "Ничего не нашлось",
+                            title: vm.favOnly ? "В избранном пусто"
+                                : (vm.hasFilter ? "Ничего не нашлось" : "Объявлений пока нет"),
                             subtitle: vm.favOnly
                                 ? "Нажмите сердечко на карточке объявления — оно появится здесь."
-                                : "Измените запрос или подайте своё объявление."
+                                : (vm.hasFilter ? "Измените запрос или подайте своё объявление."
+                                   : "Станьте первым — кнопка «Подать объявление» внизу.")
                         )
                             .frame(height: 260)
                     } else {
@@ -374,7 +413,24 @@ struct AdsBoardView: View {
         }
     }
 
+    /// Сервер ищет только по запросу от 3 символов, короче — отдаёт всю ленту
+    /// (routes/ads.php): «Найдено: N» по 1–2 буквам выглядело как результат поиска.
+    private var queryTooShort: Bool {
+        let n = vm.query.trimmingCharacters(in: .whitespaces).count
+        return n > 0 && n < 3
+    }
+
     private var searchField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            searchBox
+            if queryTooShort {
+                Text("Поиск — от 3 символов")
+                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
+            }
+        }
+    }
+
+    private var searchBox: some View {
         HStack(spacing: YMSpace.sm) {
             Image(systemName: "magnifyingglass").foregroundStyle(YMColor.muted)
             TextField("Что ищете?", text: $vm.query)
@@ -418,6 +474,26 @@ struct AdsBoardView: View {
                 }
             }
         }
+    }
+}
+
+/// Push/строка ленты уведомлений об СВОЁМ объявлении (ad_id: скоро в архив,
+/// снято) — открыть «Мои». Ставит вызывающий вместе с переходом на вкладку
+/// «Объявления»; забирает AdsBoardView (при появлении или по note). Старше
+/// 15 с не исполняется — чтобы не сработать позже, при обычном заходе.
+enum AdsPushIntent {
+    static let note = Notification.Name("ym.adsPushIntent")
+    private static var pendingAt: Date?
+
+    static func openMyAds() {
+        pendingAt = Date()
+        NotificationCenter.default.post(name: note, object: nil)
+    }
+
+    static func take() -> Bool {
+        guard let at = pendingAt else { return false }
+        pendingAt = nil
+        return Date().timeIntervalSince(at) < 15
     }
 }
 
@@ -607,11 +683,19 @@ struct AdsSkeletonView: View {
 struct AdsEmptyView: View {
     let title: String
     let subtitle: String
+    /// Кнопка следующего шага («Подать объявление»). nil — без кнопки, как раньше.
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
     var body: some View {
         VStack(spacing: YMSpace.sm) {
             Image(systemName: "megaphone").font(.system(size: 42)).foregroundStyle(YMColor.muted)
             Text(title).font(YMFont.title3).foregroundStyle(YMColor.text)
             Text(subtitle).font(YMFont.body).foregroundStyle(YMColor.muted).multilineTextAlignment(.center)
+            if let t = actionTitle, let action {
+                Button { Haptics.light(); action() } label: { Text(t) }
+                    .buttonStyle(YMPrimaryButtonStyle())
+                    .padding(.top, YMSpace.md)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(YMSpace.xl)

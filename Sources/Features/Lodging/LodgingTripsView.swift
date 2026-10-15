@@ -65,6 +65,15 @@ struct LodgingTripsView: View {
     }
     @State private var route: Route?
 
+    /// Экран сняли со стека не своей кнопкой «Назад» (долгое нажатие «Назад»,
+    /// вход, закрывший себя сам) — route мог остаться «висеть», и бронь больше
+    /// не открывалась (как на Главной). Сначала сбрасываем, потом идём.
+    private func go(_ r: Route) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(spacing: YMSpace.md) {
@@ -82,7 +91,7 @@ struct LodgingTripsView: View {
                         onOpen: {
                             if let s = t.unit?.slug, !s.isEmpty {
                                 Haptics.light()
-                                route = .unit(s)
+                                go(.unit(s))
                             }
                         },
                         onCancel: { if !vm.cancelling { toCancel = t } }
@@ -97,7 +106,7 @@ struct LodgingTripsView: View {
                             .font(YMFont.headline).foregroundStyle(YMColor.text)
                         Text("Брони жилья хранятся в вашем профиле.")
                             .font(YMFont.callout).foregroundStyle(YMColor.muted)
-                        Button("Войти") { route = .auth }
+                        Button("Войти") { go(.auth) }
                             .buttonStyle(YMPrimaryButtonStyle())
                             .padding(.top, YMSpace.sm)
                     }
@@ -114,7 +123,9 @@ struct LodgingTripsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, YMSpace.md)
                 } else if !vm.loading && vm.trips.isEmpty {
-                    Text("Поездок пока нет. Загляните в раздел «Жильё» на главной.")
+                    // Экран и так внутри «Жилья» (открыт из поиска): совет идти
+                    // «на главную» уводил из раздела.
+                    Text("Поездок пока нет. Найдите жильё в поиске — после брони поездка появится здесь.")
                         .font(YMFont.callout)
                         .foregroundStyle(YMColor.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)

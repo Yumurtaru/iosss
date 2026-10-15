@@ -34,10 +34,14 @@ struct ReferralView: View {
     private var reward: Int { info?.reward ?? 200 }
     private var code: String { info?.code?.trimmingCharacters(in: .whitespaces) ?? "" }
     private var invited: Int { info?.invited ?? 0 }
+    /// Сумма награды общим форматом денег («1 000 ₽»): было «1000 ₽»,
+    /// не как на остальных экранах.
+    private var rewardText: String { Money.format(Decimal(reward)) }
 
     private var shareText: String {
         let c = code.isEmpty ? "" : code
-        return "Заказывай в Yumurta по моему коду \(c) — получишь \(reward) ₽ на первый заказ! https://yumurta.ru/r/\(c)"
+        let r = rewardText
+        return "Заказывай в Yumurta по моему коду \(c) — получишь \(r) на первый заказ! https://yumurta.ru/r/\(c)"
     }
 
     var body: some View {
@@ -130,9 +134,9 @@ struct ReferralView: View {
     private var heroCard: some View {
         VStack(alignment: .leading, spacing: YMSpace.sm) {
             Text("🎁").font(.system(size: 34))
-            Text("Приглашайте друзей — получайте по \(reward) ₽")
+            Text("Приглашайте друзей — получайте по \(rewardText)")
                 .font(YMFont.title3).foregroundStyle(YMColor.onAccent)
-            Text("Когда друг сделает первый заказ, \(reward) ₽ получите и вы, и он.")
+            Text("Когда друг сделает первый заказ, \(rewardText) получите и вы, и он.")
                 .font(YMFont.callout).foregroundStyle(YMColor.onAccent.opacity(0.85))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -285,7 +289,7 @@ struct ReferralView: View {
             Text("Как это работает").font(YMFont.title3).foregroundStyle(YMColor.text)
             howRow(1, "Поделитесь кодом с другом любым способом")
             howRow(2, "Друг вводит код и делает первый заказ")
-            howRow(3, "Вы оба получаете по \(reward) ₽ на бонусный счёт")
+            howRow(3, "Вы оба получаете по \(rewardText) на бонусный счёт")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(YMSpace.xl)
@@ -318,7 +322,11 @@ struct ReferralView: View {
     }
 
     private func apply() async {
-        let clean = friendCode.trimmingCharacters(in: .whitespaces).uppercased()
+        // Паритет с Android: друг присылает сообщение «Поделиться» целиком — со
+        // ссылкой https://yumurta.ru/r/КОД. Вставленный текст уходил на сервер как
+        // код и получал «Код не найден». Берём код из ссылки, если она есть.
+        let raw = friendCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clean = Self.codeFromLink(raw).uppercased()
         // Двойной тап «Применить» отправлял код дважды: второй ответ «код уже
         // применён» затирал сообщение об успехе.
         guard !clean.isEmpty, !applying else { return }
@@ -340,6 +348,20 @@ struct ReferralView: View {
             applyMsg = (error as? APIError)?.errorDescription ?? "Не удалось применить код"
         }
         applying = false
+    }
+}
+
+extension ReferralView {
+    /// «…https://yumurta.ru/r/AB12…» → «AB12»; ссылки нет — текст как есть.
+    static func codeFromLink(_ raw: String) -> String {
+        guard let r = raw.range(of: "/r/") else { return raw }
+        let tail = raw[r.upperBound...]
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        var code = ""
+        for ch in tail.unicodeScalars {
+            if allowed.contains(ch) && ch.isASCII { code.unicodeScalars.append(ch) } else { break }
+        }
+        return code.isEmpty ? raw : code
     }
 }
 

@@ -17,7 +17,8 @@
 import SwiftUI
 
 struct NotificationsView: View {
-    @State private var items: [AppNotification] = []
+    /// Строки ленты вместе с их data_json (куда вести по тапу).
+    @State private var items: [NotifEntry] = []
     @State private var loading = true
     @State private var error: String?
     // Догрузка (волна А3): уведомлений по 20 на страницу, meta.has_more.
@@ -25,6 +26,11 @@ struct NotificationsView: View {
     @State private var hasMore = false
     @State private var moreFailed = false
     @State private var loadingMore = false
+    /// Непрочитанные ЗА пределами уже открытых страниц (meta.unread минус
+    /// отмеченные). Раньше при 20+ новых счётчик в профиле так и оставался
+    /// ненулевым, пока человек не долистает до конца, — «Прочитать все».
+    @State private var unreadLeft = 0
+    @State private var markingAll = false
 
     var body: some View {
         ScrollView {
@@ -37,7 +43,17 @@ struct NotificationsView: View {
                 } else if items.isEmpty {
                     NotifEmptyState()
                 } else {
-                    ForEach(items) { n in NotifRow(item: n) }
+                    // Строка ведёт туда же, куда push этого типа (заказ, чат,
+                    // заведение, кошелёк, поездки, мои объявления). Раньше лента
+                    // была только для чтения — открыть заказ из неё было нельзя.
+                    ForEach(items) { n in
+                        if n.target.opensSomething {
+                            Button { Haptics.light(); n.target.open() } label: { NotifRow(item: n.base) }
+                                .buttonStyle(.plain)
+                        } else {
+                            NotifRow(item: n.base)
+                        }
+                    }
                     if hasMore {
                         LoadMoreFooter(page: page, failed: moreFailed) { await loadMore() }
                     }
@@ -50,7 +66,17 @@ struct NotificationsView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle("Уведомления")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        .toolbar {
+            if unreadLeft > 0 {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Прочитать все") { Task { await markAllRead() } }
+                        .disabled(markingAll)
+                }
+            }
+        }
+        // Только первый показ: возврат из кошелька/поддержки, открытых из
+        // ленты, не должен сбрасывать список в скелетон и наверх.
+        .task { if items.isEmpty { await load() } }
     }
 
     private func load() async {
@@ -58,14 +84,18 @@ struct NotificationsView: View {
         error = nil
         page = 1; hasMore = false; moreFailed = false; loadingMore = false
         do {
-            let first: Page<AppNotification> = try await API.shared.page("api/v1/notifications")
+            let first: Page<NotifEntry> = try await API.shared.page("api/v1/notifications")
             let list = first.items
             await MainActor.run { items = list; hasMore = first.hasMore; loading = false }
             // Отметить непрочитанные прочитанными (тихо, ошибки не показываем).
-            let unread = list.filter { !$0.read }.map { $0.id }
-            if !unread.isEmpty {
-                try? await API.shared.postVoid("api/v1/notifications/read", body: NotifReadBody(ids: unread))
+            let unread = list.filter { !$0.base.read }.map { $0.id }
+            var left = first.meta?.unread ?? 0
+            if !unread.isEmpty,
+               (try? await API.shared.postVoid("api/v1/notifications/read", body: NotifReadBody(ids: unread))) != nil {
+                left -= unread.count
             }
+            let rest = max(0, left)
+            await MainActor.run { unreadLeft = rest }
         } catch is CancellationError {
             // экран закрыли во время загрузки — игнор
         } catch {
@@ -84,20 +114,160 @@ extension NotificationsView {
         loadingMore = true; moreFailed = false
         let next = page + 1
         do {
-            let p: Page<AppNotification> = try await API.shared.page("api/v1/notifications", query: ["page": String(next)])
+            let p: Page<NotifEntry> = try await API.shared.page("api/v1/notifications", query: ["page": String(next)])
             let known = Set(items.map(\.id))
             items += p.items.filter { !known.contains($0.id) }
             page = next
             hasMore = p.hasMore && !p.items.isEmpty
             // Догруженные непрочитанные — тоже прочитаны: человек до них долистал.
-            let unread = p.items.filter { !$0.read }.map { $0.id }
-            if !unread.isEmpty {
-                try? await API.shared.postVoid("api/v1/notifications/read", body: NotifReadBody(ids: unread))
+            let unread = p.items.filter { !$0.base.read }.map { $0.id }
+            if !unread.isEmpty,
+               (try? await API.shared.postVoid("api/v1/notifications/read", body: NotifReadBody(ids: unread))) != nil {
+                unreadLeft = max(0, unreadLeft - unread.count)
             }
         } catch {
             if !(error is CancellationError) { moreFailed = true }
         }
         loadingMore = false
+    }
+
+    /// «Прочитать все»: пустой ids — сервер гасит всю ленту (как на сайте).
+    fileprivate func markAllRead() async {
+        guard !markingAll else { return }
+        markingAll = true
+        if (try? await API.shared.postVoid("api/v1/notifications/read", body: NotifReadBody(ids: []))) != nil {
+            unreadLeft = 0
+        }
+        markingAll = false
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Куда ведёт строка (data_json)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Строка ленты + цель перехода. AppNotification (Net/Models.swift) поле
+/// data_json не читает — разбираем его здесь из той же строки ответа.
+private struct NotifEntry: Decodable, Identifiable {
+    let base: AppNotification
+    let target: NotifTarget
+    var id: Int { base.id }
+
+    private enum Keys: String, CodingKey { case dataJson }
+
+    init(from decoder: Decoder) throws {
+        // Сама строка — тем же декодером (как раньше Page<AppNotification>).
+        base = try decoder.singleValueContainer().decode(AppNotification.self)
+        var raw: String?
+        if let c = try? decoder.container(keyedBy: Keys.self) {
+            raw = (try? c.decodeIfPresent(String.self, forKey: .dataJson)) ?? nil
+        }
+        target = NotifTarget(json: raw, feedType: base.type)
+    }
+}
+
+/// Те же ключи и тот же порядок разбора, что у тапа по push (AppDelegate.handleNotification).
+private struct NotifTarget {
+    enum Kind {
+        case org(String), chat(Int), order(Int), product(Int), ad(Int)
+        case wallet, support, bonuses, cart, trips, nothing
+    }
+    let kind: Kind
+
+    init(json: String?, feedType: String?) {
+        var d: [String: Any] = [:]
+        if let s = json, let data = s.data(using: .utf8),
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            d = obj
+        }
+        kind = Self.resolve(d, feedType: feedType ?? "")
+    }
+
+    var opensSomething: Bool {
+        if case .nothing = kind { return false }
+        return true
+    }
+
+    /// id из data: сервер кладёт и числом (order_status), и строкой.
+    private static func positiveInt(_ v: Any?) -> Int? {
+        if let i = v as? Int { return i > 0 ? i : nil }
+        if let s = v as? String, let i = Int(s) { return i > 0 ? i : nil }
+        return nil
+    }
+
+    /// События ПРОДАВЦА (ОТВЕТЫ-САЙТА П-21): владелец, вошедший тем же
+    /// аккаунтом, видит их в ленте, но order_id там — не его покупка.
+    private static let sellerTypes: Set<String> = [
+        "new_order", "order_cancelled", "new_return", "order_returned",
+        "pos_failed", "pos_rejected", "pos_dropped",
+        "audit", "org_document", "product_hidden", "shop_published", "shop_publish_returned"
+    ]
+
+    /// Тот же признак, что AppDelegate.isSellerSide: тип продавца, чат/бронь
+    /// с shop_id, крупная операция кассы (kind=approval), брони объекта.
+    private static func isSellerSide(_ type: String, _ d: [String: Any]) -> Bool {
+        if sellerTypes.contains(type) { return true }
+        if (d["kind"] as? String) == "approval" || (d["screen"] as? String) == "lodging_bookings" { return true }
+        return (type == "order_chat" || type == "reservation") && d["shop_id"] != nil
+    }
+
+    private static func resolve(_ d: [String: Any], feedType: String) -> Kind {
+        let type = (d["type"] as? String) ?? ""
+        let slug = (d["slug"] as? String) ?? ""
+        let screen = (d["screen"] as? String) ?? ""
+        if type == "new_shop" || type == "shop_reopened", !slug.isEmpty { return .org(slug) }
+        if isSellerSide(type, d) { return .nothing }
+        if type == "order_chat", let id = positiveInt(d["order_id"]) { return .chat(id) }
+        if let id = positiveInt(d["order_id"]) { return .order(id) }
+        if type.isEmpty, let pid = positiveInt(d["product_id"]) { return .product(pid) }
+        // wallet_topup без data — строки ленты до появления screen=wallet.
+        if screen == "wallet" || feedType == "wallet_topup" { return .wallet }
+        if type == "support" { return .support }
+        if type == "bonus_expiring" { return .bonuses }
+        if type == "abandoned_cart" { return .cart }
+        if screen == "trips" { return .trips }
+        if let a = positiveInt(d["ad_id"]) { return .ad(a) }
+        return .nothing
+    }
+
+    /// Переход. Лента открыта в шторке профиля: заказ, чат, заведение и
+    /// вкладки показываются под ней, поэтому сначала её закрываем
+    /// (revealForPush / openOrg). Кошелёк и поддержка — тут же, в профиле.
+    func open() {
+        let coord = NavCoordinator.shared
+        switch kind {
+        case .org(let slug):
+            coord.openOrg(slug: slug)
+        case .chat(let id):
+            coord.revealForPush(closeAll: false) { coord.openChat(orderId: id) }
+        case .order(let id):
+            coord.revealForPush(closeAll: true) { coord.pendingOrderDetail = id }
+        case .product(let pid):
+            coord.revealForPush(closeAll: true) {
+                DeepLinkRouter.shared.requestedTab = 0
+                coord.pendingProductId = pid
+            }
+        case .ad:
+            coord.revealForPush(closeAll: true) {
+                DeepLinkRouter.shared.requestedTab = 4
+                AdsPushIntent.openMyAds()
+            }
+        case .wallet:
+            ProfilePushIntent.open(.wallet)
+        case .support:
+            ProfilePushIntent.open(.support)
+        case .bonuses:
+            ProfilePushIntent.open(.bonuses)
+        case .cart:
+            coord.revealForPush(closeAll: true) { DeepLinkRouter.shared.requestedTab = 2 }
+        case .trips:
+            coord.revealForPush(closeAll: true) {
+                LodgingPushIntent.openTrips()
+                coord.openLodging()
+            }
+        case .nothing:
+            break
+        }
     }
 }
 

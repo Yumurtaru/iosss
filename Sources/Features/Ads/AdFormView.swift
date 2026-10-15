@@ -40,6 +40,21 @@ final class AdFormViewModel: ObservableObject {
     /// Правка: объявление не загрузилось. Сохранять нельзя — иначе пустая форма
     /// затёрла бы объявление (или, как раньше, создала бы дубль-черновик).
     @Published var loadFailed = false
+    /// Паритет с Android: рубрика объявления выключена в админке — её нет в
+    /// списке выбора. Сервер правку в закрытом разделе принимает (routes/ads.php,
+    /// PUT /api/v1/ads/{id}: «закрытый раздел ей не помеха»), публикацию — нет.
+    /// Раньше iOS писал «сохранить правку нельзя», хотя сохранить можно.
+    @Published var offCatId: Int?
+    @Published var offCatName = ""
+
+    /// Текст формы на момент загрузки/последнего сохранения. Отличается от
+    /// текущего — есть несохранённый ввод: смахивание шторки вниз молча
+    /// выбрасывало набранные заголовок и описание.
+    @Published private var savedText = ""
+    private var textSnapshot: String {
+        [title, desc, price, phone, address].joined(separator: "\u{1}")
+    }
+    var hasUnsavedText: Bool { !loading && textSnapshot != savedText }
 
     /// Плоский список выбираемых категорий: листья, а у корней без детей — сам корень.
     private func leaves(_ list: [AdCategory]) -> [(AdCategory, String)] {
@@ -72,7 +87,11 @@ final class AdFormViewModel: ObservableObject {
             loadFailed = false
             title = a.title ?? ""
             desc = a.description ?? ""
-            price = a.price.map { Money.wire($0) } ?? ""
+            // Целая цена — без «.00»: в поле правки стояло «1500.00».
+            price = a.price.map { p -> String in
+                let w = Money.wire(p)
+                return w.hasSuffix(".00") ? String(w.dropLast(3)) : w
+            } ?? ""
             negotiable = a.isNegotiable ?? false
             condition = a.conditionNew == nil ? -1 : ((a.conditionNew ?? false) ? 1 : 0)
             phone = a.contactPhone ?? ""
@@ -82,9 +101,14 @@ final class AdFormViewModel: ObservableObject {
             photos = a.photos ?? []
             canChangeCategory = (a.status ?? "draft") == "draft"
             chosen = cats.first { $0.cat.stableId == (a.categoryId ?? 0) }?.cat
+            if chosen == nil, !catsFailed, let cid = a.categoryId, cid > 0 {
+                offCatId = cid
+                offCatName = a.categoryName ?? ""
+            }
         }
         if loadFailed { toast = "Не удалось загрузить объявление. Закройте форму и откройте снова" }
         else if catsFailed { toast = "Не удалось загрузить рубрики. Закройте форму и откройте снова" }
+        savedText = textSnapshot
         loading = false
     }
 
@@ -101,12 +125,16 @@ final class AdFormViewModel: ObservableObject {
     }
 
     private func body(for cat: AdCategory) -> AdSaveBody {
+        body(catId: cat.stableId, priceAllowed: cat.priceAllowed)
+    }
+
+    private func body(catId: Int, priceAllowed: Bool) -> AdSaveBody {
         AdSaveBody(
-            categoryId: cat.stableId,
+            categoryId: catId,
             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
             description: desc.trimmingCharacters(in: .whitespacesAndNewlines),
             // Цену нормализуем: запятую в точку, и только если категория её просит.
-            price: cat.priceAllowed
+            price: priceAllowed
                 ? (parsedPrice.map { Money.wire($0) } ?? "")
                 : "",
             isNegotiable: negotiable,
@@ -118,20 +146,52 @@ final class AdFormViewModel: ObservableObject {
         )
     }
 
+    /// Заголовок 3–190, описание 10–5000 символов, в телефоне не меньше 10 цифр —
+    /// как Ads::TITLE_MIN/MAX, DESC_MIN/MAX и проверка contact_phone на сервере.
+    /// Длину считаем по символам Юникода, как mb_strlen. nil — всё в порядке.
+    private var fieldsProblem: String? {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count
+        if t < 3 { return "Заголовок — минимум 3 символа" }
+        if t > 190 { return "Заголовок длиннее 190 символов" }
+        let d = desc.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count
+        if d < 10 { return "Опишите подробнее — минимум 10 символов" }
+        if d > 5000 { return "Описание длиннее 5000 символов" }
+        let digits = phone.filter { $0.isASCII && $0.isNumber }.count
+        if digits < 10 { return "Укажите телефон для связи — не меньше 10 цифр" }
+        return nil
+    }
+
     /// Создать черновик или сохранить правку. Возвращает id или 0.
     @discardableResult
     func save(silent: Bool) async -> Int {
-        guard let cat = chosen else { toast = "Выберите категорию"; return 0 }
+        // Закрытая рубрика уже сохранённого объявления — правку сохраняем в ней же.
+        let catId: Int
+        let priceAllowed: Bool
+        if let c = chosen {
+            catId = c.stableId
+            priceAllowed = c.priceAllowed
+        } else if let oid = offCatId, adId > 0 {
+            catId = oid
+            priceAllowed = true
+        } else {
+            toast = "Выберите категорию"
+            return 0
+        }
         if loadFailed { toast = "Объявление не загрузилось — откройте форму заново"; return 0 }
-        if cat.priceAllowed, !price.trimmingCharacters(in: .whitespaces).isEmpty, parsedPrice == nil {
+        if priceAllowed, !price.trimmingCharacters(in: .whitespaces).isEmpty, parsedPrice == nil {
             toast = "Проверьте цену: только цифры, например 1500"
             return 0
         }
+        // Те же пределы, что проверяет сервер (adsValidate в routes/ads.php):
+        // раньше человек узнавал о них только после отправки, и то об одном поле.
+        if let problem = fieldsProblem { toast = problem; return 0 }
+        // Снимок до запроса: набранное, пока шёл ответ, сохранённым не считаем.
+        let snap = textSnapshot
         do {
             if adId > 0 {
-                try await API.shared.adUpdate(adId, body(for: cat))
+                try await API.shared.adUpdate(adId, body(catId: catId, priceAllowed: priceAllowed))
             } else {
-                let r = try await API.shared.adCreate(body(for: cat))
+                let r = try await API.shared.adCreate(body(catId: catId, priceAllowed: priceAllowed))
                 guard let newId = r.adId, newId > 0 else {
                     toast = "Сервер не вернул номер объявления"
                     return 0
@@ -139,6 +199,7 @@ final class AdFormViewModel: ObservableObject {
                 adId = newId
             }
             if !silent { toast = "Сохранено" }
+            savedText = snap   // сохранено — шторку снова можно смахнуть
             return adId
         } catch {
             toast = (error as? LocalizedError)?.errorDescription ?? "Проверьте поля объявления"
@@ -161,7 +222,10 @@ final class AdFormViewModel: ObservableObject {
         guard !busy else { toast = "Подождите окончания сохранения и выберите фото ещё раз"; return }
         busy = true
         defer { busy = false }
-        guard let cat = chosen else { toast = "Сначала выберите категорию"; return }
+        // Паритет с Android: фото можно добавить и в закрытой рубрике (лимит
+        // проверит сервер по своей категории).
+        guard chosen != nil || (offCatId != nil && adId > 0) else { toast = "Сначала выберите категорию"; return }
+        let limit = chosen?.photosLimit ?? 8
         // Объявление не загрузилось — фото к нему не добавляем вслепую.
         if loadFailed { toast = "Объявление не загрузилось — откройте форму заново"; return }
         // Фото цепляются к объявлению, поэтому черновик должен существовать.
@@ -171,7 +235,7 @@ final class AdFormViewModel: ObservableObject {
         var unreadable = 0
         var stopped = false
         for item in items {
-            if photos.count >= cat.photosLimit { toast = "Больше \(cat.photosLimit) фотографий нельзя"; stopped = true; break }
+            if photos.count >= limit { toast = "Больше \(limit) фотографий нельзя"; stopped = true; break }
             guard let raw = try? await item.loadTransferable(type: Data.self) else { unreadable += 1; continue }
             // Камера iPhone снимает в HEIC — сервер его не принимает; шлём JPEG.
             // Перекодирование 48-Мп снимка — не на главном потоке: экран замирал на секунды.
@@ -238,6 +302,8 @@ struct AdFormView: View {
 
     @StateObject private var vm = AdFormViewModel()
     @State private var picked: [PhotosPickerItem] = []
+    /// Паритет с Android: «Не хватает денег» → «Пополнить кошелёк» открывает кошелёк.
+    @State private var showWallet = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -254,8 +320,11 @@ struct AdFormView: View {
             // Пока идёт оплата/публикация или загрузка фото, форма не закрывается
             // (ни «Закрыть», ни смахивание): раньше закрытая посреди оплаты форма
             // прятала итог — списано ли и опубликовано ли.
-            .interactiveDismissDisabled(vm.busy)
+            // Набранный, но не сохранённый текст смахиванием тоже не теряем —
+            // закрыть можно кнопкой «Закрыть».
+            .interactiveDismissDisabled(vm.busy || vm.hasUnsavedText)
             .task { await vm.start(editAdId: editAdId) }
+            .navigationDestination(isPresented: $showWallet) { WalletView() }
             // Один параметр: двухпараметрический onChange — это iOS 17, а цель
             // развёртывания проекта 16.0 (project.yml), и сборка на нём падает.
             .onChange(of: picked) { items in
@@ -265,9 +334,10 @@ struct AdFormView: View {
             .alert("Не хватает денег", isPresented: Binding(
                 get: { vm.shortage != nil }, set: { if !$0 { vm.shortage = nil } }
             )) {
-                Button("Понятно", role: .cancel) { vm.shortage = nil }
+                Button("Пополнить кошелёк") { vm.shortage = nil; showWallet = true }
+                Button("Позже", role: .cancel) { vm.shortage = nil }
             } message: {
-                Text((vm.shortage ?? "") + "\n\nОбъявление сохранено в черновиках — пополните кошелёк в профиле и опубликуйте его из «Моих объявлений».")
+                Text((vm.shortage ?? "") + "\n\nОбъявление сохранено в черновиках — пополните кошелёк и опубликуйте его здесь или из «Моих объявлений».")
             }
             .overlay(alignment: .bottom) {
                 if let t = vm.toast {
@@ -394,6 +464,16 @@ struct AdFormView: View {
                                 .foregroundStyle(enough ? YMColor.muted : YMColor.statusCancel)
                         }
                     }
+                } else if vm.offCatId != nil {
+                    // Раздел закрыт: правку сохранить можно, опубликовать — нет (как в Android).
+                    Text("Раздел «\(vm.offCatName)» временно закрыт — публикация недоступна, изменения можно сохранить.")
+                        .font(YMFont.body).foregroundStyle(YMColor.muted)
+                } else if !vm.canChangeCategory && !vm.cats.isEmpty {
+                    // Рубрика опубликованного объявления закрыта (её нет в списке),
+                    // а сменить её нельзя: кнопки ниже серые, и раньше здесь
+                    // предлагалось «выбрать категорию», которую выбрать невозможно.
+                    Text("Рубрика этого объявления сейчас закрыта — сохранить правку нельзя. Обратитесь в поддержку.")
+                        .font(YMFont.body).foregroundStyle(YMColor.statusCancel)
                 } else {
                     Text("Выберите категорию — рядом покажем стоимость размещения.")
                         .font(YMFont.body).foregroundStyle(YMColor.muted)
@@ -406,7 +486,7 @@ struct AdFormView: View {
                 } label: {
                     HStack { Spacer(); Text("Сохранить"); Spacer() }
                 }
-                .disabled(vm.busy || vm.chosen == nil)
+                .disabled(vm.busy || (vm.chosen == nil && vm.offCatId == nil))
 
                 Button {
                     Task { await vm.publish { id in onPublished(id); dismiss() } }
@@ -425,6 +505,9 @@ struct AdFormView: View {
                 Text("Объявление публикуется сразу после оплаты. За нарушение правил площадки объявление может быть заблокировано.")
             }
         }
+        // У цифровых клавиатур цены и телефона нет «Готово» — клавиатура
+        // закрывала кнопки внизу формы. Убирается жестом прокрутки.
+        .scrollDismissesKeyboard(.interactively)
         .scrollContentBackground(.hidden)
         .background(YMColor.bg.ignoresSafeArea())
     }

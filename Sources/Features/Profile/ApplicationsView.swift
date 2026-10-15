@@ -33,9 +33,16 @@ struct ApplicationsView: View {
                 JobsErrorState { Task { await load() } }
 
             case .empty:
+                // На «вы», как во всём приложении (было «Откликнись»).
                 JobsEmptyState(emoji: "📨",
                                title: "Откликов нет",
-                               hint: "Откликнись на вакансию в разделе «Вакансии» — отклики появятся здесь.")
+                               hint: "Откликнитесь на вакансию в разделе «Вакансии» — отклики появятся здесь.")
+                // Путь к вакансиям прямо отсюда: раньше нужно было вернуться
+                // в профиль и искать раздел самому.
+                NavigationLink { JobsView() } label: { Text("Смотреть вакансии") }
+                    .buttonStyle(YMPrimaryButtonStyle())
+                    .padding(.horizontal, YMSpace.xxxl)
+                    .padding(.top, YMSpace.lg)
 
             case .content:
                 LazyVStack(spacing: YMSpace.md) {

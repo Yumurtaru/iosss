@@ -137,7 +137,9 @@ struct GiftCardView: View {
             }
             infoRow("Статус", statusLabel(c.status), valueColor: active ? YMColor.statusDone : YMColor.muted)
             if let e = c.expiresAt, !e.isEmpty {
-                infoRow("Действует до", DateFmt.short(e))
+                // Срок — со временем (карта перестаёт действовать в этот момент);
+                // дата другого года теперь показывается с годом (DateFmt.short).
+                infoRow("Действует до", DateFmt.short(e))   // с временем: карта перестаёт действовать в этот момент
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -231,6 +233,9 @@ struct GiftCardView: View {
         case "used", "spent", "использована":                return "Использована"
         case "expired", "истекла":                           return "Истёк срок"
         case "blocked", "disabled", "заблокирована":         return "Заблокирована"
+        // Паритет с Android: неактивная карта (касса выпускает карту «в ожидании») —
+        // раньше человек видел английское слово статуса.
+        case "pending", "inactive":                          return "Не активирована"
         default:                                             return r
         }
     }

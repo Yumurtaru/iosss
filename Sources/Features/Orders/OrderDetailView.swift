@@ -18,6 +18,12 @@ import SafariServices
 //  Таймлайн статусов строится машиной OrderFlow (new→accepted→preparing→ready→in_delivery→done; cancelled).
 //  Пин курьера и таймлайн говорят на том же «золотом» визуальном языке, что лента в списке.
 
+extension Notification.Name {
+    /// Пришёл/нажат push о заказе (object — id заказа, Int). Открытые деталь
+    /// заказа и чат по нему перечитываются сразу, а не ждут опроса (до 24 с).
+    static let ymOrderPushed = Notification.Name("ym.orderPushed")
+}
+
 // MARK: - CourierPoint (аннотация карты)
 
 private struct CourierPoint: Identifiable {
@@ -369,17 +375,30 @@ struct OrderDetailView: View {
                 .padding(YMSpace.xl)
             } else if let o = vm.order {
                 VStack(spacing: YMSpace.lg) {
+                    // Паритет с Android: заведение и время заказа под заголовком.
+                    if let head = headerLine(o) {
+                        Text(head)
+                            .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     if OrderFlow.isActive(o.status), courierCoord != nil {
                         mapCard
+                    }
+                    // Паритет с Android: курьер назначен, а точки ещё нет (нет
+                    // геопозиции, первая минута смены) — плашку с именем и
+                    // звонком всё равно показываем; раньше она пряталась вместе с картой.
+                    if OrderFlow.isActive(o.status), courierCoord != nil || courierKnown {
                         courierPlate
                     }
                     timelineCard(o)
+                    // А63: комментарий клиента к записи на услугу.
+                    if let note = clientNote(o) { clientNoteCard(note) }
                     if canPay(o) { payCard(o) }          // онлайн-оплата (неоплаченный online-заказ)
                     if let ch = o.changes, !ch.isEmpty { changesCard(ch) }
                     itemsCard(o)
                     // П-23.1: форма отзыва — по can_review сервера; NPS — как раньше.
                     if showReviewCard(o) { reviewCard(o) }
-                    if canReview(o) { npsCard(o) }        // NPS (для доставленных)
+                    if showNpsCard(o) { npsCard(o) }      // NPS (для доставленных)
                     actionButtons(o)
                 }
                 .padding(.horizontal, YMSpace.xl)
@@ -394,6 +413,9 @@ struct OrderDetailView: View {
                 emptyBox
             }
         }
+        // Комментарий к отзыву многострочный: «Ввод» — новая строка, клавиатуру
+        // было не убрать, и она закрывала «Отправить отзыв» и оценку. Теперь жестом.
+        .scrollDismissesKeyboard(.interactively)
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -407,6 +429,12 @@ struct OrderDetailView: View {
             guard phase == .active, visible, vm.order != nil else { return }
             // Пока шёл reload, экран могли закрыть — без проверки опрос
             // перезапускался после onDisappear и тикал вхолостую.
+            Task { await vm.reload(); if visible { vm.startTrackingIfActive() } }
+        }
+        // Повторный push об ЭТОМ заказе, пока экран открыт: раньше новый статус
+        // или состав появлялись только с опросом (заказ — раз в 24 с).
+        .onReceive(NotificationCenter.default.publisher(for: .ymOrderPushed)) { n in
+            guard (n.object as? Int) == id, visible, vm.order != nil else { return }
             Task { await vm.reload(); if visible { vm.startTrackingIfActive() } }
         }
         .onChange(of: courierCoord?.latitude) { _ in recenter() }
@@ -431,6 +459,22 @@ struct OrderDetailView: View {
     @State private var reviewText = ""
     @State private var npsScore = -1
 
+    /// Сервер прислал имя или телефон курьера (только пока заказ в пути).
+    private var courierKnown: Bool {
+        let n = (vm.track?.courierName ?? "").trimmingCharacters(in: .whitespaces)
+        let p = (vm.track?.courierPhone ?? "").trimmingCharacters(in: .whitespaces)
+        return !n.isEmpty || !p.isEmpty
+    }
+
+    /// «Заведение · 20.09.2026 14:05» — как шапка детали заказа на Android.
+    private func headerLine(_ o: OrderDetail) -> String? {
+        var parts: [String] = []
+        if let s = o.shopName?.trimmingCharacters(in: .whitespaces), !s.isEmpty { parts.append(s) }
+        let d = DateFmt.short(o.createdAt)
+        if !d.isEmpty { parts.append(d) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private var navNumber: String {
         if let n = vm.order?.dailyNumber { return "\(n)" }
         return "\(id)"
@@ -439,9 +483,38 @@ struct OrderDetailView: View {
     // MARK: Доступность действий по реальным статусам (сверено с OrderFlow/Android)
 
     /// Отмена: только ранние шаги (new/accepted) — до готовки/доставки; не для done/cancelled.
+    /// П-25 №4: только точные коды сервера (незнакомый статус — без «Отменить»)
+    /// и пока деньги не приняты. Бронь жилья отменяется по своим правилам
+    /// (удержание) — в «Мои поездки», здесь кнопки нет.
     private func canCancel(_ o: OrderDetail) -> Bool {
-        let n = OrderFlow.normalize(o.status)
-        return n == "new" || n == "accepted"
+        let st = (o.status ?? "").lowercased()
+        guard st == "new" || st == "accepted" else { return false }
+        if (o.paymentStatus ?? "").lowercased() == "paid" { return false }
+        return o.shopType != "lodging"
+    }
+
+    /// Бронь жилья ещё можно отменить, но не отсюда — подсказка, куда идти.
+    private func lodgingCancelHint(_ o: OrderDetail) -> Bool {
+        guard o.shopType == "lodging" else { return false }
+        let st = (o.status ?? "").lowercased()
+        return st == "new" || st == "accepted"
+    }
+
+    /// А63: текст клиента к записи (без пробелов по краям); пусто — nil.
+    private func clientNote(_ o: OrderDetail) -> String? {
+        guard let c = o.clientComment?.trimmingCharacters(in: .whitespacesAndNewlines), !c.isEmpty else { return nil }
+        return c
+    }
+
+    private func clientNoteCard(_ note: String) -> some View {
+        VStack(alignment: .leading, spacing: YMSpace.xs) {
+            Text("Комментарий мастеру").font(YMFont.headline).foregroundStyle(YMColor.text)
+            Text(note).font(YMFont.body).foregroundStyle(YMColor.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(YMSpace.lg)
+        .ymCard(radius: YMRadius.card)
     }
 
     /// Онлайн-оплата: тип оплаты online, заказ не отменён/не завершён.
@@ -464,8 +537,24 @@ struct OrderDetailView: View {
     /// Только что отправленный или «уже оставлен» (409) — блок с итогом.
     private func showReviewCard(_ o: OrderDetail) -> Bool {
         if vm.reviewSent || vm.reviewAlready { return true }
+        // Паритет с Android: отзыв уже оставлен (has_review) — у выполненного
+        // заказа блок остаётся со «Спасибо за отзыв!», а не пропадает молча.
+        if reviewThanks(o) && canReview(o) { return true }
         if let c = o.canReview { return c }
         return canReview(o)
+    }
+
+    /// Сервер: отзыв есть, новый оставить нельзя (has_review без can_review).
+    private func reviewThanks(_ o: OrderDetail) -> Bool {
+        o.hasReview == true && o.canReview != true
+    }
+
+    /// П-24 №2 (А62): форма NPS — у завершённого заказа, пока оценки нет
+    /// (has_nps). Только что отправили — блок со «Спасибо». Старый сервер без
+    /// has_nps — как раньше, по статусу.
+    private func showNpsCard(_ o: OrderDetail) -> Bool {
+        if vm.npsSent { return true }
+        return canReview(o) && o.hasNps != true
     }
 
     @ViewBuilder private var toastOverlay: some View {
@@ -571,24 +660,40 @@ struct OrderDetailView: View {
                 .padding(.bottom, YMSpace.md)
 
             // Золотая живая лента-резюме над таймлайном (единый язык со списком).
-            GoldStatusRibbon(progress: OrderFlow.progress(o.status),
+            GoldStatusRibbon(progress: OrderFlow.progress(o.status, shopType: o.shopType),
                              pulsing: OrderFlow.isEnRoute(o.status),
                              cancelled: OrderFlow.isCancelled(o.status))
                 .padding(.bottom, YMSpace.lg)
 
+            // Предзаказ (П-24 №7): время, к которому готовить/доставить. ETA у
+            // такого заказа сервер не считает — показываем это время.
+            if !OrderFlow.isCancelled(o.status), let pre = DateFmt.preorder(o.preorderAt) {
+                Label("Ко времени: \(pre)", systemImage: "clock.fill")
+                    .font(YMFont.headline)
+                    .foregroundStyle(YMColor.accent)
+                    .labelStyle(.titleAndIcon)
+                    .padding(.bottom, YMSpace.md)
+            }
+
             if OrderFlow.isCancelled(o.status) {
                 HStack(spacing: YMSpace.sm) {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(YMColor.statusCancel)
-                    Text("Заказ отменён").font(YMFont.headline).foregroundStyle(YMColor.statusCancel)
+                    Text(o.shopType == "lodging" ? "Бронь отменена" : "Заказ отменён")
+                        .font(YMFont.headline).foregroundStyle(YMColor.statusCancel)
                 }
             } else {
                 let current = OrderFlow.stepIndex(o.status)
+                // П-25 №4: незнакомый код статуса — подпись сервера (status_title),
+                // иначе все шаги серые и непонятно, что с заказом.
+                if current < 0, let t = o.statusTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+                    Text(t).font(YMFont.headline).foregroundStyle(YMColor.text)
+                        .padding(.bottom, YMSpace.sm)
+                }
                 // Самовывоз и заказ за столиком в путь не уходят: шаг «Курьер в пути»
                 // у них лишний (если заказ вдруг в нём — показываем).
                 let dt = o.deliveryType ?? ""
                 let noCourier = !dt.isEmpty && dt != "delivery" && current != 4
-                ForEach(Array(OrderFlow.steps.enumerated()).filter { !(noCourier && $0.element == "in_delivery") },
-                        id: \.offset) { idx, key in
+                ForEach(visibleSteps(o, noCourier: noCourier), id: \.offset) { idx, key in
                     TimelineRow(
                         title: stepTitle(key, o: o, noCourier: noCourier),
                         time: stepTime(idx: idx, current: current, o: o),
@@ -602,10 +707,25 @@ struct OrderDetailView: View {
         .ymCard(radius: YMRadius.card)
     }
 
+    /// Шаги таймлайна с их номером в OrderFlow.steps (номер нужен для времени и
+    /// состояния шага). Без «Курьер в пути» у самовывоза; у брони жилья (А64) —
+    /// только new → accepted → done.
+    private func visibleSteps(_ o: OrderDetail, noCourier: Bool) -> [(offset: Int, element: String)] {
+        var out: [(offset: Int, element: String)] = []
+        for (i, key) in OrderFlow.steps.enumerated() {
+            if noCourier && key == "in_delivery" { continue }
+            if OrderFlow.isLodgingSkipped(key, shopType: o.shopType) { continue }
+            out.append((offset: i, element: key))
+        }
+        return out
+    }
+
     /// Подпись шага: серверная из status_timeline (словами типа организации),
     /// иначе свой словарь. Самовывоз — «Выполнен», а не «Доставлен».
     private func stepTitle(_ key: String, o: OrderDetail, noCourier: Bool) -> String {
         if let t = o.statusTimeline?.step(key)?.title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        // А64: бронь жилья — свои слова («Завершена», а не «Выполнен»).
+        if o.shopType == "lodging" { return OrderFlow.stepTitle(key, shopType: "lodging") }
         if noCourier, key == "done", vm.order?.shopType != "service" { return "Выполнен" }
         return OrderFlow.stepTitle(key, shopType: vm.order?.shopType)
     }
@@ -621,7 +741,9 @@ struct OrderDetailView: View {
         }
         if idx == 0 { return DateFmt.time(o.createdAt) }
         if idx == current { return "сейчас" }
-        if idx == OrderFlow.steps.count - 1, let m = vm.track?.etaMinutes, m > 0, current < idx {
+        // Предзаказ: «ожидается ~N мин» не показываем — заказ ко времени.
+        if idx == OrderFlow.steps.count - 1, DateFmt.preorder(o.preorderAt) == nil,
+           let m = vm.track?.etaMinutes, m > 0, current < idx {
             return "ожидается ~\(m) мин"
         }
         return ""
@@ -665,10 +787,27 @@ struct OrderDetailView: View {
                     .font(.system(size: 17, weight: .heavy)).foregroundStyle(YMColor.text)
             }
             .padding(.top, YMSpace.xs)
+            // «Сдача с …», указанная при оплате наличными (payment_note): раньше
+            // клиент отправлял её, но в карточке заказа не видел.
+            if let note = changeNoteText(o) {
+                Text(note).font(YMFont.callout).foregroundStyle(YMColor.muted)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(YMSpace.lg)
         .ymCard(radius: YMRadius.card)
+    }
+
+    /// Строка про сдачу: число → «Сдача с N ₽», иной текст → «Сдача: …», пусто → nil.
+    private func changeNoteText(_ o: OrderDetail) -> String? {
+        // Сайт шлёт change_from и при оплате картой/СБП — сдача есть только у наличных.
+        guard (o.paymentType ?? "cash").lowercased() == "cash" else { return nil }
+        let raw = o.paymentNote ?? ""
+        let note = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if note.isEmpty { return nil }
+        let digitsOnly = note.allSatisfy { ($0.isASCII && $0.isNumber) || $0 == " " }
+        if digitsOnly { return "Сдача с " + note + " ₽" }
+        return "Сдача: " + note
     }
 
     // ── Что изменилось в заказе ─────────────────────────────────────────────
@@ -721,12 +860,18 @@ struct OrderDetailView: View {
 
     private func numText(_ v: Double?) -> String {
         let q = v ?? 0
-        return q == q.rounded() ? String(Int(q)) : String(format: "%g", q)
+        if q == q.rounded() { return String(Int(q)) }
+        // Дробное — с запятой, как в русском тексте: «1,5 кг», а не «1.5 кг».
+        return String(format: "%g", q).replacingOccurrences(of: ".", with: ",")
     }
 
     private func qtyLabel(_ it: OrderItem) -> String {
         let q = it.qty ?? 1
-        let n = q == q.rounded() ? String(Int(q)) : String(format: "%g", q)
+        let n = numText(q)
+        // Весовой товар — с единицей: «0,5 кг» вместо «0.5×».
+        if q != q.rounded(), let u = it.unit?.trimmingCharacters(in: .whitespaces), !u.isEmpty {
+            return "\(n) \(u)"
+        }
         return "\(n)×"
     }
 
@@ -771,7 +916,7 @@ struct OrderDetailView: View {
     private func reviewCard(_ o: OrderDetail) -> some View {
         VStack(alignment: .leading, spacing: YMSpace.md) {
             Text("Оцените заказ").font(YMFont.title3).foregroundStyle(YMColor.text)
-            if vm.reviewSent {
+            if vm.reviewSent || reviewThanks(o) {
                 Text("Спасибо за отзыв!").font(YMFont.body).foregroundStyle(YMColor.muted)
             } else if vm.reviewAlready {
                 // П-23.1: 409 — форму больше не показываем.
@@ -788,6 +933,9 @@ struct OrderDetailView: View {
                 }
                 TextField("Комментарий (необязательно)", text: $reviewText, axis: .vertical)
                     .lineLimit(2...5)
+                    // Отзыв сервер хранит до 2000 символов и лишнее режет молча
+                    // (POST api/v1/reviews, api_v1.php).
+                    .ymMaxLength($reviewText, 2000)
                     .font(YMFont.body).foregroundStyle(YMColor.text)
                     .padding(YMSpace.md)
                     .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
@@ -874,24 +1022,34 @@ struct OrderDetailView: View {
                     .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button {
-                Task {
-                    await vm.repeatOrder(cart: cart)
-                    if vm.reorderDone { router.requestedTab = 2 }  // открыть корзину (таб 2; 3 — «Заказы», где мы и так)
+            // А64: бронь жилья «повторить» как заказ нельзя (сервер отвечал
+            // «позиции больше не продаются») — кнопку не показываем.
+            if o.shopType != "lodging" {
+                Button {
+                    Task {
+                        await vm.repeatOrder(cart: cart)
+                        if vm.reorderDone { router.requestedTab = 2 }  // открыть корзину (таб 2; 3 — «Заказы», где мы и так)
+                    }
+                } label: {
+                    HStack {
+                        if vm.reorderInFlight { ProgressView().tint(YMColor.accent) }
+                        else { Label("Повторить заказ", systemImage: "arrow.clockwise") }
+                    }
+                    .font(YMFont.headline).foregroundStyle(YMColor.accent)
+                    .frame(maxWidth: .infinity, minHeight: 54)
+                    .background(YMColor.surface, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous)
+                        .strokeBorder(YMColor.accent.opacity(0.4), lineWidth: 1.5))
                 }
-            } label: {
-                HStack {
-                    if vm.reorderInFlight { ProgressView().tint(YMColor.accent) }
-                    else { Label("Повторить заказ", systemImage: "arrow.clockwise") }
-                }
-                .font(YMFont.headline).foregroundStyle(YMColor.accent)
-                .frame(maxWidth: .infinity, minHeight: 54)
-                .background(YMColor.surface, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous)
-                    .strokeBorder(YMColor.accent.opacity(0.4), lineWidth: 1.5))
+                .buttonStyle(.plain)
+                .disabled(vm.reorderInFlight)
             }
-            .buttonStyle(.plain)
-            .disabled(vm.reorderInFlight)
+
+            if lodgingCancelHint(o) {
+                Text("Отменить бронь можно в разделе «Мои поездки» — там видны условия отмены.")
+                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             // «Отменить заказ» — только для ранних статусов, сдержанный красный контур + подтверждение.
             if canCancel(o) {

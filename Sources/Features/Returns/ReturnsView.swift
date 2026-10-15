@@ -227,9 +227,13 @@ private struct ReturnCard: View {
     let item: ReturnItem
 
     private var title: String {
-        // П-23.3: номер за день — тот, что клиент видит в заказах. Даты заказа
-        // в ответе нет; дата заявки и так стоит внизу карточки.
-        if let n = item.orderDailyNumber, n > 0 { return "Заказ №\(n)" }
+        // П-23.3: номер за день — тот, что клиент видит в заказах.
+        // П-24 №1 (А62): номер за день повторяется каждый день — рядом дата
+        // заказа (order_created_at). Нет поля (старый сервер) — как раньше.
+        if let n = item.orderDailyNumber, n > 0 {
+            guard let d = DateFmt.day(item.orderCreatedAt) else { return "Заказ №\(n)" }
+            return "Заказ №\(n) от \(d)"
+        }
         if let oid = item.orderId, oid > 0 { return "Заказ №\(oid)" }
         return "Возврат №\(item.id)"
     }
@@ -302,6 +306,17 @@ struct ReturnCreateView: View {
         let r = (eligibility?.reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return r.isEmpty ? "Этот заказ вернуть нельзя" : r
     }
+    /// «1 234 ₽ · 12 окт, 14:05» — дата заказа вместо статуса: здесь все заказы
+    /// выполнены («Выполнен» у каждого), а номер за день повторяется, и без
+    /// даты два «Заказа №3» было не различить.
+    private func orderSubtitle(_ o: Order) -> String {
+        let money = Money.format(Money.parse(o.total))
+        guard let raw = o.createdAt, !raw.isEmpty else {
+            return money + " · " + OrderStatus.label(o.status, shopType: o.shopType)
+        }
+        // Как в карточке заказа — в поясе телефона и со временем.
+        return money + " · " + DateFmt.short(raw)
+    }
 
     var body: some View {
         NavigationStack {
@@ -324,7 +339,9 @@ struct ReturnCreateView: View {
         // Пока заявка уходит, окно не закрывается: закрытое смахиванием прятало
         // итог (успех или отказ), а список перечитывался раньше ответа — новой
         // заявки в нём не было, и человек подавал её повторно.
-        .interactiveDismissDisabled(sending)
+        // Набранную причину возврата смахивание шторки тоже не выбрасывает:
+        // закрыть форму с текстом можно только кнопкой «Отмена».
+        .interactiveDismissDisabled(sending || (!done && !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
         .task { await loadOrders() }
     }
 
@@ -351,7 +368,7 @@ struct ReturnCreateView: View {
                             ForEach(eligibleOrders) { o in
                                 SelectableRow(
                                     title: "Заказ №\(o.dailyNumber ?? o.id)" + (o.shopName.map { " · \($0)" } ?? ""),
-                                    subtitle: "\(Money.format(Money.parse(o.total))) · \(OrderStatus.label(o.status, shopType: o.shopType))",
+                                    subtitle: orderSubtitle(o),
                                     selected: selectedOrderId == o.id
                                 ) { Haptics.light(); selectedOrderId = o.id; Task { await checkEligibility(o.id) } }
                             }
@@ -391,6 +408,9 @@ struct ReturnCreateView: View {
                 section(title: "Комментарий (необязательно)") {
                     TextField("Опишите проблему…", text: $comment, axis: .vertical)
                         .lineLimit(3...6)
+                        // Причину сервер хранит до 500 символов и лишнее режет
+                        // молча (POST api/v1/returns, reason_text в api_v1.php).
+                        .ymMaxLength($comment, 500)
                         .font(YMFont.body)
                         .padding(YMSpace.md)
                         .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
@@ -412,6 +432,9 @@ struct ReturnCreateView: View {
             .padding(.horizontal, YMSpace.xl)
             .padding(.vertical, YMSpace.lg)
         }
+        // Комментарий многострочный: «Ввод» — новая строка, клавиатуру было не
+        // убрать, и она закрывала «Отправить заявку». Теперь жестом прокрутки.
+        .scrollDismissesKeyboard(.interactively)
     }
 
     // ── Успех ──

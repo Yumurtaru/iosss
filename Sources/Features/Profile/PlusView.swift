@@ -299,7 +299,8 @@ struct PlusView: View {
     }
 
     private func formatCashback(_ v: Double) -> String {
-        v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+        // Дробный процент — с запятой («+1,5%»), а не «+1.5%».
+        v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v).replacingOccurrences(of: ".", with: ",")
     }
 }
 

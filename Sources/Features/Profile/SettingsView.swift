@@ -16,10 +16,17 @@
 //
 
 import SwiftUI
+import UIKit
+import UserNotifications
 
 struct SettingsView: View {
     @EnvironmentObject private var session: Session
     @AppStorage(AppStorageKey.theme) private var theme = "system"
+    @Environment(\.scenePhase) private var scenePhase
+    /// Разрешение iOS на уведомления (nil — ещё не узнали). Окно разрешения
+    /// всплывает при первом запуске, и отказ там раньше был навсегда: в
+    /// приложении не было ни признака, ни пути включить статусы заказов.
+    @State private var notifStatus: UNAuthorizationStatus?
 
     private var appVersion: String {
         let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
@@ -31,6 +38,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: YMSpace.lg) {
                 appearanceSection
+                notificationsSection
                 citySection
                 aboutSection
             }
@@ -41,6 +49,58 @@ struct SettingsView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle("Настройки")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { refreshNotifStatus() }
+        // Вернулись из настроек iPhone (или закрыли системное окно) — статус обновляем.
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { refreshNotifStatus() }
+        }
+    }
+
+    // ── Уведомления (разрешение iOS) ──
+    @ViewBuilder
+    private var notificationsSection: some View {
+        if let st = notifStatus {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionTitle("Уведомления")
+                Text(notifText(st))
+                    .font(YMFont.caption)
+                    .foregroundStyle(st == .denied ? YMColor.statusCancel : YMColor.muted)
+                if st == .denied {
+                    Button("Открыть настройки iPhone") { openSystemSettings() }
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .foregroundStyle(YMColor.accent)
+                } else if st == .notDetermined {
+                    Button("Включить уведомления") { Push.shared.requestAuthorization() }
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .foregroundStyle(YMColor.accent)
+                }
+            }
+            .padding(14)
+            .settingsCard()
+        }
+    }
+
+    private func notifText(_ st: UNAuthorizationStatus) -> String {
+        switch st {
+        case .denied:
+            return "Выключены — статус заказа и ответы заведения не придут. Включить можно в настройках iPhone."
+        case .notDetermined:
+            return "Разрешите уведомления, чтобы сразу узнавать о статусе заказа и ответах заведения."
+        default:
+            return "Включены — статус заказа и ответы заведения придут сразу."
+        }
+    }
+
+    private func refreshNotifStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { s in
+            let st = s.authorizationStatus
+            DispatchQueue.main.async { notifStatus = st }
+        }
+    }
+
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 
     // ── Оформление ──

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import UIKit
+import UserNotifications
 
 
 final class Session: ObservableObject {
@@ -92,6 +93,11 @@ final class Session: ObservableObject {
                 // Комментарий к заказу и номер стола прежнего человека (черновик
                 // оформления) не должны подставиться следующему.
                 CheckoutDraft.clear()
+                // Паритет с Android (App.kt, onLoggedOut): уведомления прежнего
+                // аккаунта («заказ готов», текст переписки) оставались на экране
+                // блокировки и в центре уведомлений — их читал следующий человек.
+                UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+                UIApplication.shared.applicationIconBadgeNumber = 0
             }
         }
     }

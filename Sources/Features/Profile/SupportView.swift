@@ -68,6 +68,9 @@ private let supportPhone = "+7 800 000 00 00"
 
 struct SupportView: View {
     @Environment(\.openURL) private var openURL
+    /// Поддержка открыта и гостю (меню профиля без входа), а жалоба на сервере
+    /// только для вошедших (POST api/v1/complaints — ['auth']).
+    @ObservedObject private var session = Session.shared
 
     @State private var reason: SupportReason = supportReasons.first!
     @State private var reasonMenuOpen = false
@@ -87,6 +90,9 @@ struct SupportView: View {
             .padding(.top, YMSpace.lg)
             .padding(.bottom, YMSpace.xxxl)
         }
+        // Описание жалобы — многострочное: «Ввод» даёт новую строку, клавиатуру
+        // было не убрать, и она закрывала «Отправить». Теперь жестом прокрутки.
+        .scrollDismissesKeyboard(.interactively)
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle("Поддержка")
         .navigationBarTitleDisplayMode(.inline)
@@ -151,7 +157,25 @@ struct SupportView: View {
     }
 
     // ── Жалоба ──
+    @ViewBuilder
     private var complaintSection: some View {
+        if session.isLoggedIn {
+            complaintForm
+        } else {
+            // Гость заполнял жалобу целиком и получал красное «Войдите, чтобы
+            // продолжить» без кнопки входа. Теперь сразу вход, после него —
+            // назад сюда же (AuthView закрывается сам).
+            VStack(alignment: .leading, spacing: YMSpace.md) {
+                sectionTitle("Пожаловаться")
+                Text("Войдите, чтобы отправить жалобу, — ответ придёт на контакты из профиля. Без входа можно написать или позвонить выше.")
+                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                NavigationLink { AuthView() } label: { Text("Войти") }
+                    .buttonStyle(YMPrimaryButtonStyle())
+            }
+        }
+    }
+
+    private var complaintForm: some View {
         VStack(alignment: .leading, spacing: YMSpace.md) {
             sectionTitle("Пожаловаться")
             Text("Опишите проблему — мы разберёмся и вернёмся с решением.")
@@ -200,7 +224,12 @@ struct SupportView: View {
                                 .allowsHitTesting(false)
                         }
                     }
-                    .onChange(of: text) { _ in if status?.ok == false { status = nil } }
+                    // Паритет с Android: сервер молча обрезает жалобу до 5000 символов
+                    // (POST api/v1/complaints) — хвост терялся без следа.
+                    .onChange(of: text) { v in
+                        if v.count > 5000 { text = String(v.prefix(5000)) }
+                        if status?.ok == false { status = nil }
+                    }
             }
 
             Button(action: submit) {

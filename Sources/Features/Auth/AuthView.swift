@@ -63,6 +63,12 @@ enum AuthLastUser {
         guard let uid, uid > 0, UserDefaults.standard.integer(forKey: key) == 0 else { return }
         UserDefaults.standard.set(uid, forKey: key)
     }
+    /// Профиль — точный источник: кто сейчас вошёл. Иначе после выхода по 401
+    /// и входа другого человека без id в ответе чужим считались бы его же пуши.
+    static func confirm(_ uid: Int?) {
+        guard let uid, uid > 0 else { return }
+        UserDefaults.standard.set(uid, forKey: key)
+    }
     /// Вызывать до signIn. Другой id — чистим локальные данные прежнего.
     @MainActor static func switchTo(_ uid: Int?) {
         guard let uid, uid > 0 else { return }
@@ -129,7 +135,14 @@ struct AuthView: View {
         return "+" + d
     }
 
-    private var phoneValid: Bool { (10...11).contains(phone.filter(\.isNumber).count) }
+    /// Паритет с Android и сервером (isValidPhone: 7XXXXXXXXXX после нормализации):
+    /// 10 цифр или 11, начиная с 7/8. Раньше подходили любые 10–11 цифр
+    /// («9…» с лишней цифрой), и сервер отвечал «Некорректный телефон».
+    private var phoneValid: Bool {
+        let d = phone.filter { $0.isASCII && $0.isNumber }
+        if d.count == 10 { return true }
+        return d.count == 11 && (d.hasPrefix("7") || d.hasPrefix("8"))
+    }
     private var emailValid: Bool {
         let e = regEmail.trimmingCharacters(in: .whitespaces)
         return e.contains("@") && (e.split(separator: "@").last?.contains(".") ?? false) && !e.hasSuffix("@")
@@ -139,6 +152,19 @@ struct AuthView: View {
         name.trimmingCharacters(in: .whitespaces).count >= 2 && phoneValid && emailValid && password.count >= 6
     }
     private var codeValid: Bool { code.filter(\.isNumber).count == 6 }
+
+    /// Почему «Получить код» ещё серая. Раньше кнопка молча не нажималась
+    /// (пароль из 5 символов, телефон с лишней цифрой) — «кнопка не работает».
+    /// Показываем, только когда человек уже начал заполнять форму.
+    private var registerHint: String? {
+        guard step == .register, !registerValid else { return nil }
+        let started = !name.isEmpty || !phone.isEmpty || !regEmail.isEmpty || !password.isEmpty
+        guard started else { return nil }
+        if name.trimmingCharacters(in: .whitespaces).count < 2 { return "Укажите имя — минимум 2 буквы" }
+        if !phoneValid { return "Номер в формате +7 900 000-00-00" }
+        if !emailValid { return "Проверьте email — на него придёт код" }
+        return "Пароль — минимум 6 символов"
+    }
 
     private var actionEnabled: Bool {
         guard !busy else { return false }
@@ -181,6 +207,11 @@ struct AuthView: View {
                             .font(YMFont.subhead)
                             .foregroundStyle(YMColor.muted)
                             .padding(.top, YMSpace.sm)
+                    } else if let hint = registerHint {
+                        Text(hint)
+                            .font(YMFont.subhead)
+                            .foregroundStyle(YMColor.muted)
+                            .padding(.top, YMSpace.sm)
                     }
 
                     Button(action: act) {
@@ -199,6 +230,9 @@ struct AuthView: View {
                 .padding(.horizontal, YMSpace.xl)
                 .padding(.bottom, YMSpace.xxxl)
             }
+            // У цифровой клавиатуры (телефон, код) нет «Готово»: на маленьком
+            // экране она закрывала кнопку. Убирается жестом прокрутки.
+            .scrollDismissesKeyboard(.interactively)
         }
         .animation(YMMotion.adaptive(YMMotion.spring, reduceMotion: reduceMotion), value: step)
     }

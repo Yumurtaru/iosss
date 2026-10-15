@@ -72,8 +72,11 @@ final class HomeViewModel: ObservableObject {
         if let cid = session.cityId { q["city_id"] = String(cid) }
         // Пока шёл запрос, сменился аккаунт — подборка прежнего человека не нужна.
         let t = session.token
+        let c = session.cityId
         let resp: RecommendationsResp? = try? await API.shared.get("api/v1/recommendations", query: q)
-        guard session.token == t else { return }
+        // Сменили город, пока шёл запрос: опоздавший ответ клал подборку
+        // прежнего города под новый — товары, которые сюда не возят.
+        guard session.token == t, session.cityId == c else { return }
         recommendations = resp?.popular ?? []
     }
 
@@ -400,6 +403,8 @@ struct HomeView: View {
                                 rating: nil,
                                 photoURL: API.imageURL(item.photo),
                                 tone: idx,
+                                // Паритет с Android: цена в карточке подборки.
+                                priceText: Money.format(Money.dec(item.price)),
                                 isFav: favBinding(product: item.id)
                             ) {
                                 go(.product(item.id))   // → карточка товара
@@ -424,6 +429,8 @@ struct HomeView: View {
                                 rating: nil,
                                 photoURL: API.imageURL(item.photo),
                                 tone: idx,
+                                // Паритет с Android: цена в карточке подборки.
+                                priceText: Money.format(Money.dec(item.price)),
                                 isFav: favBinding(product: item.id)
                             ) {
                                 go(.product(item.id))   // → карточка товара
@@ -469,6 +476,10 @@ struct HomeView: View {
                 .padding(.horizontal, YMSpace.xl)
                 .padding(.top, 4)
                 .onAppear { appeared = true }
+            } else if let e = vm.error, !vm.popular.isEmpty {
+                // «Популярное» пришло, а список заведений — нет (таймаут на
+                // мобильной сети): под каруселью было пусто, без ошибки и «Повторить».
+                errorState(e)
             }
 
             if vm.popular.isEmpty && vm.shops.isEmpty {
@@ -563,6 +574,15 @@ struct HomeView: View {
                 .font(YMFont.callout)
                 .foregroundStyle(YMColor.muted)
                 .multilineTextAlignment(.center)
+            // Пустой город/раздел был тупиком: только текст, без действия.
+            // Город — та же шторка, что в шапке.
+            Button(session.cityId == nil ? "Выбрать город" : "Выбрать другой город") {
+                Haptics.selection()
+                showCitySheet = true
+            }
+            .buttonStyle(YMSecondaryButtonStyle())
+            .frame(maxWidth: 240)
+            .padding(.top, YMSpace.sm)
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, YMSpace.xxxl)

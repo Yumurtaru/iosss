@@ -49,8 +49,18 @@ enum LodgingDate {
     /// «2026-11-09» → «9 ноября». Для человека даты только так.
     static func human(_ iso: String?) -> String {
         guard let iso = iso, let d = api.date(from: iso) else { return iso ?? "" }
+        // Дата не этого года — с годом: прошлогодняя поездка «9 ноября — 12 ноября»
+        // в «Моих поездках» читалась как нынешняя, январская бронь — тоже.
+        if iso.prefix(4) != today.prefix(4) { return humanYearOut.string(from: d) }
         return humanOut.string(from: d)
     }
+    private static let humanYearOut: DateFormatter = {
+        let out = DateFormatter()
+        out.locale = Locale(identifier: "ru_RU")
+        out.timeZone = TimeZone(identifier: "UTC")
+        out.dateFormat = "d MMMM yyyy"
+        return out
+    }()
     /// Один форматтер на приложение: раньше новый создавался на каждый вызов —
     /// по два на каждую строку «Моих поездок» и на каждое касание в календаре.
     private static let humanOut: DateFormatter = {
@@ -187,10 +197,13 @@ enum LodgingText {
     }
 
     static func longTerm(_ lt: LodgingLongTerm) -> String {
-        money(lt.priceMonthValue) + " в месяц, минимум "
-            + LodgingDate.plural(lt.minMonthsValue, "месяц", "месяца", "месяцев") + ". "
-            + (lt.utilitiesOn ? "Коммунальные включены." : "Коммунальные отдельно.")
-            + (lt.utilitiesNote.map { " " + $0 } ?? "")
+        // Цены за месяц нет (0) — «по договорённости», а не «0 ₽ в месяц».
+        // Части — отдельными let: длинная цепочка «+» тяжела для проверки типов Xcode.
+        let price: String = lt.priceMonthValue > 0 ? money(lt.priceMonthValue) + " в месяц" : "Цена по договорённости"
+        let months: String = LodgingDate.plural(lt.minMonthsValue, "месяц", "месяца", "месяцев")
+        let util: String = lt.utilitiesOn ? "Коммунальные включены." : "Коммунальные отдельно."
+        let note: String = lt.utilitiesNote.map { " " + $0 } ?? ""
+        return price + ", минимум " + months + ". " + util + note
     }
 
     // ── Итог брони и поездки ──

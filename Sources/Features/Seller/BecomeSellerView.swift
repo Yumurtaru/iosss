@@ -172,14 +172,34 @@ private struct ApplyOrgFormView: View {
 
     private var trimmedEmail: String { email.trimmingCharacters(in: .whitespacesAndNewlines) }
 
+    /// Паритет с Android и сервером (organizations/apply: isValidPhone):
+    /// российский номер — 10 цифр или 11 с 7/8. Раньше подходили любые 10+
+    /// цифр, и сервер отвечал «Укажите корректный номер телефона».
+    private var phoneOk: Bool {
+        let d = phone.filter { $0.isASCII && $0.isNumber }
+        if d.count == 10 { return true }
+        return d.count == 11 && (d.hasPrefix("7") || d.hasPrefix("8"))
+    }
+
     private var valid: Bool {
         orgName.trimmingCharacters(in: .whitespaces).count >= 2
             && fullName.trimmingCharacters(in: .whitespaces).count >= 2
-            && phone.filter({ $0.isNumber }).count >= 10
+            && phoneOk
             // Почта необязательна (нужна только новому владельцу), но если
             // введена — похожа на адрес; после письма нужен код.
             && (trimmedEmail.isEmpty || trimmedEmail.contains("@"))
             && (!needCode || !emailCode.trimmingCharacters(in: .whitespaces).isEmpty)
+    }
+
+    /// Почему «Отправить заявку» серая — то же правило, что в valid. Раньше
+    /// кнопка просто не нажималась (например, в телефоне 9 цифр), без слова.
+    private var invalidReason: String? {
+        if orgName.trimmingCharacters(in: .whitespaces).count < 2 { return "Укажите название организации" }
+        if fullName.trimmingCharacters(in: .whitespaces).count < 2 { return "Укажите ФИО" }
+        if !phoneOk { return "Номер в формате +7 900 000-00-00" }
+        if !trimmedEmail.isEmpty && !trimmedEmail.contains("@") { return "Проверьте email" }
+        if needCode && emailCode.trimmingCharacters(in: .whitespaces).isEmpty { return "Введите код из письма" }
+        return nil
     }
 
     var body: some View {
@@ -247,7 +267,13 @@ private struct ApplyOrgFormView: View {
                     }
                     .disabled(!valid || sending)
                 } footer: {
-                    Text("Заявка уйдёт на модерацию. После одобрения мы свяжемся с вами по телефону.")
+                    VStack(alignment: .leading, spacing: 4) {
+                        // Причина серой кнопки — сразу под ней.
+                        if !sending, let why = invalidReason {
+                            Text(why).foregroundStyle(YMColor.accent)
+                        }
+                        Text("Заявка уйдёт на модерацию. После одобрения мы свяжемся с вами по телефону.")
+                    }
                 }
             }
             .navigationTitle("Заявка")
@@ -312,7 +338,14 @@ private struct ApplyOrgFormView: View {
                     let api = error as? APIError
                     let text = (error as? LocalizedError)?.errorDescription ?? "Не удалось отправить заявку"
                     // П-23.5: письмо с кодом ушло — это следующий шаг, а не ошибка.
-                    if api?.rejectStatus == 422, api?.rejectDetails?["need"] == "email_code" {
+                    if api?.rejectStatus == 422, api?.rejectDetails?["need"] == "email_code",
+                       sendBody.emailCode != nil {
+                        // Код отправляли, а сервер снова ответил need=email_code — это
+                        // «Неверный или просроченный код» (api_v1.php:1054), а не новое
+                        // письмо. Раньше поле кода стиралось и писалось «Мы отправили код».
+                        info = nil
+                        self.error = text
+                    } else if api?.rejectStatus == 422, api?.rejectDetails?["need"] == "email_code" {
                         needCode = true
                         emailCode = ""
                         info = "Мы отправили код на \(em). Введите его и нажмите «Отправить заявку»."

@@ -42,6 +42,22 @@ struct OrgCard: View {
         return t
     }
 
+    /// Паритет с Android: delivery_time сервер не отдаёт, время приготовления
+    /// приходит в avg_cook_time — бейдж «N мин» на фото, как на Android.
+    private var timeText: String? {
+        if let t = shop.deliveryTime, !t.isEmpty { return t }
+        guard let m = shop.avgCookTime, m > 0 else { return nil }
+        return "\(m) мин"
+    }
+
+    /// Паритет с Android: category в списках сервер не отдаёт — под названием
+    /// показываем адрес заведения (так делает Android).
+    private var subtitleText: String? {
+        if let c = shop.category, !c.isEmpty { return c }
+        if let a = shop.address, !a.isEmpty { return a }
+        return nil
+    }
+
     var body: some View {
         Button(action: { Haptics.light(); onTap() }) {
             VStack(alignment: .leading, spacing: 0) {
@@ -62,7 +78,7 @@ struct OrgCard: View {
                         HeartButton(isFav: $isFav, size: 32, favColor: YMColor.statusCancel).padding(11)
                     }
                     .overlay(alignment: .bottomTrailing) {
-                        if let t = shop.deliveryTime, !t.isEmpty {
+                        if let t = timeText {
                             BlurInfoBadge(text: t).padding(12)
                         }
                     }
@@ -96,7 +112,7 @@ struct OrgCard: View {
                             .font(.system(size: 13.5, weight: .bold))
                         }
                     }
-                    if let cuisine = shop.category, !cuisine.isEmpty {
+                    if let cuisine = subtitleText {
                         Text(cuisine)
                             .font(.system(size: 13))
                             .foregroundStyle(YMColor.muted)
@@ -140,13 +156,16 @@ struct PopularCard: View {
     var rating: Double? = nil
     var photoURL: URL? = nil
     var tone: Int = 0
+    /// Паритет с Android: цена товара под названием (золотом). nil — без строки.
+    var priceText: String? = nil
     @Binding var isFav: Bool
     var onTap: () -> Void = {}
 
     var body: some View {
         Button(action: { Haptics.light(); onTap() }) {
             VStack(alignment: .leading, spacing: 8) {
-                PhotoPlaceholder(url: photoURL, label: "ФОТО · БЛЮДО", radius: YMRadius.card, tone: tone)
+                // Подпись видна без фото: «· БЛЮДО» из макета неверно у товаров магазина.
+                PhotoPlaceholder(url: photoURL, label: "ФОТО", radius: YMRadius.card, tone: tone)
                     .frame(width: 146, height: 104)
                     .overlay(alignment: .topLeading) {
                         if let r = rating, r > 0 {
@@ -167,6 +186,12 @@ struct PopularCard: View {
                         Text(tag)
                             .font(.system(size: 12))
                             .foregroundStyle(YMColor.muted)
+                            .lineLimit(1)
+                    }
+                    if let priceText, !priceText.isEmpty {
+                        Text(priceText)
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(YMColor.accent)
                             .lineLimit(1)
                     }
                 }

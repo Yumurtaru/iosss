@@ -73,7 +73,8 @@ struct CartConflictDialog: View {
                 .multilineTextAlignment(.center)
                 .padding(.top, YMSpace.lg)
 
-            (Text("В корзине уже есть блюда из ")
+            // «товары», а не «блюда»: диалог общий для кафе, магазинов и аптек.
+            (Text("В корзине уже есть товары из ")
                 + Text(currentName).foregroundColor(YMColor.text).bold()
                 + Text(". Заказ можно оформить только из одного заведения. Очистить корзину и добавить товар из ")
                 + Text(newName).foregroundColor(YMColor.text).bold()

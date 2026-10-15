@@ -107,6 +107,11 @@ struct ProfileView: View {
                         deleteAccountButton
                     } else {
                         loggedOut
+                        // Паритет с Android: гостю доступны разделы, которым вход не
+                        // нужен (оформление, подарочная карта, вакансии, избранное,
+                        // настройки, поддержка). Раньше профиль гостя был тупиком.
+                        themeSwitcher
+                        guestMenu
                     }
                 }
                 .padding(.bottom, YMSpace.xxxl)
@@ -123,6 +128,10 @@ struct ProfileView: View {
         // менялась на экране профиля сразу, без переоткрытия.
         .preferredColorScheme(themeScheme)
         .task { if session.isLoggedIn { await load() } }
+        // Push/строка ленты «кошелёк пополнен», «ответ поддержки»: раньше
+        // открывался только корень профиля — нужный раздел искали сами.
+        .onAppear { consumePushIntent() }
+        .onReceive(NotificationCenter.default.publisher(for: ProfilePushIntent.note)) { _ in consumePushIntent() }
         .onChange(of: session.isLoggedIn) { logged in
             if logged { Task { await load() } } else {
                 profile = nil
@@ -205,6 +214,19 @@ struct ProfileView: View {
                 Text(avatarLetter)
                     .font(.system(size: 28, weight: .heavy))
                     .foregroundStyle(YMPalette.goldInk)
+                // Паритет с Android: фото профиля (поле avatar, путь от корня сайта).
+                // Не загрузилось или его нет — остаётся буква на золотом круге.
+                if let url = API.imageURL(profile?.avatar) {
+                    CachedAsyncImage(url: url) { phase in
+                        if let img = phase.image {
+                            img.resizable().scaledToFill()
+                        } else {
+                            Color.clear
+                        }
+                    }
+                    .frame(width: 72, height: 72)
+                    .clipShape(Circle())
+                }
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(displayName)
@@ -369,6 +391,25 @@ struct ProfileView: View {
         .buttonStyle(.plain)
     }
 
+    // ── Меню гостя: разделы без входа (как в Android) ──
+    private var guestMenu: some View {
+        VStack(spacing: 0) {
+            menuRow(icon: "🎁", label: "Подарочная карта") { path.append(ProfileRoute.gift) }
+            divider
+            menuRow(icon: "💼", label: "Вакансии") { path.append(ProfileRoute.jobs) }
+            divider
+            menuRow(icon: "❤️", label: "Избранное") { path.append(ProfileRoute.favorites) }
+            divider
+            menuRow(icon: "⚙️", label: "Настройки") { path.append(ProfileRoute.settings) }
+            divider
+            menuRow(icon: "🛟", label: "Поддержка") { path.append(ProfileRoute.support) }
+        }
+        .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+        .padding(.horizontal, YMSpace.xl)
+        .padding(.top, YMSpace.lg)
+    }
+
     // ── Удаление аккаунта ──
     private var deleteAccountButton: some View {
         Button { if !deleting { showDeleteConfirm = true } } label: {
@@ -396,7 +437,7 @@ struct ProfileView: View {
             .padding(.top, YMSpace.md)
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 80)
+        .padding(.top, 40)
     }
 
     // ── Actions ──
@@ -466,7 +507,9 @@ struct ProfileView: View {
         async let profileReq: Profile? = try? await API.shared.get("api/v1/profile")
         // Записи на услугу приходят в этом же списке (на сервере запись — это заказ),
         // но считаются отдельно, в счётчике «записи». Иначе один визит удваивал бы статистику.
-        async let ordersReq: [Order]? = try? await API.shared.list("api/v1/orders", query: query)
+        // Страница с meta: П-25 №2 (А62) — meta.total считает ВСЕ заказы, а не
+        // первые 100 (у постоянного клиента счётчик застревал на 100).
+        async let ordersReq: Page<Order>? = try? await API.shared.page("api/v1/orders", query: query)
         async let shopsReq: [Shop]? = try? await API.shared.list("api/v1/favorites")
         async let productsReq: [Product]? = try? await API.shared.list("api/v1/product-favorites")
         // П-21.3: записи постранично — счётчик по всем страницам, как в «Мои записи».
@@ -480,27 +523,52 @@ struct ProfileView: View {
         let loaded = await profileReq
         if let p = loaded, session.isLoggedIn {
             profile = p
-            AuthLastUser.seed(p.id)
+            AuthLastUser.confirm(p.id)
         }
         profileFailed = loaded == nil
-        if let orders = await ordersReq {
-            ordersCount = orders.filter { $0.isAppointment != true }.count
-        }
+        let ordersPage = await ordersReq
         let favShops = await shopsReq
         let favProducts = await productsReq
         if let favShops, let favProducts {
             favCount = favShops.count + favProducts.count
         }
-        if let appts = await apptsReq {
+        let appts = await apptsReq
+        if let appts {
             bookingsCount = appts.count
+        }
+        if let ordersPage {
+            ordersCount = Self.ordersTotal(ordersPage, appointments: appts?.count)
         }
         let notifPage = await notifReq
         unreadNotifs = notifPage.map { p in p.meta?.unread ?? p.items.filter { !$0.read }.count } ?? 0
     }
 
+    /// Счётчик «заказы» без записей на услугу. Вся история на одной странице —
+    /// считаем точно, как раньше. Страниц больше — meta.total (в нём и записи,
+    /// отдельного счётчика сервер не даёт) минус записи; не меньше, чем видно
+    /// на первой странице. Старый сервер без total — по странице.
+    private static func ordersTotal(_ page: Page<Order>, appointments: Int?) -> Int {
+        let shown = page.items.filter { $0.isAppointment != true }.count
+        guard page.hasMore, let total = page.meta?.total else { return shown }
+        let onPage = page.items.count - shown
+        let appts = max(appointments ?? onPage, onPage)
+        return max(total - appts, shown)
+    }
+
     private func loadUnread() async {
         guard let p: Page<AppNotification> = try? await API.shared.page("api/v1/notifications") else { return }
         unreadNotifs = p.meta?.unread ?? p.items.filter { !$0.read }.count
+    }
+
+    /// Раздел, о котором просит push или строка ленты уведомлений (см. ProfilePushIntent).
+    private func consumePushIntent() {
+        guard let screen = ProfilePushIntent.take(), session.isLoggedIn else { return }
+        switch screen {
+        case .wallet:        path.append(ProfileRoute.wallet)
+        case .support:       path.append(ProfileRoute.support)
+        case .bonuses:       path.append(ProfileRoute.bonuses)
+        case .notifications: path.append(ProfileRoute.notifications)
+        }
     }
 
     private func pluralOrders(_ n: Int) -> String {
@@ -514,6 +582,28 @@ struct ProfileView: View {
         if m10 == 1 && m100 != 11 { return "запись" }
         if (2...4).contains(m10) && !(12...14).contains(m100) { return "записи" }
         return "записей"
+    }
+}
+
+/// Какой раздел профиля открыть по push или из ленты уведомлений.
+/// Ставит вызывающий (AppDelegate рядом с profileOpen = true, лента — прямо
+/// из профиля), забирает ProfileView: при появлении и по уведомлению note.
+/// Старше 15 с — не исполняется: иначе застрявшая просьба сработала бы
+/// позже, когда человек сам откроет профиль.
+enum ProfilePushIntent {
+    enum Screen { case wallet, support, bonuses, notifications }
+    static let note = Notification.Name("ym.profilePushIntent")
+    private static var pending: (screen: Screen, at: Date)?
+
+    static func open(_ screen: Screen) {
+        pending = (screen, Date())
+        NotificationCenter.default.post(name: note, object: nil)
+    }
+
+    static func take() -> Screen? {
+        guard let p = pending else { return nil }
+        pending = nil
+        return Date().timeIntervalSince(p.at) < 15 ? p.screen : nil
     }
 }
 

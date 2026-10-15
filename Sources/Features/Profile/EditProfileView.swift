@@ -78,9 +78,16 @@ struct EditProfileView: View {
     }
     // Пустой телефон — допустим (вход через соцсеть, старый аккаунт): раньше
     // без телефона нельзя было сохранить даже имя. Пустое поле на сервер не уходит.
+    // Паритет с Android и сервером (change/request: isValidPhone): российский
+    // номер — 10 цифр или 11 с 7/8. Раньше подходили любые 10–11 цифр, и код
+    // уходил на почту зря — сервер потом отвечал «Некорректный телефон».
     private var phoneValid: Bool {
-        let d = phone.filter(\.isNumber).count
-        return d == 0 || (10...11).contains(d)
+        let d = phone.filter { $0.isASCII && $0.isNumber }
+        // Номер не меняли — не проверяем (как Android): старый номер в профиле,
+        // не подходящий под правило, не должен запрещать сменить одно имя.
+        let od = origPhone.filter { $0.isASCII && $0.isNumber }
+        if d.isEmpty || d == od || d.count == 10 { return true }
+        return d.count == 11 && (d.hasPrefix("7") || d.hasPrefix("8"))
     }
     private var passwordValid: Bool { password.isEmpty || password.count >= 6 }  // пустой = не меняем
     private var canSave: Bool { !trimmedName.isEmpty && emailValid && phoneValid && passwordValid && !saving }
@@ -95,6 +102,13 @@ struct EditProfileView: View {
                 } else {
                     field(title: "Имя", placeholder: "Ваше имя", text: $name,
                           contentType: .name, keyboard: .default, autocap: .words)
+                    // Пустое имя гасило «Сохранить» без объяснения (у почты,
+                    // телефона и пароля подсказки были, у имени — нет).
+                    if trimmedName.isEmpty {
+                        Text("Укажите имя")
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                            .padding(.top, -8).padding(.leading, 4)
+                    }
 
                     field(title: "Email", placeholder: "email@example.com", text: $email,
                           contentType: .emailAddress, keyboard: .emailAddress, autocap: .never)
@@ -138,6 +152,9 @@ struct EditProfileView: View {
             .padding(.top, YMSpace.lg)
             .padding(.bottom, YMSpace.xxxl)
         }
+        // У клавиатуры телефона нет «Готово» — она закрывала «Сохранить».
+        // Убирается жестом прокрутки.
+        .scrollDismissesKeyboard(.interactively)
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle("Редактировать профиль")
         .navigationBarTitleDisplayMode(.inline)
@@ -419,9 +436,16 @@ private struct SupportComposeSheet: View {
                         .padding(6)
                         .scrollContentBackground(.hidden)
                         .background(YMColor.surface2, in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
+                        // Паритет с Android: сервер молча обрезает обращение до 4000
+                        // символов (POST api/v1/support) — ограничиваем прямо в поле.
+                        .onChange(of: message) { v in if v.count > 4000 { message = String(v.prefix(4000)) } }
                 }
                 if let error {
                     Text(error).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                } else if !canSend && !sending && !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Сообщение короче 5 знаков гасило «Отправить» без объяснения.
+                    Text("Напишите хотя бы 5 символов")
+                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
                 }
                 Button(action: send) {
                     if sending { ProgressView().tint(YMColor.onAccent) } else { Text("Отправить") }

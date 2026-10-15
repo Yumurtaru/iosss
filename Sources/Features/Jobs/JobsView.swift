@@ -85,9 +85,10 @@ struct JobsView: View {
                 JobsErrorState { Task { await load() } }
 
             case .empty:
+                // На «вы», как во всём приложении (было «Загляни позже»).
                 JobsEmptyState(emoji: "💼",
                                title: "Вакансий нет",
-                               hint: "Сейчас открытых вакансий нет. Загляни позже.")
+                               hint: "Сейчас открытых вакансий нет. Загляните позже.")
 
             case .content:
                 LazyVStack(spacing: YMSpace.md) {
@@ -392,12 +393,18 @@ private struct ApplyFormView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Ваши контакты") {
+                Section {
                     TextField("Имя", text: $name)
                         .textContentType(.name)
                     TextField("Телефон", text: $phone)
                         .textContentType(.telephoneNumber)
                         .keyboardType(.phonePad)
+                } header: {
+                    Text("Ваши контакты")
+                } footer: {
+                    // В профиле нет телефона — поле пустое, а «Откликнуться»
+                    // серая без объяснения. Говорим, чего не хватает.
+                    if !valid { Text("Укажите имя и телефон — без них отклик не отправить") }
                 }
                 if let error {
                     Text(error).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
@@ -413,6 +420,8 @@ private struct ApplyFormView: View {
                     .disabled(!valid || sending)
                 }
             }
+            // У клавиатуры телефона нет «Готово» — убирается жестом прокрутки.
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Отклик на вакансию")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(sending) } }
@@ -490,7 +499,8 @@ struct JobsErrorState: View {
         VStack(spacing: YMSpace.md) {
             Text("⚠️").font(.system(size: 44))
             Text("Не удалось загрузить").font(YMFont.title3).foregroundStyle(YMColor.text)
-            Text("Проверь соединение и попробуй снова.")
+            // На «вы», как во всём приложении.
+            Text("Проверьте соединение и попробуйте снова.")
                 .font(YMFont.callout).foregroundStyle(YMColor.muted).multilineTextAlignment(.center)
             Button { Haptics.light(); onRetry() } label: {
                 Text("Повторить").font(YMFont.headline).foregroundStyle(YMColor.accent)

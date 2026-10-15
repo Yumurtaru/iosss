@@ -211,4 +211,14 @@ struct YMPrimaryButtonStyle: ButtonStyle {
 
 extension View {
     func ymCard(radius: CGFloat = YMRadius.card) -> some View { modifier(YMCard(radius: radius)) }
+
+    /// Предел длины поля ввода (П-25 №6): лишнее отрезается сразу при вводе.
+    /// Сервер длинное режет молча — человек должен видеть ровно то, что уйдёт.
+    /// Через onChange, а не через Binding: так TextField гарантированно
+    /// перерисовывается обрезанным текстом.
+    func ymMaxLength(_ text: Binding<String>, _ limit: Int) -> some View {
+        onChange(of: text.wrappedValue) { v in
+            if v.count > limit { text.wrappedValue = String(v.prefix(limit)) }
+        }
+    }
 }

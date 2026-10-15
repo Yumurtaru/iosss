@@ -79,7 +79,19 @@ struct AddressesView: View {
         } message: { Text(deleteError ?? "") }
     }
 
-    private var addButton: some View {
+    /// П-25 №6: сервер хранит не больше 50 адресов — на пределе вместо кнопки
+    /// объясняем, что делать (раньше форма заполнялась и падала с ошибкой).
+    @ViewBuilder private var addButton: some View {
+        if items.count >= 50 {
+            Text("Сохранено 50 адресов — это максимум. Удалите ненужный, чтобы добавить новый.")
+                .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            addButtonCore
+        }
+    }
+
+    private var addButtonCore: some View {
         Button { Haptics.light(); showAdd = true } label: {
             HStack(spacing: 10) {
                 Image(systemName: "plus")
@@ -151,6 +163,12 @@ private struct AddressCard: View {
         if l.contains("работ") || l.contains("офис") { return "💼" }
         return "📍"
     }
+    /// Пустое название (поле «Название» стёрли при добавлении — сервер хранит
+    /// пустую строку) давало карточку без заголовка: подставляем «Адрес».
+    private var title: String {
+        let l = (address.label ?? "").trimmingCharacters(in: .whitespaces)
+        return l.isEmpty ? "Адрес" : l
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 13) {
@@ -161,7 +179,7 @@ private struct AddressCard: View {
                             in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text(address.label ?? "Адрес")
+                    Text(title)
                         .font(.system(size: 15, weight: .heavy))
                         .foregroundStyle(YMColor.text)
                     if isMain {
@@ -197,7 +215,7 @@ private struct AddressCard: View {
                 .strokeBorder(isMain ? YMColor.accent : YMColor.hairline, lineWidth: isMain ? 1.5 : 1)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(address.label ?? "Адрес")\(isMain ? ", основной" : ""), \(address.display)")
+        .accessibilityLabel("\(title)\(isMain ? ", основной" : ""), \(address.display)")
     }
 }
 
@@ -228,6 +246,8 @@ private struct AddAddressView: View {
     @State private var intercom = ""
     @State private var lat: Double?
     @State private var lng: Double?
+    /// Адрес выбран из подсказки (даже если у неё нет координат).
+    @State private var picked = false
     @State private var suggestions: [AddrSuggest] = []
     @State private var suggestTask: Task<Void, Never>?
     @State private var suppress = false
@@ -239,13 +259,15 @@ private struct AddAddressView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section { TextField("Название (Дом, Работа…)", text: $label) }
+                // П-25 №6: пределы полей адреса — как хранит сервер (лишнее он режет молча).
+                Section { TextField("Название (Дом, Работа…)", text: $label).ymMaxLength($label, 100) }
                 Section("Адрес") {
                     if !cityName.isEmpty {
                         HStack { Text("Город"); Spacer(); Text(cityName).foregroundStyle(YMColor.muted) }
                     }
                     TextField("Улица и дом", text: $street)
                         .onChange(of: street) { v in scheduleSuggest(v) }
+                        .ymMaxLength($street, 190)
                     ForEach(suggestions) { s in
                         Button { pick(s) } label: {
                             HStack(spacing: 8) {
@@ -255,11 +277,15 @@ private struct AddAddressView: View {
                             }
                         }
                     }
-                    TextField("Дом", text: $house)
+                    TextField("Дом", text: $house).ymMaxLength($house, 30)
                     TextField("Квартира (по желанию)", text: $apartment).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($apartment, 30)
                     TextField("Подъезд (по желанию)", text: $entrance).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($entrance, 20)
                     TextField("Этаж (по желанию)", text: $floor).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($floor, 20)
                     TextField("Домофон (по желанию)", text: $intercom).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($intercom, 50)
                 }
                 if let e = error { Text(e).foregroundStyle(YMColor.statusCancel).font(YMFont.caption) }
                 Section {
@@ -288,7 +314,7 @@ private struct AddAddressView: View {
         // Улицу правят руками — координаты прежней подсказки больше не её.
         // Раньше адрес сохранялся с новой улицей и старой точкой: зона, цена
         // доставки и точка для курьера были от другого адреса.
-        lat = nil; lng = nil
+        lat = nil; lng = nil; picked = false
         let q = text.trimmingCharacters(in: .whitespaces)
         guard q.count >= 3 else { suggestions = []; return }
         let query = cityName.isEmpty ? q : "\(cityName), \(q)"
@@ -310,14 +336,17 @@ private struct AddAddressView: View {
         suppress = newStreet != street
         street = newStreet
         if let h = s.house, !h.isEmpty { house = h }
-        lat = s.lat; lng = s.lng
+        lat = s.lat; lng = s.lng; picked = true
         suggestions = []
     }
     private func save() {
         // Двойное нажатие до перерисовки кнопки сохраняло адрес дважды.
         guard !saving else { return }
         if street.trimmingCharacters(in: .whitespaces).isEmpty { error = "Укажите улицу и дом"; return }
-        if lat == nil || lng == nil { error = "Выберите адрес из подсказок"; return }
+        // Подсказка Dadata бывает без координат (улица, новый дом): раньше её выбор
+        // всё равно отвечал «Выберите адрес из подсказок». Сервер сам находит точку
+        // по тексту адреса, если координат нет (POST profile/addresses, api_v1.php).
+        if !picked && (lat == nil || lng == nil) { error = "Выберите адрес из подсказок"; return }
         saving = true; error = nil
         let body = AddressBody(label: label,
                                city: cityName.isEmpty ? nil : cityName,
@@ -365,9 +394,19 @@ struct BookingItem: Identifiable {
     /// Адрес выездной услуги — куда приедет мастер. У услуги в заведении пусто:
     /// туда, наоборот, едет клиент, и работает кнопка «Маршрут».
     let visitAddress: String?
+    /// А63: комментарий мастеру, который клиент оставил при записи.
+    let clientComment: String?
+    /// Визит уже прошёл (сервер) / начало визита по Москве — после него сервер
+    /// отмену не принимает (П-25 №4).
+    let isPast: Bool
+    let startsAt: Date?
     /// Отменять можно только предстоящую и ещё не начатую запись — те же статусы,
     /// что принимает сервер в POST api/v1/orders/{id}/cancel.
-    var canCancel: Bool { orderId != nil && (status == .confirmed || status == .pending) }
+    var canCancel: Bool {
+        guard orderId != nil, status == .confirmed || status == .pending, !isPast else { return false }
+        guard let s = startsAt else { return true }
+        return s > Date()
+    }
 
     init(from a: Appointment) {
         id = a.id
@@ -376,9 +415,14 @@ struct BookingItem: Identifiable {
         org = a.shop ?? ""
         date = BookingItem.parse(a.date)
         time = String((a.timeStart ?? "").prefix(5))
+        let note = (a.clientComment ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        clientComment = note.isEmpty ? nil : note
+        isPast = a.isPast == true
+        startsAt = BookingItem.start(a.date, a.timeStart)
         switch (a.status ?? "").lowercased() {
         case "cancelled", "canceled": status = .cancelled
         case "accepted", "confirmed": status = .confirmed
+        case "new", "pending":        status = .pending
         // Запись — это заказ и проходит те же статусы. «В работе» (preparing) и
         // «Выполнена» (ready) раньше показывались как «Ожидает» с кнопкой
         // «Отменить», которую сервер отклоняет (как в Android-клиенте).
@@ -387,7 +431,9 @@ struct BookingItem: Identifiable {
         // Состоявшийся визит раньше подписывался «Подтверждена» и показывал
         // кнопку «Отменить» (сервер такую отмену всё равно отклоняет).
         case "done", "completed":     status = .done
-        default:                      status = .pending
+        // П-25 №4: прочие коды (in_delivery — мастер выехал, незнакомые) —
+        // «В работе» и без «Отменить»: сервер отменяет только new/accepted.
+        default:                      status = .inWork
         }
         address = (a.shopAddress?.isEmpty == false) ? a.shopAddress : nil
         // Нулевые координаты — «координат нет» (так их отдаёт пустая колонка):
@@ -404,6 +450,18 @@ struct BookingItem: Identifiable {
         guard let s, !s.isEmpty else { return nil }
         return dayIn.date(from: s)
     }
+    /// Начало визита: дата + "HH:MM" по Москве (время площадки). Не разобрали — nil.
+    private static func start(_ day: String?, _ time: String?) -> Date? {
+        guard let d = day, d.count >= 10, let t = time, t.count >= 5 else { return nil }
+        return startIn.date(from: String(d.prefix(10)) + " " + String(t.prefix(5)))
+    }
+    private static let startIn: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Europe/Moscow") ?? .current
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
     /// Один форматтер на все записи: раньше новый создавался на каждую запись
     /// при каждой загрузке списка (DateFormatter дорогой).
     private static let dayIn: DateFormatter = {
@@ -485,7 +543,8 @@ struct BookingsView: View {
         .alert(cancelError ?? "", isPresented: Binding(
             get: { cancelError != nil },
             set: { if !$0 { cancelError = nil } }
-        )) { Button("OK", role: .cancel) {} }
+        // «Понятно», как в остальных окнах приложения, а не английское «OK».
+        )) { Button("Понятно", role: .cancel) {} }
     }
 
     private var emptyState: some View {
@@ -555,6 +614,14 @@ private struct BookingCard: View {
         guard let d = booking.date else { return "—" }
         return Self.dayOut.string(from: d)
     }
+    /// Год — только у записи не этого года: в «Прошедших» прошлогодний визит
+    /// «ОКТ. 14» читался как нынешний октябрь.
+    private var yearText: String? {
+        guard let d = booking.date else { return nil }
+        let cal = Calendar.current
+        let y = cal.component(.year, from: d)
+        return y == cal.component(.year, from: Date()) ? nil : String(y)
+    }
     private var statusColor: Color {
         switch booking.status {
         case .confirmed: return YMColor.statusDone
@@ -590,6 +657,9 @@ private struct BookingCard: View {
                 VStack(spacing: 0) {
                     Text(monthText).font(.system(size: 11, weight: .bold)).foregroundStyle(YMColor.accent)
                     Text(dayText).font(.system(size: 22, weight: .heavy)).foregroundStyle(YMColor.text)
+                    if let y = yearText {
+                        Text(y).font(.system(size: 10, weight: .semibold)).foregroundStyle(YMColor.muted)
+                    }
                 }
                 .frame(width: 56)
                 .padding(.vertical, 8)
@@ -617,6 +687,15 @@ private struct BookingCard: View {
                             .foregroundStyle(YMColor.muted)
                             .labelStyle(.titleAndIcon)
                             .lineLimit(2)
+                            .padding(.top, 4)
+                    }
+                    // А63: комментарий мастеру, оставленный при записи.
+                    if let note = booking.clientComment {
+                        Label(note, systemImage: "text.bubble")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(YMColor.muted)
+                            .labelStyle(.titleAndIcon)
+                            .lineLimit(3)
                             .padding(.top, 4)
                     }
                 }

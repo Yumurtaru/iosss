@@ -150,10 +150,12 @@ final class LodgingUnitVM: ObservableObject {
         }
     }
 
+    /// true — заявка ушла (экран тогда забывает черновик формы).
+    @discardableResult
     func longRequest(slug: String, desiredFrom: String?, months: Int, adults: Int, children: Int,
-                     name: String, phone: String, comment: String) async {
+                     name: String, phone: String, comment: String) async -> Bool {
         // Вторая заявка, пока первая ещё уходит, хозяину не нужна (как у брони).
-        guard !sending else { return }
+        guard !sending else { return false }
         sending = true
         defer { sending = false }
         do {
@@ -168,8 +170,10 @@ final class LodgingUnitVM: ObservableObject {
             message = r.isDuplicate
                 ? "Заявка уже отправлена, хозяин с вами свяжется"
                 : "Заявка отправлена, хозяин свяжется с вами"
+            return true
         } catch {
             message = error.localizedDescription
+            return false
         }
     }
 }
@@ -209,15 +213,21 @@ struct LodgingUnitView: View {
     /// («Заявка отправлена» или ошибка) приходил, пока шторка уезжала, и
     /// алерт с ним не показывался — человек не знал, ушла ли заявка.
     @State private var pendingLong: PendingBook?
+    /// Что гость ввёл в шторке брони / заявки. Бронь не прошла (нет сети,
+    /// сессия, отказ) — раньше при повторном открытии пожелания пропадали,
+    /// а имя и телефон сбрасывались на профиль. Забываем только после успеха.
+    @State private var bookDraft: PendingBook?
+    @State private var longDraft: PendingBook?
 
     private func startPendingBook() {
         if let l = pendingLong {
             pendingLong = nil
             Task {
-                await vm.longRequest(slug: slug, desiredFrom: from,
-                                     months: vm.data?.unit?.longTerm?.minMonthsValue ?? 1,
-                                     adults: adults, children: children,
-                                     name: l.name, phone: l.phone, comment: l.comment)
+                let ok = await vm.longRequest(slug: slug, desiredFrom: from,
+                                              months: vm.data?.unit?.longTerm?.minMonthsValue ?? 1,
+                                              adults: adults, children: children,
+                                              name: l.name, phone: l.phone, comment: l.comment)
+                if ok { longDraft = nil }
             }
         }
         guard let p = pendingBook else { return }
@@ -228,6 +238,7 @@ struct LodgingUnitView: View {
                                         adults: adults, children: children, planId: planId,
                                         name: p.name, phone: p.phone, comment: p.comment) {
                 booked = resp
+                bookDraft = nil
                 sheet = .booked
                 // Даты уже забронированы: прежний расчёт оставлял активной
                 // «Забронировать», и повторное нажатие оформляло вторую бронь
@@ -252,6 +263,17 @@ struct LodgingUnitView: View {
         case auth
     }
     @State private var route: Route?
+
+    /// «Мои поездки» из шторки «Бронь оформлена» пушились, пока шторка ещё
+    /// уезжала, а долгое «Назад» снимало несколько экранов сразу — сеттер
+    /// navigationDestination(isPresented:) не звался, route «висел», и кнопки
+    /// «Организация» / «Мои поездки» больше ничего не открывали (как на
+    /// Главной). Сначала сбрасываем, потом идём.
+    private func go(_ r: Route) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
 
     /// Ключ расчёта: меняется — .task(id:) сам пересчитывает и отменяет предыдущий.
     private struct QuoteKey: Equatable {
@@ -282,7 +304,9 @@ struct LodgingUnitView: View {
                     }
                     amenities
                     rules(unit)
-                    if let lt = unit.longTerm, lt.priceMonthValue > 0 {
+                    // Блок с «Оставить заявку» не прячем и без цены за месяц: объект стоит
+                    // в «Длительно», сервер заявку принимает, другой кнопки на экране нет.
+                    if let lt = unit.longTerm {
                         longTerm(lt)
                     }
                     Color.clear.frame(height: YMSpace.xxxl)
@@ -333,28 +357,34 @@ struct LodgingUnitView: View {
                 LodgingGuestSheet(
                     title: "Бронирование",
                     confirmTitle: "Забронировать",
-                    name: vm.myName,
-                    phone: vm.myPhone,
+                    name: bookDraft?.name ?? vm.myName,
+                    phone: bookDraft?.phone ?? vm.myPhone,
+                    comment: bookDraft?.comment ?? "",
                     note: "По телефону с вами свяжутся при опоздании или вопросах по заселению."
                 ) { name, phone, comment in
-                    pendingBook = PendingBook(name: name, phone: phone, comment: comment)
+                    let p = PendingBook(name: name, phone: phone, comment: comment)
+                    pendingBook = p
+                    bookDraft = p
                 }
             case .long:
                 LodgingGuestSheet(
                     title: "Заявка на длительную аренду",
                     confirmTitle: "Отправить",
-                    name: vm.myName,
-                    phone: vm.myPhone,
+                    name: longDraft?.name ?? vm.myName,
+                    phone: longDraft?.phone ?? vm.myPhone,
+                    comment: longDraft?.comment ?? "",
                     note: "Онлайн такая аренда не бронируется: хозяин свяжется с вами и договорится о просмотре."
                 ) { name, phone, comment in
                     // Отправка — в onDismiss шторки (startPendingBook).
-                    pendingLong = PendingBook(name: name, phone: phone, comment: comment)
+                    let p = PendingBook(name: name, phone: phone, comment: comment)
+                    pendingLong = p
+                    longDraft = p
                 }
             case .booked:
                 if let b = booked {
                     LodgingBookedSheet(resp: b) {
                         sheet = nil
-                        route = .trips
+                        go(.trips)
                     }
                 }
             }
@@ -412,7 +442,7 @@ struct LodgingUnitView: View {
                 .font(YMFont.caption)
                 .foregroundStyle(YMColor.muted)
             if let sh = vm.data?.shop, let sl = sh.slug, !sl.isEmpty {
-                Button(sh.name ?? "Организация") { route = .org(sl) }
+                Button(sh.name ?? "Организация") { go(.org(sl)) }
                     .font(YMFont.subhead)
                     .foregroundStyle(YMColor.accent)
                     .padding(.top, YMSpace.xs)
@@ -471,13 +501,17 @@ struct LodgingUnitView: View {
             // а не показываем ему форму, которая закончится «сессия истекла».
             // «Выберите даты» писалось и при выбранных датах — пока идёт расчёт
             // или когда объект на них занят (причина выше); это сбивало с толку.
+            // Паритет с Android: без дат кнопка «Выберите даты» открывает календарь
+            // (раньше была серой и не нажималась).
+            let needDates = (from == nil || to == nil) && !vm.sending
             Button(canBook || (from != nil && to != nil) ? "Забронировать" : "Выберите даты") {
                 Haptics.medium()
-                if session.isLoggedIn { sheet = .booking } else { route = .auth }
+                if needDates { sheet = .dates; return }
+                if session.isLoggedIn { sheet = .booking } else { go(.auth) }
             }
             .buttonStyle(YMPrimaryButtonStyle())
-            .disabled(!canBook || vm.sending)
-            .opacity(canBook ? 1 : 0.5)
+            .disabled(!(canBook || needDates) || vm.sending)
+            .opacity(canBook || needDates ? 1 : 0.5)
 
             Text(LodgingText.bookingNote(unit))
                 .font(YMFont.caption).foregroundStyle(YMColor.muted)
@@ -620,7 +654,7 @@ struct LodgingUnitView: View {
             }
             Button("Оставить заявку") {
                 Haptics.light()
-                if session.isLoggedIn { sheet = .long } else { route = .auth }
+                if session.isLoggedIn { sheet = .long } else { go(.auth) }
             }
             .buttonStyle(YMSecondaryButtonStyle())
             // Пока прежняя заявка/бронь уходит, новую форму не открываем:
@@ -648,7 +682,9 @@ struct LodgingGuestSheet: View {
     @State private var phone: String
     @State private var comment = ""
 
+    /// comment — пожелания из прошлой неудачной попытки (по умолчанию пусто).
     init(title: String, confirmTitle: String, name: String, phone: String,
+         comment: String = "",
          note: String, onConfirm: @escaping (String, String, String) -> Void) {
         self.title = title
         self.confirmTitle = confirmTitle
@@ -656,20 +692,34 @@ struct LodgingGuestSheet: View {
         self.onConfirm = onConfirm
         self._name = State(initialValue: name)
         self._phone = State(initialValue: phone)
+        self._comment = State(initialValue: comment)
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: YMSpace.md) {
+                    // П-25 №6: пределы брони жилья (guest_name 190, guest_phone 32,
+                    // guest_comment 1000) — длиннее сервер режет молча.
                     field("Имя гостя", text: $name, keyboard: .default, caps: true)
+                        .ymMaxLength($name, 190)
                     field("Телефон", text: $phone, keyboard: .phonePad, caps: false)
+                        .ymMaxLength($phone, 32)
+                    // Без телефона кнопка вверху серая, и было непонятно почему
+                    // (в профиле телефона нет — поле пустое).
+                    if phoneTooShort {
+                        Text("Укажите телефон — без него «\(confirmTitle)» недоступно")
+                            .font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    }
                     field("Пожелания", text: $comment, keyboard: .default, caps: false)
+                        .ymMaxLength($comment, 1000)
                     Text(note).font(YMFont.caption).foregroundStyle(YMColor.muted)
                 }
                 .padding(.horizontal, YMSpace.xl)
                 .padding(.top, YMSpace.md)
             }
+            // У цифровой клавиатуры телефона нет «Готово» — убираем жестом прокрутки.
+            .scrollDismissesKeyboard(.interactively)
             .background(YMColor.bg.ignoresSafeArea())
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
@@ -684,11 +734,13 @@ struct LodgingGuestSheet: View {
                                   comment.trimmingCharacters(in: .whitespaces))
                         dismiss()
                     }
-                    .disabled(phone.trimmingCharacters(in: .whitespaces).count < 5)
+                    .disabled(phoneTooShort)
                 }
             }
         }
     }
+
+    private var phoneTooShort: Bool { phone.trimmingCharacters(in: .whitespaces).count < 5 }
 
     private func field(_ label: String, text: Binding<String>,
                        keyboard: UIKeyboardType, caps: Bool) -> some View {

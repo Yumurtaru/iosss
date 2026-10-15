@@ -234,6 +234,16 @@ private struct CityStep: View {
                     ForEach(shownNames, id: \.self) { name in
                         cityRow(name)
                     }
+                    // Паритет с Android: поиск ничего не нашёл — говорим об этом,
+                    // а не оставляем пустой список без слова.
+                    if !query.trimmingCharacters(in: .whitespaces).isEmpty && shownNames.isEmpty && !cities.isEmpty {
+                        Text("Город не найден. Пока Yumurta работает только в городах из списка")
+                            .font(.system(size: 14))
+                            .foregroundStyle(YMColor.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, YMSpace.xxl)
+                            .padding(.top, 12)
+                    }
                     if citiesLoading && cities.isEmpty {
                         ProgressView()
                             .tint(YMColor.accent)
@@ -318,8 +328,14 @@ private struct CityStep: View {
             return
         }
         cities = list
-        // Если текущий выбор пуст/не среди доступных — выбираем первый доступный город.
-        if let match = list.first(where: { $0.name == selectedName }) {
+        // Паритет с Android: после выхода из аккаунта онбординг повторяется —
+        // отмечаем уже выбранный город, а не первый в списке: иначе «Продолжить»
+        // молча переносил человека в другой город.
+        if selectedName.isEmpty, let cur = session.cityId,
+           let mine = list.first(where: { $0.id == cur }), let nm = mine.name, !nm.isEmpty {
+            selectedName = nm
+            selectedId = mine.id
+        } else if let match = list.first(where: { $0.name == selectedName }) {
             selectedId = match.id
         } else if let first = list.first {
             selectedName = first.name ?? ""

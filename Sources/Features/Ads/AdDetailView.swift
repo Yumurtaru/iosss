@@ -234,9 +234,19 @@ struct AdDetailView: View {
                               systemImage: vm.favorite ? "heart.fill" : "heart")
                             .font(YMFont.callout).foregroundStyle(YMColor.accent)
                     }
-                    Button { if !needsAuth() { showReport = true } } label: {
-                        Label("Пожаловаться", systemImage: "flag")
-                            .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                    // На своё объявление сервер жалобу не заводит, но отвечает
+                    // «отправлено» (routes/ads.php) — человек видел ложное «спасибо».
+                    if a.isMine != true {
+                        Button { if !needsAuth() { showReport = true } } label: {
+                            Label("Пожаловаться", systemImage: "flag")
+                                .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                        }
+                    } else {
+                        // Паритет с Android: у своего объявления — переход к управлению
+                        // (продлить, снять, изменить), как «Управление» в Android.
+                        NavigationLink { MyAdsView() } label: {
+                            Text("Управление").font(YMFont.callout).foregroundStyle(YMColor.accent)
+                        }
                     }
                     Spacer()
                 }

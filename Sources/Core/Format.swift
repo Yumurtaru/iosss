@@ -27,7 +27,14 @@ enum DateFmt {
         // Дата без времени («2026-11-09») раньше показывалась как есть, латиницей
         // ISO; теперь — «09.11.2026».
         guard let s = s, let date = iso.date(from: s) else { return day(s) ?? s ?? "" }
+        // Дата другого года — с годом: «Действует до 14 окт., 00:00» у подарочной
+        // карты на следующий год и старые операции читались как этогодние.
+        if !isThisYear(date) { return shortYearOut.string(from: date) }
         return shortOut.string(from: date)
+    }
+    private static func isThisYear(_ date: Date) -> Bool {
+        let cal = Calendar.current
+        return cal.component(.year, from: date) == cal.component(.year, from: Date())
     }
     /// «2026-11-09» (или начало «2026-11-09 14:03:00») → «09.11.2026».
     /// Только дата, без пересчёта поясов. Пустое и неожиданное → nil.
@@ -46,10 +53,16 @@ enum DateFmt {
         let cal = Calendar.current
         if cal.isDateInToday(date) { return timeOut.string(from: date) }
         if cal.isDateInYesterday(date) { return "вчера" }
+        // Переписка прошлого года — с годом («9 окт. 2025»), иначе как свежая.
+        if !isThisYear(date) { return dayYearOut.string(from: date) }
         return dayOut.string(from: date)
     }
     private static let dayOut: DateFormatter = {
         let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d MMM"
+        f.timeZone = .autoupdatingCurrent; return f
+    }()
+    private static let dayYearOut: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d MMM yyyy"
         f.timeZone = .autoupdatingCurrent; return f
     }()
     static func time(_ s: String?) -> String {
@@ -62,10 +75,30 @@ enum DateFmt {
         let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d MMM, HH:mm"
         f.timeZone = .autoupdatingCurrent; return f
     }()
+    private static let shortYearOut: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d MMM yyyy, HH:mm"
+        f.timeZone = .autoupdatingCurrent; return f
+    }()
     private static let timeOut: DateFormatter = {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "HH:mm"
         f.timeZone = .autoupdatingCurrent; return f
     }()
+
+    /// Предзаказ: «2026-10-15 19:30:00» (время Москвы) → «15 окт, 19:30».
+    /// Время заведения, без пересчёта в пояс телефона — как его выбирали при
+    /// оформлении. Пусто/null/нулевая дата — nil (заказ не ко времени).
+    static func preorder(_ raw: String?) -> String? {
+        guard let t = raw?.trimmingCharacters(in: .whitespaces), t.count >= 16 else { return nil }
+        if t.hasPrefix("0000") { return nil }
+        let s = t.replacingOccurrences(of: "T", with: " ")
+        let p = s.prefix(10).split(separator: "-")
+        guard p.count == 3, let m = Int(p[1]), let d = Int(p[2]), m >= 1, m <= 12 else { return t }
+        let hm = String(s.dropFirst(11).prefix(5))
+        guard hm.count == 5 else { return t }
+        return "\(d) \(preorderMonths[m - 1]), \(hm)"
+    }
+    private static let preorderMonths: [String] = ["янв", "фев", "мар", "апр", "мая", "июн",
+                                                   "июл", "авг", "сен", "окт", "ноя", "дек"]
 }
 
 enum OrderStatus {
@@ -76,6 +109,9 @@ enum OrderStatus {
     /// `title` — подпись сервера (status_title): нужна для кодов, которых нет в
     /// словаре ниже — раньше человек видел их латиницей.
     static func label(_ s: String?, shopType: String? = nil, title: String? = nil) -> String {
+        // А64: бронь жилья — свои слова (как status_title сервера); «Доставлен»
+        // у завершённого проживания читался как ошибка.
+        if shopType == "lodging", let l = lodgingLabel(s) { return l }
         switch s {
         case "new", "pending": return "Новый"
         case "accepted": return "Принят"
@@ -104,6 +140,18 @@ enum OrderStatus {
             return s ?? "—"
         }
     }
+
+    /// А64: подписи брони жилья (new → accepted → done; cancelled), как на сервере.
+    /// Прочие коды — nil: дальше общий словарь.
+    static func lodgingLabel(_ s: String?) -> String? {
+        switch s {
+        case "new":       return "Бронь создана"
+        case "accepted":  return "Подтверждена"
+        case "done":      return "Завершена"
+        case "cancelled": return "Отменена"
+        default:          return nil
+        }
+    }
 }
 
 /// Непустые строки через разделитель: `joinedNonEmpty([a, b], separator: " · ")`.
@@ -117,4 +165,14 @@ func joinedNonEmpty(_ parts: [String?], separator: String) -> String {
         out.append(s)
     }
     return out.joined(separator: separator)
+}
+
+/// «товар / товара / товаров» для счётчиков корзины (как на плашке StickyCartBar):
+/// одна корзина на все заведения, и «блюда» у магазина или аптеки — неверно.
+func ruItemsWord(_ count: Int) -> String {
+    let n = abs(count) % 100, n1 = n % 10
+    if n > 10 && n < 20 { return "товаров" }
+    if n1 > 1 && n1 < 5 { return "товара" }
+    if n1 == 1 { return "товар" }
+    return "товаров"
 }

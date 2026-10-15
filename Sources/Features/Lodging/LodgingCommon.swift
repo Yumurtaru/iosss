@@ -269,8 +269,15 @@ struct LodgingDatesSheet: View {
 
     private var hintText: String {
         if let f = pickFrom, let t = pickTo {
-            return LodgingDate.human(f) + " — " + LodgingDate.human(t) + ", " +
-                LodgingDate.plural(LodgingDate.nights(f, t), "ночь", "ночи", "ночей")
+            let n = LodgingDate.nights(f, t)
+            let base = LodgingDate.human(f) + " — " + LodgingDate.human(t) + ", " +
+                LodgingDate.plural(n, "ночь", "ночи", "ночей")
+            // Срок короче минимального — «Выбрать» серая, а подсказка о минимуме
+            // была внизу, под четырьмя месяцами: казалось, кнопка не работает.
+            if n < minNights {
+                return base + ". Минимум — " + LodgingDate.plural(minNights, "ночь", "ночи", "ночей")
+            }
+            return base
         }
         if let f = pickFrom { return "Заезд " + LodgingDate.human(f) + ". Выберите день выезда." }
         return "Выберите день заезда"

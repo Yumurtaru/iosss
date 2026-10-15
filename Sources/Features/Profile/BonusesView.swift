@@ -25,6 +25,9 @@ struct BonusesView: View {
     @State private var historyLoadingMore = false
     /// Догрузка истории не прошла — раньше кнопка просто ничего не делала.
     @State private var historyMoreFailed = false
+    /// Паритет с Android: история не загрузилась, а балансы есть — говорим об
+    /// этом с «Повторить» (раньше блок просто пропадал: «операций нет»).
+    @State private var historyError: String?
 
     private var total: Decimal { balances.reduce(0) { $0 + Money.dec($1.balance) } }
 
@@ -59,10 +62,20 @@ struct BonusesView: View {
                         .foregroundStyle(YMColor.text)
                         .padding(.top, YMSpace.xs)
                     VStack(spacing: YMSpace.md) {
-                        ForEach(Array(balances.enumerated()), id: \.offset) { _, b in
+                        // П-25 №3: ключ строки — shop_id (всегда число и уникален).
+                        ForEach(Array(balances.enumerated()), id: \.element.rowKey) { _, b in
                             ShopBalanceRow(balance: b)
                         }
                     }
+                }
+
+                if let he = historyError, history.isEmpty {
+                    VStack(alignment: .leading, spacing: YMSpace.sm) {
+                        Text(he).font(YMFont.callout).foregroundStyle(YMColor.statusCancel)
+                        Button("Повторить") { Task { await load() } }
+                            .font(YMFont.subhead).foregroundStyle(YMColor.accent)
+                    }
+                    .padding(.top, YMSpace.sm)
                 }
 
                 if !history.isEmpty {
@@ -71,7 +84,9 @@ struct BonusesView: View {
                         .foregroundStyle(YMColor.text)
                         .padding(.top, YMSpace.sm)
                     VStack(spacing: 0) {
-                        ForEach(Array(history.enumerated()), id: \.offset) { idx, t in
+                        // П-25 №3: в истории shop_id может быть null — ключ по id
+                        // операции (догрузка страниц не путает строки).
+                        ForEach(Array(history.enumerated()), id: \.element.stableId) { idx, t in
                             HistoryRow(tx: t)
                             if idx != history.count - 1 { Divider().overlay(YMColor.hairline) }
                         }
@@ -161,7 +176,19 @@ struct BonusesView: View {
             balances = try await API.shared.list("api/v1/profile/bonuses")
             // История — best-effort: её отсутствие не должно ронять экран.
             // П-23.2: первая страница + признак has_more (нет meta — страниц больше нет).
-            let p: Page<BonusTx>? = try? await API.shared.page("api/v1/profile/bonuses/history")
+            var p: Page<BonusTx>? = nil
+            var histFailed: String? = nil
+            do {
+                let fetched: Page<BonusTx> = try await API.shared.page("api/v1/profile/bonuses/history")
+                p = fetched
+            } catch is CancellationError {
+            } catch {
+                histFailed = (error as? APIError)?.errorDescription ?? "Не удалось загрузить историю бонусов"
+            }
+            // Паритет с Android: истории нет и балансов нет — это ошибка, а не
+            // «Бонусов пока нет» (без связи человек решал, что баллы пропали).
+            if let hf = histFailed, balances.isEmpty { self.error = hf }
+            historyError = balances.isEmpty ? nil : histFailed
             history = p?.items ?? []
             historyPage = 1
             historyMoreFailed = false

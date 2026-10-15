@@ -16,17 +16,21 @@ struct PageMeta: Decodable {
     let hasMore: Bool?
     /// Только у api/v1/notifications: непрочитанных ВСЕГО, а не на странице.
     let unread: Int?
+    /// П-25 №2 (А62): у api/v1/orders — всего строк списка (все статусы, записи
+    /// и брони тоже). Старый сервер не шлёт — nil, считаем по странице, как раньше.
+    let total: Int?
     init(from decoder: Decoder) throws {
         guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
-            page = nil; perPage = nil; hasMore = nil; unread = nil; return
+            page = nil; perPage = nil; hasMore = nil; unread = nil; total = nil; return
         }
+        total = (try? c.decode(Int.self, forKey: .total)) ?? (try? c.decode(String.self, forKey: .total)).flatMap { Int($0) }
         unread = (try? c.decode(Int.self, forKey: .unread)) ?? (try? c.decode(String.self, forKey: .unread)).flatMap { Int($0) }
         page = (try? c.decode(Int.self, forKey: .page)) ?? (try? c.decode(String.self, forKey: .page)).flatMap { Int($0) }
         perPage = (try? c.decode(Int.self, forKey: .perPage)) ?? (try? c.decode(String.self, forKey: .perPage)).flatMap { Int($0) }
         hasMore = (try? c.decode(Bool.self, forKey: .hasMore)) ?? (try? c.decode(Int.self, forKey: .hasMore)).map { $0 != 0 }
     }
     // Ключи в camelCase: декодер API переводит snake_case сам (per_page → perPage).
-    enum CodingKeys: String, CodingKey { case page, perPage, hasMore, unread }
+    enum CodingKeys: String, CodingKey { case page, perPage, hasMore, unread, total }
 }
 
 /// Получатель meta: API.perform передаёт ему meta конверта после разбора data.
@@ -144,6 +148,9 @@ struct Shop: Codable, Identifiable, Hashable {
     let id: Int; let slug: String?; let name: String?; let logo: String?; let cover: String?; let banner: String?
     @LenientDouble var rating: Double?; let category: String?; let deliveryTime: String?; @LenientBool var isOpen: Bool?; let shopMode: String?; let address: String?
     @LenientInt var avgCookTime: Int?; @LenientInt var reviewsCount: Int?
+    /// Тип заведения (shop | cafe | service …, ключ type — api_v1.php shops/organizations).
+    /// Паритет с Android; аддитивно, нет ключа — nil.
+    let type: String?
     // Буст-продвижение (Фаза 3.1, аддитивно): 1 = показать бейдж «Реклама».
     @LenientInt var isPromoted: Int?
     /// Способы получения (аддитивно). Коды: у товаров и еды — delivery | pickup |
@@ -224,6 +231,9 @@ struct ShopDetail: Codable, Identifiable {
     let mode: String?
     // Кол-во оценок для сводки отзывов (аддитивно; сервер отдаёт reviews_count).
     @LenientInt var reviewsCount: Int?
+    /// Среднее время приготовления, мин (avg_cook_time, api_v1.php:529). Паритет
+    /// с Android; толерантно к строке/null.
+    @LenientInt var avgCookTime: Int?
     let description: String?; let address: String?; let phone: String?; @LenientDouble var rating: Double?
     @LenientDouble var lat: Double?; @LenientDouble var lng: Double?; let hours: [ShopHour]?
     @LenientDouble var deliveryFee: Double?; @LenientDouble var minOrder: Double?; let deliveryTime: String?; let categories: [Category]?
@@ -337,6 +347,9 @@ struct ProductDetail: Codable, Identifiable {
     /// этого не знала: кнопка «В корзину» работала, человек набирал корзину, а
     /// отказ приходил только на оформлении и без указания позиции.
     @LenientBool var stopped: Bool?
+    /// А65: категория товара выключена продавцом — товар недоступен (сервер
+    /// ставит и stopped, флаг читаем на случай расхождения). Нет поля — nil.
+    @LenientBool var categoryOff: Bool?
 }
 struct ModifierGroup: Codable, Identifiable {
     let id: Int; let name: String?; let type: String?; @LenientBool var isRequired: Bool?
@@ -348,7 +361,8 @@ struct MediaPhoto: Codable, Hashable { let pathWebp: String? }
 // clientCode — карта клиента: личный штрихкод (EAN-13), который кассир
 // сканирует в магазине. Сервер выдаёт его при первом открытии профиля и больше
 // не меняет. Старый сервер поля не отдаёт — остаётся nil, блок не рисуется.
-struct Profile: Codable { @LenientInt var id: Int?; let name: String?; let phone: String?; let email: String?; @LenientDouble var bonusBalance: Double?; let clientCode: String? }
+// avatar — путь к фото профиля (api_v1.php:1652), паритет с Android; nil — нет фото.
+struct Profile: Codable { @LenientInt var id: Int?; let name: String?; let phone: String?; let email: String?; @LenientDouble var bonusBalance: Double?; let clientCode: String?; let avatar: String? }
 struct Address: Codable, Identifiable {
     let id: Int; let label: String?; let city: String?; let street: String?; let house: String?
     let apartment: String?; let entrance: String?; let floor: String?; let intercom: String?
@@ -378,6 +392,9 @@ struct Order: Codable, Identifiable {
     /// латиницей, а самовывоз в списке подписывался «доставлен».
     let statusTitle: String?
     let deliveryType: String?
+    /// Предзаказ «ко времени»: "YYYY-MM-DD HH:MM:SS" по Москве или null (П-24 №7).
+    /// Список отдаёт поле, если сервер его шлёт; нет — nil, карточка как раньше.
+    let preorderAt: String?
 }
 
 /// Запись клиента на услугу — GET api/v1/appointments (экран «Мои записи»).
@@ -420,6 +437,8 @@ struct Appointment: Codable, Identifiable {
     /// Считает сервер — чтобы табы «Предстоящие / Прошедшие» одинаково делились
     /// на всех платформах и не зависели от часового пояса телефона.
     @LenientBool var isPast: Bool?
+    /// А63: комментарий клиента мастеру (то, что ввели при записи). null — нет.
+    let clientComment: String?
 }
 struct OrderItem: Codable, Identifiable {
     /// order_items.id — настоящий, стабильный ключ строки. Появился вместе с
@@ -505,6 +524,19 @@ struct OrderDetail: Codable, Identifiable {
     @LenientBool var hasReview: Bool?
     @LenientInt var reviewId: Int?
     @LenientBool var canReview: Bool?
+    /// Предзаказ «ко времени»: "YYYY-MM-DD HH:MM:SS" по Москве или null (П-24 №7).
+    /// Задан — ETA сервер не считает, показываем время предзаказа.
+    let preorderAt: String?
+    /// А63: комментарий клиента к записи на услугу (только его текст). null —
+    /// обычный заказ или запись без комментария.
+    let clientComment: String?
+    /// П-24 №2 (А62): NPS по заказу уже поставлен (оценка 0 — тоже да) и сама
+    /// оценка. nil — старый сервер, форма NPS как раньше.
+    @LenientBool var hasNps: Bool?
+    @LenientInt var npsScore: Int?
+    /// «Сдача с …» — то, что клиент указал при оплате наличными (change_from).
+    /// GET api/v1/orders/{id} отдаёт o.*, поле payment_note (api_v1.php). nil — не указано.
+    let paymentNote: String?
 }
 /// Шаг `status_timeline`: {code, title, at}.
 struct OrderTimelineStep: Codable {
@@ -577,13 +609,53 @@ struct BonusInfo: Codable { @LenientDouble var balance: Double?; let history: [B
 struct BonusRow: Codable, Identifiable { @LenientInt var id: Int?; @LenientDouble var amount: Double?; let reason: String?; let createdAt: String?
     var stableId: Int { id ?? 0 } }
 // Баланс баллов по магазину (ответ /profile/bonuses — массив).
-struct BonusShopBalance: Codable { @LenientInt var shopId: Int?; let shop: String?; @LenientDouble var balance: Double? }
+struct BonusShopBalance: Codable { @LenientInt var shopId: Int?; let shop: String?; @LenientDouble var balance: Double?
+    /// П-25 №3: shop_id здесь всегда число и уникален — ключ строки списка.
+    var rowKey: String { shopId.map { "s\($0)" } ?? "n-\(shop ?? "")" } }
 // Операция по баллам (ответ /profile/bonuses/history).
 // П-22.4: amount — строка "10.00", читаем точным Decimal (знак у старых строк бывает неверным).
 struct BonusTx: Codable { @LenientInt var id: Int?; let shop: String?; let type: String?; @LenientDecimal var amount: Decimal?; let createdAt: String?
     var stableId: String { "\(id ?? 0)-\(createdAt ?? "")" } }
 struct AppNotification: Codable, Identifiable { let id: Int; let type: String?; let title: String?; let body: String?; @LenientInt var isRead: Int?; let createdAt: String?
-    var read: Bool { (isRead ?? 0) > 0 } }
+    var read: Bool { (isRead ?? 0) > 0 }
+    /// Волна 4313: data_json строки ленты — те же ключи, что в data push
+    /// (order_id, slug, screen…). Без него строка никуда не вела.
+    @NotifDataText var dataJson: String? }
+
+/// Волна 4313: data_json приходит строкой с JSON или null (ОТВЕТЫ-САЙТА П-21 №2).
+/// Другой тип (объект) не роняет разбор всей ленты — просто nil.
+@propertyWrapper
+struct NotifDataText: Codable, Hashable {
+    var wrappedValue: String?
+    init(wrappedValue: String?) { self.wrappedValue = wrappedValue }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        wrappedValue = c.decodeNil() ? nil : (try? c.decode(String.self))
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(wrappedValue)
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// Старый сервер data_json не шлёт — нет ключа = nil, а не ошибка.
+    func decode(_ type: NotifDataText.Type, forKey key: Key) throws -> NotifDataText {
+        (try? decodeIfPresent(type, forKey: key)) ?? NotifDataText(wrappedValue: nil)
+    }
+}
+
+extension AppNotification {
+    /// Волна 4313: data_json → словарь для AppDelegate.openNotification — строка
+    /// ленты ведёт туда же, куда push. Пусто / «[]» / мусор — пустой словарь.
+    var notifPayload: [AnyHashable: Any] {
+        guard let s = dataJson, let d = s.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return [:] }
+        var out: [AnyHashable: Any] = [:]
+        for (k, v) in obj { out[k] = v }
+        return out
+    }
+}
 struct OrderCreateResult: Codable {
     @LenientInt var id: Int?; @LenientInt var dailyNumber: Int?
     // Сервер возвращает id созданного заказа под ключом order_id (→ orderId после
@@ -857,6 +929,8 @@ struct ReturnItem: Codable, Identifiable {
     let status: String?; @LenientDouble var refundAmount: Double?; let createdAt: String?; let shop: String?
     /// П-23.3 (А58): номер заказа за день (как видит клиент). nil — старые заказы/сервер.
     @LenientInt var orderDailyNumber: Int?
+    /// П-24 №1 (А62): дата заказа "YYYY-MM-DD HH:MM:SS" (Москва) или null.
+    let orderCreatedAt: String?
 }
 struct ReturnEligibility: Codable { let eligible: Bool?; @LenientInt var windowHours: Int?; let reason: String? }
 
@@ -1093,6 +1167,9 @@ struct AppointmentBody: Encodable {
     var slots: Int? = nil
     /// Ключ повтора (ответ на заявку №17): повтор после обрыва — та же запись.
     var idempotencyKey: String? = nil
+    /// А63: «Комментарий мастеру» (до 300 знаков, сервер режет сам). nil — поле
+    /// в теле не уходит, запрос как раньше.
+    var comment: String? = nil
 }
 
 /// Ответ на создание записи/брони — POST api/v1/appointments.

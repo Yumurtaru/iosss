@@ -103,6 +103,9 @@ private struct SearchSection: View {
     // Локальные избранные (оптимистично; toggle синхронизируется с сервером).
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
+    /// Товары, по которым запрос ♥ ещё идёт: повторный тап игнорируем (как на
+    /// Главной) — двойной тап слал POST и DELETE разом, итог на сервере был случайным.
+    @State private var favBusyProducts: Set<Int> = []
     /// Гость нажал ♥ — сначала вход (избранное хранится в аккаунте).
     @State private var showAuth = false
 
@@ -272,6 +275,23 @@ private struct SearchSection: View {
     // ── Недавние + недавно смотрели ──
     private var recentAndPopularBlock: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Новый человек: ни истории, ни «недавно смотрели» — под полем был
+            // пустой экран, вкладка выглядела сломанной. Подсказываем, что искать.
+            if history.isEmpty && recent.isEmpty {
+                VStack(spacing: YMSpace.sm) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 34, weight: .semibold))
+                        .foregroundStyle(YMColor.muted)
+                    Text("Что ищем?").font(YMFont.title3).foregroundStyle(YMColor.text)
+                    Text("Введите название заведения, блюда, товара или услуги — покажем, что есть в вашем городе.")
+                        .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, YMSpace.xxxl)
+                .padding(.top, 60)
+            }
             if !history.isEmpty {
                 HStack {
                     sectionKicker("Недавние запросы")
@@ -441,8 +461,13 @@ private struct SearchSection: View {
             // Гостю — вход: раньше сердечко загоралось, запрос получал 401 и
             // молча гасло обратно, без объяснения.
             guard session.isLoggedIn else { showAuth = true; return }
+            guard !favBusyProducts.contains(id) else { return }
+            favBusyProducts.insert(id)
             if on { favProducts.insert(id) } else { favProducts.remove(id) }
-            Task { await toggleProductFav(id, on: on) }
+            Task {
+                await toggleProductFav(id, on: on)
+                await MainActor.run { _ = favBusyProducts.remove(id) }
+            }
         })
     }
 
@@ -728,7 +753,20 @@ private struct FavoritesSection: View {
     @State private var reloadKey = 0
     @State private var favShops: Set<Int> = []
     @State private var favProducts: Set<Int> = []
+    /// Запрос ♥ ещё идёт — повторный тап по этой карточке игнорируем (как на Главной).
+    @State private var favBusyShops: Set<Int> = []
+    @State private var favBusyProducts: Set<Int> = []
     @State private var route: DiscoverRoute?
+    /// Гость нажал «Войти» на экране избранного.
+    @State private var showAuth = false
+
+    /// Переход как на Главной и в Поиске (go): стек профиля сняли без вызова
+    /// сеттера — route «висел», и тап по карточке избранного ничего не открывал.
+    private func go(_ r: DiscoverRoute) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
 
     /// СВОЕГО NavigationStack здесь НЕТ, и это принципиально.
     ///
@@ -759,6 +797,13 @@ private struct FavoritesSection: View {
                     // к аккаунту — причину надо назвать прямо.
                     notice(icon: "♥", title: "Войдите в аккаунт",
                            text: "Избранное хранится в вашем аккаунте, а не на телефоне.")
+                    // Гость из профиля попадал сюда в тупик: «Войдите» без кнопки.
+                    // Вход — шторкой, после него остаёмся здесь и грузим избранное.
+                    Button("Войти") { Haptics.light(); showAuth = true }
+                        .buttonStyle(YMPrimaryButtonStyle())
+                        .frame(maxWidth: 240)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, YMSpace.lg)
                 } else if loading {
                     VStack(spacing: YMSpace.lg) {
                         ForEach(0..<3, id: \.self) { _ in SkeletonBox(radius: 20).frame(height: 178) }
@@ -779,7 +824,7 @@ private struct FavoritesSection: View {
                     else {
                         VStack(spacing: YMSpace.lg) {
                             ForEach(Array(shops.enumerated()), id: \.element.id) { idx, s in
-                                FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { route = .shop(s) }
+                                FavOrgCard(shop: s, tone: idx, isFav: favShop(s.id)) { go(.shop(s)) }
                             }
                         }
                         .padding(.horizontal, YMSpace.xl)
@@ -789,7 +834,7 @@ private struct FavoritesSection: View {
                     else {
                         VStack(spacing: YMSpace.lg) {
                             ForEach(Array(products.enumerated()), id: \.element.id) { idx, p in
-                                FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { route = .product(p.id) }
+                                FavProductCard(product: p, tone: idx, isFav: favProduct(p.id)) { go(.product(p.id)) }
                             }
                         }
                         .padding(.horizontal, YMSpace.xl)
@@ -813,6 +858,13 @@ private struct FavoritesSection: View {
             }
         }
         .task(id: reloadKey) { await load() }
+        // Вход гостя: после него перечитываем избранное (reloadKey).
+        .sheet(isPresented: $showAuth) {
+            NavigationStack {
+                AuthView(onAuthed: { showAuth = false; reloadKey += 1 })
+            }
+            .environmentObject(Session.shared)
+        }
         // Гашение отложенного перехода при смене вкладки. YMSegmented пишет
         // selection внутри withAnimation, поэтому сбрасываем маршрут здесь,
         // а не в теле — иначе переключение сегмента и перестройка перехода
@@ -833,14 +885,24 @@ private struct FavoritesSection: View {
 
     private func favShop(_ id: Int) -> Binding<Bool> {
         Binding(get: { favShops.contains(id) }, set: { on in
+            guard !favBusyShops.contains(id) else { return }
+            favBusyShops.insert(id)
             if on { favShops.insert(id) } else { favShops.remove(id) }
-            Task { await toggleShopFav(id, on: on) }
+            Task {
+                await toggleShopFav(id, on: on)
+                await MainActor.run { _ = favBusyShops.remove(id) }
+            }
         })
     }
     private func favProduct(_ id: Int) -> Binding<Bool> {
         Binding(get: { favProducts.contains(id) }, set: { on in
+            guard !favBusyProducts.contains(id) else { return }
+            favBusyProducts.insert(id)
             if on { favProducts.insert(id) } else { favProducts.remove(id) }
-            Task { await toggleProductFav(id, on: on) }
+            Task {
+                await toggleProductFav(id, on: on)
+                await MainActor.run { _ = favBusyProducts.remove(id) }
+            }
         })
     }
 
@@ -913,6 +975,19 @@ private struct FavOrgCard: View {
 
     private var isOpen: Bool { shop.isOpen ?? true }
 
+    private var favSubtitle: String? {
+        if let c = shop.category, !c.isEmpty { return c }
+        // Паритет с Android: сначала тип словами, затем адрес.
+        if let t = orgTypeLabel(shop.type) { return t }
+        if let a = shop.address, !a.isEmpty { return a }
+        return nil
+    }
+    private var favTime: String? {
+        if let t = shop.deliveryTime, !t.isEmpty { return t }
+        guard let m = shop.avgCookTime, m > 0 else { return nil }
+        return "\(m)–\(m + 10) мин"
+    }
+
     var body: some View {
         Button(action: { Haptics.light(); onTap() }) {
             VStack(alignment: .leading, spacing: 0) {
@@ -938,11 +1013,13 @@ private struct FavOrgCard: View {
                             .font(.system(size: 13.5, weight: .bold))
                         }
                     }
+                    // Паритет с Android: category и delivery_time /favorites не отдаёт —
+                    // строка была пустой. Берём адрес и avg_cook_time «25–35 мин».
                     HStack(spacing: 6) {
-                        if let cat = shop.category, !cat.isEmpty {
+                        if let cat = favSubtitle {
                             Text(cat).font(.system(size: 13)).foregroundStyle(YMColor.muted).lineLimit(1)
                         }
-                        if let t = shop.deliveryTime, !t.isEmpty {
+                        if let t = favTime {
                             Circle().fill(YMColor.muted).frame(width: 3, height: 3)
                             Text(t).font(.system(size: 13)).foregroundStyle(YMColor.muted)
                         }

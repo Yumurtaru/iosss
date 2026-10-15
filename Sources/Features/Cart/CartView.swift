@@ -24,6 +24,25 @@ struct CartView: View {
     var onMenu: (() -> Void)? = nil
     /// Комментарий к заказу — тот же черновик, что на оформлении (CheckoutDraft).
     @State private var comment = ""
+    /// Комментарий в фокусе (клавиатура открыта) — см. bottomCTA ниже.
+    @FocusState private var commentFocused: Bool
+    /// Карточка заведения корзины — ради сервисного сбора (паритет с Android:
+    /// там корзина показывает «Сервисный сбор» и «Итого» уже со сбором, а здесь
+    /// итог был без него и на оформлении вдруг вырастал).
+    @State private var feeShop: ShopDetail?
+
+    private var serviceFee: Decimal { Money.parse(Fees.service(subtotal: cart.total, shop: feeShop)) }
+    private var cartGrand: Decimal { Money.parse(cart.total) + serviceFee }
+
+    private func loadFeeShop() async {
+        guard let slug = cart.shopSlug, !slug.isEmpty else {
+            await MainActor.run { feeShop = nil }
+            return
+        }
+        let d: ShopDetail? = try? await API.shared.get("api/v1/shops/\(slug)")
+        // Пока грузили, корзина могла перейти к другому заведению — чужой сбор не кладём.
+        await MainActor.run { if cart.shopSlug == slug { feeShop = d } }
+    }
 
     var body: some View {
         ZStack {
@@ -35,6 +54,7 @@ struct CartView: View {
             }
         }
         .navigationBarHidden(true)
+        .task(id: cart.shopSlug) { await loadFeeShop() }
     }
 
     // MARK: - Header «‹ Корзина»
@@ -93,7 +113,15 @@ struct CartView: View {
             }
             // Клавиатура комментария убирается жестом прокрутки.
             .scrollDismissesKeyboard(.interactively)
-            bottomCTA
+            // Пока открыта клавиатура — вместо высокой панели «Итого / Перейти
+            // к оформлению» узкая полоса «Готово»: панель поднималась над
+            // клавиатурой и закрывала поле комментария, а у многострочного
+            // поля нет клавиши, которая убирает клавиатуру.
+            if commentFocused {
+                keyboardDoneRow
+            } else {
+                bottomCTA
+            }
         }
     }
 
@@ -113,7 +141,9 @@ struct CartView: View {
                 Text(cart.shopName ?? "Магазин")
                     .font(.system(size: 14.5, weight: .bold))
                     .foregroundStyle(YMColor.text)
-                Text("В корзине \(cart.count) \(itemsWord(cart.count))")
+                // Слово — «товар/товара/товаров», как на плашке корзины: «3 блюда»
+                // у магазина или аптеки читалось как ошибка.
+                Text("В корзине \(cart.count) \(ruItemsWord(cart.count))")
                     .font(YMFont.caption)
                     .foregroundStyle(YMColor.muted)
             }
@@ -142,6 +172,7 @@ struct CartView: View {
                 .font(.system(size: 15))
                 .foregroundStyle(YMColor.muted)
             TextField("Комментарий к заказу…", text: $comment, axis: .vertical)
+                .focused($commentFocused)
                 .font(.system(size: 13.5))
                 .foregroundStyle(YMColor.text)
                 .tint(YMColor.accent)
@@ -150,6 +181,8 @@ struct CartView: View {
                     CheckoutDraft.shopId = cart.shopId
                     CheckoutDraft.comment = v
                 }
+                // П-25 №6: comment заказа сервер молча режет до 490 знаков.
+                .ymMaxLength($comment, 490)
         }
         .onAppear {
             if CheckoutDraft.shopId != nil, CheckoutDraft.shopId == cart.shopId, comment.isEmpty {
@@ -170,6 +203,9 @@ struct CartView: View {
         VStack(spacing: 9) {
             totalRow("Товары (\(cart.count))", Money.format(Money.parse(cart.total)), bold: true)
             totalRow("Доставка", "рассчитается при оформлении")
+            if serviceFee > 0 {
+                totalRow("Сервисный сбор", Money.format(serviceFee))
+            }
         }
         .padding(YMSpace.lg)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -186,6 +222,23 @@ struct CartView: View {
         }
     }
 
+    private var keyboardDoneRow: some View {
+        HStack {
+            Spacer()
+            Button("Готово") { commentFocused = false }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(YMColor.accent)
+        }
+        .padding(.horizontal, YMSpace.lg)
+        .padding(.vertical, YMSpace.sm)
+        .background(
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(alignment: .top) { YMColor.hairline.frame(height: 1) }
+                .ignoresSafeArea(edges: .bottom)
+        )
+    }
+
     // Нижний CTA: «Перейти к оформлению» + сумма.
     private var bottomCTA: some View {
         VStack(spacing: YMSpace.md) {
@@ -194,7 +247,8 @@ struct CartView: View {
                     .font(.system(size: 13.5))
                     .foregroundStyle(YMColor.muted)
                 Spacer()
-                Text(Money.format(Money.parse(cart.total)))
+                // Итог со сбором — как на Android и как потом на оформлении.
+                Text(Money.format(cartGrand))
                     .font(.system(size: 22, weight: .heavy))
                     .foregroundStyle(YMColor.text)
             }
@@ -250,15 +304,6 @@ struct CartView: View {
             Spacer()
             Spacer()
         }
-    }
-
-    // Склонение «блюдо / блюда / блюд».
-    private func itemsWord(_ count: Int) -> String {
-        let n = abs(count) % 100, n1 = n % 10
-        if n > 10 && n < 20 { return "блюд" }
-        if n1 > 1 && n1 < 5 { return "блюда" }
-        if n1 == 1 { return "блюдо" }
-        return "блюд"
     }
 }
 

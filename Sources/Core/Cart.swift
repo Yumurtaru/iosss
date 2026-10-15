@@ -99,7 +99,22 @@ final class Cart: ObservableObject {
         let modPrice = chosen.reduce(0) { $0 + ($1.price ?? 0) }
         let key = "\(product.id)-\(modifierIds.sorted().map(String.init).joined(separator: ","))"
         if let idx = lines.firstIndex(where: { $0.key == key }) {
-            lines[idx].qty = ((lines[idx].qty + qty) * 1000).rounded() / 1000   // суммируем
+            // Паритет с Android: количество суммируем, а цену, название и фото
+            // берём из свежей карточки. Корзина живёт на диске днями, и повторное
+            // добавление оставляло старую цену — итог расходился с сервером.
+            let old = lines[idx]
+            let newQty: Double = ((old.qty + qty) * 1000).rounded() / 1000   // суммируем
+            var freshPrice: Double = old.unitPrice
+            if let p = product.price { freshPrice = p + modPrice }
+            var line = CartLine(key: key, productId: old.productId, name: product.name ?? old.name,
+                                unitPrice: freshPrice, qty: newQty, modifierIds: old.modifierIds,
+                                modsLabel: old.modsLabel,
+                                photo: product.photos?.first?.pathWebp ?? old.photo)
+            line.unit = old.unit
+            line.qtyFractional = old.qtyFractional
+            line.qtyPresets = old.qtyPresets
+            line.qtyStep = old.qtyStep
+            lines[idx] = line
         } else {
             lines.append(CartLine(key: key, productId: product.id, name: product.name ?? "",
                 unitPrice: (product.price ?? 0) + modPrice, qty: qty, modifierIds: modifierIds,
@@ -161,10 +176,12 @@ struct CartSnapshotBody: Encodable {
     let subtotal: Double
 }
 
-/// Расчёт сервисного сбора (как на сервере): берётся с клиента только при payer == "client".
+/// Расчёт сервисного сбора (как на сервере): с клиента — при любом payer, кроме "shop".
 enum Fees {
     static func service(subtotal: Double, shop: ShopDetail?) -> Double {
-        guard let shop, (shop.serviceFeePayer ?? "") == "client" else { return 0 }
+        // Как на сервере (api_v1.php: payer === 'shop' ? 'shop' : 'client'): сбор не берётся
+        // только при payer == "shop". Пустое поле раньше давало 0 в приложении, а сервер сбор брал.
+        guard let shop, (shop.serviceFeePayer ?? "") != "shop" else { return 0 }
         if (shop.serviceFeeType ?? "percent") == "fixed" { return shop.serviceFeeFixed ?? 0 }
         // В Decimal: 1234,50 × 3 % в Double = 37,0349… → 37,03, сервер — 37,04.
         var v = Money.parse(subtotal) * Money.parse(shop.serviceFeePercent ?? 0) / 100

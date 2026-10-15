@@ -47,6 +47,9 @@ final class OrgViewModel: ObservableObject {
     @Published var isFav = false
     /// Флаг: isFav меняется программно (загрузка с сервера) — не слать тоггл в ответ.
     var favSyncing = false
+    /// Запрос избранного ещё идёт: двойной тап по ♥ слал POST и DELETE разом,
+    /// и на сервере оставалось не то, что на экране.
+    var favBusy = false
 
     // Отзывы (грузятся в фоне для всех типов организаций).
     @Published var reviews: [Review] = []
@@ -163,6 +166,9 @@ final class OrgViewModel: ObservableObject {
     func toggleFav() async {
         guard !favSyncing, let shopId = detail?.id else { return }
         let on = isFav
+        // Пока запрос идёт, новые тапы по ♥ игнорируются (см. биндинг в OrgView).
+        favBusy = true
+        defer { favBusy = false }
         do {
             if on { try await API.shared.postVoid("api/v1/favorites/\(shopId)") }
             else  { try await API.shared.deleteVoid("api/v1/favorites/\(shopId)") }
@@ -237,6 +243,15 @@ struct OrgView: View {
     @State private var pushedProduct: Int?
     @State private var pushedService: ServiceItem?
     @State private var showAuth = false
+
+    /// Открыть товар как go() на Главной: если экран товара сняли, не вызвав
+    /// сеттер (тап по вкладке, программный возврат), pushedProduct «висел», и
+    /// тап по блюду ничего не открывал. Сначала сбрасываем, потом идём.
+    private func openProduct(_ id: Int) {
+        if pushedProduct == nil && pushedService == nil { pushedProduct = id; return }
+        pushedProduct = nil; pushedService = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { pushedProduct = id }
+    }
     /// Заведение открыто внутри шторки профиля («Избранное») или «Жилья»: общие
     /// корзина и чат висят на корне вкладок и оттуда сейчас не покажутся —
     /// «Корзина» и 💬 раньше молчали. Тогда показываем их отсюда.
@@ -300,7 +315,9 @@ struct OrgView: View {
                     let stretch = max(0, minY)
                     PhotoPlaceholder(
                         url: API.imageURL(vm.detail?.cover ?? vm.detail?.banner ?? seedCover),
-                        label: "ОБЛОЖКА · ПАРАЛЛАКС",
+                        // Подпись видна, когда у заведения нет обложки: служебное
+                        // «· ПАРАЛЛАКС» из макета человеку не показываем.
+                        label: "ОБЛОЖКА",
                         radius: 0, tone: 0
                     )
                     .frame(width: geo.size.width, height: heroHeight + stretch)
@@ -326,12 +343,13 @@ struct OrgView: View {
 
     private var seedCover: String? { vm.seed?.cover ?? vm.seed?.banner ?? vm.seed?.logo }
 
-    /// «оценка / оценки / оценок».
+    /// «отзыв / отзыва / отзывов». Паритет с Android и с секцией «Отзывы»
+    /// ниже: одно и то же reviews_count на экране называлось и «оценками», и «отзывами».
     private static func ratingsWord(_ n: Int) -> String {
         let m10 = n % 10, m100 = n % 100
-        if m10 == 1 && m100 != 11 { return "оценка" }
-        if (2...4).contains(m10) && !(12...14).contains(m100) { return "оценки" }
-        return "оценок"
+        if m10 == 1 && m100 != 11 { return "отзыв" }
+        if (2...4).contains(m10) && !(12...14).contains(m100) { return "отзыва" }
+        return "отзывов"
     }
 
     // MARK: Sheet (поднятая шторка r28)
@@ -362,15 +380,23 @@ struct OrgView: View {
             .padding(.top, 20)
 
             // Баннер нерабочего времени: «Сейчас закрыто. Откроется <день> в <время>».
-            // Корзину собрать можно, оформить — когда заведение откроется.
+            // Корзину собрать можно, оформить — предзаказом ко времени работы.
             if !isOpen {
-                ClosedBanner(opensLabel: OrgHours.nextOpenLabel(vm.detail?.hours))
+                ClosedBanner(opensLabel: OrgHours.nextOpenLabel(vm.detail?.hours), preorder: !vm.isService)
                     .padding(.top, 12)
             }
 
             // Подзаголовок «Тип · кухня · теги».
             if let sub = subtitle, !sub.isEmpty {
                 Text(sub)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(YMColor.muted)
+                    .padding(.top, 6)
+            }
+            // Паритет с Android: описание, которое продавец написал о заведении,
+            // iOS не показывал нигде.
+            if let about = vm.detail?.description?.trimmingCharacters(in: .whitespacesAndNewlines), !about.isEmpty {
+                Text(about)
                     .font(.system(size: 13.5))
                     .foregroundStyle(YMColor.muted)
                     .padding(.top, 6)
@@ -417,6 +443,11 @@ struct OrgView: View {
             if vm.isService {
                 OrgBookingSection(slug: vm.slug, detail: vm.detail) { showAuth = true }
                     .padding(.top, 20)
+                // Паритет с Android: товары у организации услуг (салон продаёт
+                // косметику) показываем под записью. Нет товаров — блока нет.
+                if !vm.products.isEmpty {
+                    menuSection.padding(.top, 20)
+                }
             } else if vm.servicePlacement == "last" {
                 // Продавец положил услуги в категорию НИЖЕ первой категории
                 // меню: сначала еда, потом бронь игрового зала.
@@ -521,7 +552,10 @@ struct OrgView: View {
     private var addressCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Мини-карта: золотой пин по lat/lng.
-            if let lat = vm.detail?.lat, let lng = vm.detail?.lng {
+            // Координаты продавец вводит сам, сервер диапазон не проверяет: широта 555
+            // давала MapKit «Invalid Region» и закрывала приложение. Неверные — без карты.
+            if let lat = vm.detail?.lat, let lng = vm.detail?.lng,
+               CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: lat, longitude: lng)) {
                 OrgMiniMap(lat: lat, lng: lng)
                     .frame(height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
@@ -531,7 +565,8 @@ struct OrgView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(YMColor.accent)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(vm.detail?.address ?? "Адрес уточняется")
+                    // Пустой адрес из карточки («») давал пустую строку рядом с пином.
+                    Text(vm.detail?.address?.isEmpty == false ? (vm.detail?.address ?? "") : "Адрес уточняется")
                         .font(.system(size: 14.5, weight: .semibold))
                         .foregroundStyle(YMColor.text)
                     if let city = vm.seed?.category { // fallback; при наличии дистанции — покажется тут
@@ -581,9 +616,9 @@ struct OrgView: View {
                 ForEach(shownProducts) { p in
                     DishRow(product: p) {
                         Haptics.light()
-                        pushedProduct = p.id
+                        openProduct(p.id)
                     } onAdd: {
-                        pushedProduct = p.id   // «+» ведёт на карточку (модификаторы/степпер там)
+                        openProduct(p.id)   // «+» ведёт на карточку (модификаторы/степпер там)
                     }
                 }
                 if shownProducts.isEmpty, vm.products.isEmpty, let pe = vm.productsError {
@@ -649,7 +684,9 @@ struct OrgView: View {
                 // 401 и молча гасло обратно, без объяснения.
                 HeartButton(isFav: Binding(
                     get: { vm.isFav },
-                    set: { v in if Session.shared.isLoggedIn { vm.isFav = v } else { showAuth = true } }
+                    set: { v in
+                        if !Session.shared.isLoggedIn { showAuth = true } else if !vm.favBusy { vm.isFav = v }
+                    }
                 ), size: 38, favColor: YMColor.statusCancel)
                     .onChange(of: vm.isFav) { _ in Task { await vm.toggleFav() } }
             }
@@ -783,7 +820,13 @@ struct OrgView: View {
         return true
     }
     private var rating: Double? { vm.detail?.rating ?? vm.seed?.rating }
-    private var deliveryTime: String? { vm.detail?.deliveryTime ?? vm.seed?.deliveryTime }
+    /// delivery_time сервер не отдаёт. Паритет с Android: время приготовления
+    /// из avg_cook_time «25–35 мин» — из карточки, а без неё — из списка.
+    private var deliveryTime: String? {
+        if let t = vm.detail?.deliveryTime ?? vm.seed?.deliveryTime, !t.isEmpty { return t }
+        guard let m = vm.detail?.avgCookTime ?? vm.seed?.avgCookTime, m > 0 else { return nil }
+        return "\(m)–\(m + 10) мин"
+    }
     private var subtitle: String? {
         // «Тип · кухня · теги» — из категории Shop / категорий ShopDetail.
         var parts: [String] = []
@@ -795,7 +838,12 @@ struct OrgView: View {
     }
     /// Категории для меню-табов — КАТЕГОРИИ ТОВАРОВ магазина (по shopId), а не
     /// теги-категории организации (detail.categories). Их id совпадают с product.categoryId.
-    private var categories: [Category] { vm.productCategories }
+    /// Паритет с Android: раздел без товаров не показываем — вкладка открывала
+    /// «В этом разделе пока пусто» (подкатегории, скрытые позиции).
+    private var categories: [Category] {
+        let used = Set(vm.products.compactMap { $0.categoryId })
+        return vm.productCategories.filter { used.contains($0.id) }
+    }
 
     private var shownProducts: [Product] {
         activeCat == 0 ? vm.products : vm.products.filter { $0.categoryId == activeCat }
@@ -960,6 +1008,8 @@ struct OrgMiniMap: View {
 /// `opensLabel` = nil → только «Сейчас закрыто» (нет данных о часах).
 struct ClosedBanner: View {
     let opensLabel: String?
+    /// true — товары/еда: подсказка про предзаказ; false — услуги (запись по окнам).
+    var preorder: Bool = true
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
@@ -968,11 +1018,12 @@ struct ClosedBanner: View {
                     .font(.system(size: 14.5, weight: .bold))
                     .foregroundStyle(YMColor.text)
             }
-            // Предзаказ приложение не отправляет, и оформление закрытого заведения
-            // заблокировано («Заказ можно оформить, когда заведение откроется»).
-            // Раньше баннер обещал «предзаказ к открытию» — человек собирал корзину
-            // и упирался в серую кнопку.
-            Text("Оформить заказ можно будет, когда заведение откроется.")
+            // Предзаказ теперь есть (2026-10-13): оформление закрытого заведения
+            // уходит с preorder_at ко времени работы. Раньше баннер говорил
+            // «можно будет, когда откроется» — человек уходил, хотя мог заказать.
+            // У услуг записи по свободным окнам — про предзаказ не пишем.
+            Text(preorder ? "Можно оформить предзаказ — время выберете при оформлении."
+                          : "Записаться можно на свободное время.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(YMColor.muted)
         }
@@ -1032,7 +1083,8 @@ enum OrgHours {
             switch offset {
             case 0: whenLabel = "сегодня"
             case 1: whenLabel = "завтра"
-            default: whenLabel = "в " + ruWeekday(dow)
+            // «во вторник», а не «в вторник».
+            default: whenLabel = (dow == 2 ? "во " : "в ") + ruWeekday(dow)
             }
             return "\(whenLabel) в \(open)"
         }

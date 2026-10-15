@@ -6,6 +6,9 @@ enum APIError: LocalizedError {
     case network          // нет соединения — повторяем
     case timeout          // истёк таймаут — повторяем
     case unauthorized     // 401 — нужен повторный вход
+    /// 401 на запрос гостя (ушёл без токена). Паритет с Android (Repo.safeS):
+    /// «Сессия истекла» сбивала с толку — гость войти ещё и не пытался.
+    case guestNeedsLogin
     case decoding
     /// 409 «не хватает денег на кошельке». Сервер присылает суммы, и экран
     /// показывает «Пополните на 269 ₽» с кнопкой, а не «Ошибка сервера (409)».
@@ -23,6 +26,7 @@ enum APIError: LocalizedError {
         case .network:       return "Нет соединения с интернетом"
         case .timeout:       return "Превышено время ожидания. Попробуйте ещё раз"
         case .unauthorized:  return "Сессия истекла, войдите снова"
+        case .guestNeedsLogin: return "Войдите, чтобы продолжить"
         case .decoding:      return "Не удалось обработать ответ"
         case .walletShortage(_, _, _, let m): return m
         }
@@ -222,6 +226,8 @@ final class API {
                 }
             }
             if let handler = onUnauthorized { await MainActor.run { handler() } }
+            // Запрос ушёл без токена — это гость, а не истёкшая сессия (как Android).
+            if req.value(forHTTPHeaderField: "Authorization") == nil { throw APIError.guestNeedsLogin }
             throw APIError.unauthorized
         }
 
@@ -246,8 +252,11 @@ final class API {
                 var msg = env.error?.message ?? "Ошибка сервера"
                 // П-23.5: details {need: "email_code"} — служебный ключ, а не ошибка
                 // поля: к тексту не приклеиваем (было «…: email_code»).
+                // Машинный код (no_rooms, min_nights…) — не текст для человека:
+                // выходило «…: min_nights». Паритет с Android (parseServerError).
                 if status == 422, env.error?.details?["need"] == nil,
-                   let first = env.error?.details?.values.sorted().first, !first.isEmpty, !msg.contains(first) {
+                   let first = env.error?.details?.values.sorted().first, !first.isEmpty, !msg.contains(first),
+                   first.range(of: "^[a-z0-9_]+$", options: .regularExpression) == nil {
                     msg += ": " + first
                 }
                 // П-23: 4xx — с кодом и details (текст прежний), остальное как было.
@@ -317,7 +326,12 @@ final class API {
                   let token = env.data?.token, !token.isEmpty else { return .rejected }
             // Пока шло продление, человек вышел (или вошёл другой) — старую
             // сессию не возвращаем: иначе после перезапуска снова прежний аккаунт.
-            guard TokenStore.refresh == refresh else { return .unavailable }
+            // Паритет с Android (refreshBlocking): вошёл заново — повторяем запрос с
+            // токеном текущей сессии, а не показываем «Нет соединения».
+            guard TokenStore.refresh == refresh else {
+                if let cur = TokenStore.access, !cur.isEmpty { return .token(cur) }
+                return .unavailable
+            }
             TokenStore.access = token
             return .token(token)
         }

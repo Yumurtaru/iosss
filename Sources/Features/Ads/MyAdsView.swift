@@ -155,6 +155,9 @@ struct MyAdsView: View {
     /// Открытое объявление. Свой переход, а не AdsRoute: экран открывают и из
     /// профиля, где AdsRoute не зарегистрирован, — «Открыть» там не работало.
     @State private var openAdId: Int?
+    /// Паритет с Android: «Не хватает денег» ведёт прямо в кошелёк (раньше —
+    /// только совет «пополните в профиле»).
+    @State private var showWallet = false
 
     var body: some View {
         Group {
@@ -163,7 +166,10 @@ struct MyAdsView: View {
             } else if let e = vm.error, vm.items.isEmpty {
                 ErrorRetryView(message: e) { Task { vm.loading = true; await vm.load() } }
             } else if vm.items.isEmpty {
-                AdsEmptyView(title: "Объявлений пока нет", subtitle: "Подайте первое — это займёт пару минут.")
+                // Кнопка прямо в пустом экране: «Подайте первое» раньше
+                // оставляло искать маленький «+» в углу панели.
+                AdsEmptyView(title: "Объявлений пока нет", subtitle: "Подайте первое — это займёт пару минут.",
+                             actionTitle: "Подать объявление", action: { showNew = true })
             } else {
                 list
             }
@@ -178,9 +184,10 @@ struct MyAdsView: View {
         }
         .task { await vm.load() }
         .navigationDestination(isPresented: Binding(
-            get: { openAdId != nil }, set: { if !$0 { openAdId = nil } }
+            get: { openAdId != nil || showWallet },
+            set: { if !$0 { openAdId = nil; showWallet = false } }
         )) {
-            if let id = openAdId { AdDetailView(adId: id) }
+            if showWallet { WalletView() } else if let id = openAdId { AdDetailView(adId: id) }
         }
         // Черновик или правка, сохранённые без публикации, тоже должны
         // появиться в списке сразу, а не после обновления жестом.
@@ -208,9 +215,10 @@ struct MyAdsView: View {
             get: { vm.shortage != nil },
             set: { if !$0 { vm.shortage = nil } }
         )) {
-            Button("Понятно", role: .cancel) { vm.shortage = nil }
+            Button("Пополнить кошелёк") { vm.shortage = nil; openAdId = nil; showWallet = true }
+            Button("Позже", role: .cancel) { vm.shortage = nil }
         } message: {
-            Text((vm.shortage ?? "") + "\n\nПополните кошелёк в профиле — объявление сохранено и никуда не денется.")
+            Text((vm.shortage ?? "") + "\n\nОбъявление сохранено и никуда не денется.")
         }
         .overlay(alignment: .bottom) {
             if let t = vm.toast {
@@ -278,7 +286,9 @@ struct MyAdsView: View {
                                 }
                                 Button("Снять") { Task { await vm.archive(ad) } }
                                     .font(YMFont.callout).foregroundStyle(YMColor.muted)
-                                if MyAdsViewModel.expiresSoon(ad.expiresAt) {
+                                // Паритет с Android: в закрытом разделе продление сервер
+                                // не примет (Ads::publish без тарифа) — кнопки нет.
+                                if MyAdsViewModel.expiresSoon(ad.expiresAt) && ad.categoryOff != true {
                                     Button { Task { await vm.renew(ad) } } label: {
                                         Text("Продлить").font(YMFont.callout).fontWeight(.semibold)
                                             .foregroundStyle(YMColor.accent)
@@ -286,6 +296,10 @@ struct MyAdsView: View {
                                 }
                             } else if ad.status == "blocked" {
                                 Text("Обратитесь в поддержку").font(YMFont.caption).foregroundStyle(YMColor.muted)
+                            } else if ad.categoryOff == true {
+                                // Паритет с Android: раздел закрыт — сервер отдаёт can_publish = false,
+                                // а «Опубликовать» падало ошибкой «Категория недоступна».
+                                Text("Публикация недоступна").font(YMFont.caption).foregroundStyle(YMColor.muted)
                             } else {
                                 Button {
                                     Task { await vm.publish(ad) }
@@ -298,10 +312,15 @@ struct MyAdsView: View {
                                 }
                             }
                             Spacer()
-                            Button("Изменить") { editId = ad.stableId }
-                                .font(YMFont.callout).foregroundStyle(YMColor.muted)
-                            Button("Удалить") { confirmDelete = ad }
-                                .font(YMFont.callout).foregroundStyle(YMColor.statusCancel)
+                            // Заблокированное объявление сервер не даёт ни править, ни
+                            // удалять (403, routes/ads.php): раньше человек заполнял
+                            // форму зря и получал отказ только при сохранении.
+                            if ad.status != "blocked" {
+                                Button("Изменить") { editId = ad.stableId }
+                                    .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                                Button("Удалить") { confirmDelete = ad }
+                                    .font(YMFont.callout).foregroundStyle(YMColor.statusCancel)
+                            }
                         }
                     }
                     .padding(YMSpace.md)

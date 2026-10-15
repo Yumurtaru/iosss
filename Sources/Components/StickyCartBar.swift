@@ -15,14 +15,15 @@ struct StickyCartBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pressed = false
 
-    // Правильное склонение «блюдо / блюда / блюд».
+    // Склонение «товар / товара / товаров». Паритет с Android: «блюд» было
+    // неверно у магазина, аптеки или цветочного — плашка одна на все заведения.
     private var itemsWord: String {
         let n = abs(count) % 100
         let n1 = n % 10
-        if n > 10 && n < 20 { return "блюд" }
-        if n1 > 1 && n1 < 5 { return "блюда" }
-        if n1 == 1 { return "блюдо" }
-        return "блюд"
+        if n > 10 && n < 20 { return "товаров" }
+        if n1 > 1 && n1 < 5 { return "товара" }
+        if n1 == 1 { return "товар" }
+        return "товаров"
     }
 
     var body: some View {

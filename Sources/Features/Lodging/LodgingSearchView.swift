@@ -63,6 +63,9 @@ final class LodgingSearchVM: ObservableObject {
         loading = true
         failed = false
         gen += 1
+        // «Повторить» идёт мимо .task(id:) и не отменяется сменой фильтра:
+        // его поздний ответ ложился под новый фильтр. Чужую выборку отбрасываем.
+        let myGen = gen
         page = 1; moreFailed = false; loadingMore = false
         lastQuery = (cityId, rentLong, subtype, from, to, guests)
         do {
@@ -74,6 +77,7 @@ final class LodgingSearchVM: ObservableObject {
                 subtype: subtype == "all" ? nil : subtype,
                 rent: rentLong ? "long" : "daily"
             )
+            guard myGen == gen else { return }
             items = resp.itemsList
             total = resp.totalValue
         } catch is CancellationError {
@@ -81,6 +85,7 @@ final class LodgingSearchVM: ObservableObject {
             // выставит следующая задача, иначе экран мигнёт пустым списком.
             return
         } catch {
+            guard myGen == gen else { return }
             items = []
             total = 0
             failed = true
@@ -119,6 +124,20 @@ final class LodgingSearchVM: ObservableObject {
     }
 }
 
+/// Push/строка ленты о брони жилья (screen=trips): открыть «Мои поездки».
+/// Ставит вызывающий прямо перед NavCoordinator.openLodging(); забирает
+/// LodgingSearchView при появлении. Старше 15 с не исполняется — чтобы не
+/// сработать позже, при обычном входе в «Жильё».
+enum LodgingPushIntent {
+    private static var tripsAt: Date?
+    static func openTrips() { tripsAt = Date() }
+    static func take() -> Bool {
+        guard let at = tripsAt else { return false }
+        tripsAt = nil
+        return Date().timeIntervalSince(at) < 15
+    }
+}
+
 // MARK: - Экран
 
 struct LodgingSearchView: View {
@@ -138,6 +157,16 @@ struct LodgingSearchView: View {
         case trips
     }
     @State private var route: Route?
+
+    /// Стек сняли не кнопкой «Назад» (долгое нажатие «Назад» на несколько
+    /// экранов, закрытие поверх) — сеттер navigationDestination(isPresented:)
+    /// SwiftUI не зовёт, route «висит», и карточки больше не открывались
+    /// (как на Главной). Сначала сбрасываем, потом идём.
+    private func go(_ r: Route) {
+        if route == nil { route = r; return }
+        route = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { route = r }
+    }
 
     /// Ключ запроса: меняется — .task(id:) сам перезапускает поиск и отменяет
     /// предыдущий. Ручной дебаунс не нужен.
@@ -184,7 +213,7 @@ struct LodgingSearchView: View {
                     Button {
                         if let slug = item.unit?.slug, !slug.isEmpty {
                             Haptics.light()
-                            route = .unit(slug)
+                            go(.unit(slug))
                         }
                     } label: {
                         LodgingResultCard(item: item, rentLong: rentLong)
@@ -204,11 +233,18 @@ struct LodgingSearchView: View {
                             .padding(.horizontal, YMSpace.xl)
                     }
                 } else if !vm.loading && vm.items.isEmpty {
+                    // Без дат и фильтра «пусто» — это «жилья ещё нет» (новый город,
+                    // раздел только открылся): совет «другие даты» тут сбивал с толку.
+                    // Гостей больше 2 (по умолчанию) — тоже фильтр, паритет с Android.
+                    let noFilters: Bool = from == nil && to == nil && subtype == "all" && guests <= 2
+                    let dailyEmpty: String = noFilters
+                        ? "Посуточного жилья здесь пока нет. Загляните позже."
+                        : "Попробуйте другие даты или снимите фильтр по типу жилья."
                     Text(vm.failed
                          ? (vm.failText ?? "Не удалось загрузить. Проверьте связь.")
                          : (rentLong
                             ? "На длительный срок пока ничего не сдают. Попробуйте посуточно."
-                            : "Попробуйте другие даты или снимите фильтр по типу жилья."))
+                            : dailyEmpty))
                         .font(YMFont.callout)
                         .foregroundStyle(YMColor.muted)
                         .padding(.horizontal, YMSpace.xl)
@@ -236,10 +272,15 @@ struct LodgingSearchView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("Мои поездки") { route = .trips }
+                Button("Мои поездки") { go(.trips) }
                     .font(YMFont.subhead)
                     .foregroundStyle(YMColor.accent)
             }
+        }
+        // Push/строка ленты о брони (screen=trips): раньше открывался поиск, и
+        // «Мои поездки» человек искал сам. Раздел только что открыт — сразу туда.
+        .onAppear {
+            if LodgingPushIntent.take() { DispatchQueue.main.async { go(.trips) } }
         }
         .task(id: queryKey) {
             if searchedKey == queryKey, !vm.failed, !vm.items.isEmpty { return }

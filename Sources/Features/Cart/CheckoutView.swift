@@ -67,11 +67,16 @@ private struct OrderBody: Encodable {
     let promoCode: String?
     /// Предзаказ у закрытого заведения: "YYYY-MM-DD HH:MM" по Москве (ОТВЕТЫ-САЙТА п. 7 к П-24).
     let preorderAt: String?
+    /// «Нужна сдача с …» при оплате наличными — как на сайте (checkout.js
+    /// change_from). Сервер принимает поле (api_v1.php, payment_note), а
+    /// приложение его не слало. nil — в JSON не попадает.
+    var changeFrom: String? = nil
     enum CodingKeys: String, CodingKey {
         case shopId = "shop_id", items, deliveryType = "delivery_type", paymentType = "payment_type",
              address, comment, deliveryPrice = "delivery_price", lat, lng,
              spendPointsAll = "spend_points_all", idempotencyKey = "idempotency_key",
-             tableNumber = "table_number", promoCode = "promo_code", preorderAt = "preorder_at"
+             tableNumber = "table_number", promoCode = "promo_code", preorderAt = "preorder_at",
+             changeFrom = "change_from"
     }
 }
 /// Ответ POST api/v1/promo/check.
@@ -80,6 +85,9 @@ private struct PromoCheckResult: Decodable {
     let type: String?
     // Ключи без CodingKeys: декодер API сам переводит free_delivery → freeDelivery.
     let freeDelivery: Bool?
+    /// Код-условие АКЦИИ: сервер отвечает discount 0 и promotion: true
+    /// (api_v1.php, promo/check) — скидку считает движок акций при пересчёте.
+    let promotion: Bool?
 }
 // Тело расчёта доставки (совпадает со старым клиентом).
 // `address` нужен заведениям БЕЗ зон доставки: у них цена одна на весь город,
@@ -127,13 +135,28 @@ private enum Fulfillment: String, CaseIterable, Hashable {
 // Онлайн-оплаты на экране оформления нет — ни редиректа на ЮKassa, ни
 // подтверждения платежа, поэтому и значения соответствующие. Так же на Android.
 private enum Payment: String, CaseIterable, Hashable {
-    case cash, card
+    // sbp — «СБП по QR-коду» при получении, как на сайте (checkout.js PAY_LABEL).
+    // Сервер его принимает (api_v1.php), а заведение, включившее только СБП,
+    // раньше было не оформить: экран давал наличные/карту, сервер отказывал.
+    case cash, card, sbp
     // Значения из белого списка сервера: cash | card_courier | sbp | online_card
     // (routes/api_v1.php). Всё прочее сервер молча заменяет на "cash" — и раньше
     // "online" именно так и превращалось в наличные: человек выбирал «Картой»,
     // а курьер приезжал за наличными.
-    var apiValue: String { self == .card ? "card_courier" : "cash" }
-    var title: String { self == .card ? "Картой" : "Наличные" }
+    var apiValue: String {
+        switch self {
+        case .cash: return "cash"
+        case .card: return "card_courier"
+        case .sbp:  return "sbp"
+        }
+    }
+    var title: String {
+        switch self {
+        case .cash: return "Наличные"
+        case .card: return "Картой"
+        case .sbp:  return "СБП"
+        }
+    }
 }
 
 struct CheckoutView: View {
@@ -200,6 +223,12 @@ struct CheckoutView: View {
     @State private var codeFree = false
     @State private var codeMsg: String?
     @State private var checkingCode = false
+    /// «Сдача с» (только для наличных) — уходит в заказ как change_from.
+    @State private var changeFrom = ""
+    /// Поле ввода в фокусе (клавиатура открыта): тогда нижняя панель сжимается
+    /// до «Готово», чтобы не закрывать поле над клавиатурой.
+    private enum Field: Hashable { case table, promo, comment, change }
+    @FocusState private var field: Field?
 
     // Город из настроек — клиент его НЕ вводит (шапка «Ваш город»).
     private var cityName: String { Session.shared.cityName ?? "" }
@@ -245,7 +274,15 @@ struct CheckoutView: View {
                 // сменили — ответ по старому коду не должен вернуть его в заказ.
                 if silent && appliedCode != code { return }
                 let d = r.discount ?? 0
-                if d > 0 || r.freeDelivery == true {
+                // Код-условие акции (promotion: true, скидка 0): код оставляем —
+                // он уходит в предпросмотр и в заказ, скидку считает движок акций.
+                // Раньше такой код снимался как «не даёт скидки», и акция по
+                // промокоду в приложении не срабатывала (на сайте — срабатывала).
+                let isPromotion = r.promotion == true || r.type == "promotion"
+                if isPromotion && d <= 0 && r.freeDelivery != true {
+                    appliedCode = code; codeDiscount = 0; codeFree = false
+                    codeMsg = "Промокод принят — скидка появится в итогах, если выполнены условия акции"
+                } else if d > 0 || r.freeDelivery == true {
                     appliedCode = code; codeDiscount = d; codeFree = r.freeDelivery == true
                     codeMsg = r.freeDelivery == true ? "Промокод применён: бесплатная доставка" : "Промокод применён: −" + Money.format(d)
                 } else {
@@ -349,10 +386,13 @@ struct CheckoutView: View {
         return allowed.isEmpty ? Fulfillment.allCases : allowed
     }
     /// Способы оплаты, которые принимает заведение (аналогично).
+    /// СБП — только если заведение явно включило "sbp" (как Android; решение
+    /// владельца по СБП ещё не принято). Способы не настроены — прежняя пара.
     private var allowedPayments: [Payment] {
-        guard let list = shop?.paymentMethods, !list.isEmpty else { return Payment.allCases }
+        let fallback: [Payment] = [.cash, .card]
+        guard let list = shop?.paymentMethods, !list.isEmpty else { return fallback }
         let allowed = Payment.allCases.filter { list.contains($0.apiValue) }
-        return allowed.isEmpty ? Payment.allCases : allowed
+        return allowed.isEmpty ? fallback : allowed
     }
     /// Заведение закрыто прямо сейчас (считает сервер — часы работы заданы его
     /// временем, а не временем телефона).
@@ -387,6 +427,34 @@ struct CheckoutView: View {
         !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin && !quoteMissing
             && (!needTime || preorderValid)
             && (cart.shopSlug == nil || shop != nil) && !promoPending
+    }
+
+    /// Почему «Оформить заказ» сейчас серая — коротко, прямо у кнопки. Причины
+    /// были выше по экрану (а часть — нигде), у самой кнопки была тишина, и
+    /// человек считал, что «кнопка не работает». Порядок — как в ctaEnabled.
+    /// Короткие переходные состояния (загрузка карточки, пересчёт акций) не
+    /// пишем, чтобы строка не мигала.
+    private var ctaHint: String? {
+        if ctaEnabled || placing || cart.isEmpty { return nil }
+        if cart.shopSlug != nil && shop == nil {
+            return shopLoadError == nil ? nil : "Не удалось загрузить условия заведения — нажмите на сообщение вверху"
+        }
+        if noAddress {
+            return selectedAddress == nil ? "Выберите или добавьте адрес доставки" : "У адреса нет точки на карте — добавьте его заново"
+        }
+        if outOfZone { return "Доставка по этому адресу недоступна" }
+        if belowMin {
+            let minSum = Money.format(Money.parse(quote?.minOrder ?? 0))
+            return "Минимальная сумма заказа: " + minSum
+        }
+        if quoteMissing {
+            return quoteError == nil ? "Считаем стоимость доставки…" : "Не удалось рассчитать доставку — нажмите «повторить» выше"
+        }
+        if needTime && !preorderValid {
+            if preorderDays.isEmpty { return "В ближайшие 7 дней заведение не работает" }
+            return shopClosed ? "Заведение закрыто — выберите время предзаказа выше" : "Выберите время выше"
+        }
+        return nil
     }
 
     var body: some View {
@@ -508,6 +576,10 @@ struct CheckoutView: View {
                 if fulfillment == .dineIn {
                     tableField.padding(.top, YMSpace.md)
                 }
+                // Паритет с Android и сайтом: при самовывозе — где забирать.
+                if fulfillment == .pickup {
+                    pickupCard.padding(.top, YMSpace.md)
+                }
                 // «Когда» — как на сайте: как можно скорее или ко времени (день и
                 // время в часы работы). Закрыто — только ко времени (предзаказ).
                 if shop != nil {
@@ -554,6 +626,18 @@ struct CheckoutView: View {
 
                 SectionKicker("Оплата").padding(.top, YMSpace.lg).padding(.bottom, YMSpace.sm)
                 YMSegmented(options: allowedPayments, selection: $payment) { $0.title }
+                // Как на сайте: при СБП — как будет проходить оплата; при
+                // наличных — «Сдача с» (cart.php / checkout.js).
+                if payment == .sbp {
+                    Text("После подтверждения заказа продавец пришлёт QR-код для оплаты по СБП.")
+                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, YMSpace.sm)
+                }
+                if payment == .cash {
+                    changeField.padding(.top, YMSpace.md)
+                }
 
                 commentField.padding(.top, YMSpace.lg)
 
@@ -569,6 +653,8 @@ struct CheckoutView: View {
             }
             .padding(.horizontal, YMSpace.xl)
         }
+        // Клавиатура убирается жестом прокрутки (как в корзине).
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private var storeBanner: some View {
@@ -580,7 +666,9 @@ struct CheckoutView: View {
             .frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(cart.shopName ?? "Магазин").font(.system(size: 14.5, weight: .bold)).foregroundStyle(YMColor.text)
-                Text("\(cart.count) поз. в заказе").font(YMFont.caption).foregroundStyle(YMColor.muted)
+                // cart.count — число штук, а не позиций: одна позиция ×3 читалась
+                // как «3 поз.». Слово то же, что в корзине.
+                Text("В заказе \(cart.count) \(ruItemsWord(cart.count))").font(YMFont.caption).foregroundStyle(YMColor.muted)
             }
             Spacer()
         }
@@ -621,21 +709,38 @@ struct CheckoutView: View {
                 }
             }
 
-            // ＋ Добавить новый адрес
-            Button(action: { Haptics.light(); showAddAddress = true }) {
-                HStack(spacing: YMSpace.sm) {
-                    Text("＋").font(.system(size: 17, weight: .bold)).foregroundStyle(YMColor.accent)
-                    Text("Добавить новый адрес")
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(YMColor.accent)
-                    Spacer()
+            // ＋ Добавить новый адрес. П-25 №6: сервер хранит не больше 50 —
+            // на пределе кнопку не показываем, а говорим почему.
+            if addresses.count >= 50 {
+                Text("Сохранено 50 адресов — это максимум. Удалите ненужный в профиле, чтобы добавить новый.")
+                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+            } else {
+                Button(action: { Haptics.light(); showAddAddress = true }) {
+                    HStack(spacing: YMSpace.sm) {
+                        Text("＋").font(.system(size: 17, weight: .bold)).foregroundStyle(YMColor.accent)
+                        Text("Добавить новый адрес")
+                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(YMColor.accent)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 12)
                 }
-                .padding(.horizontal, 10).padding(.vertical, 12)
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             // ETA доставки / минимум — только для выбранного адреса.
-            if let q = quote, q.available, let tmin = q.timeMin, let tmax = q.timeMax, tmax > 0 {
-                Text("\(tmin)–\(tmax) мин")
+            // Ко времени / предзаказ: «30–45 мин» сбивало — заказ привезут к
+            // выбранному времени, а не через столько минут.
+            if !needTime, let q = quote, q.available, let tmin = q.timeMin, let tmax = q.timeMax, tmax > 0 {
+                // «0–30» у зоны = «до 30 мин», равные границы — «~30 мин» (как на Android).
+                Text(Self.etaText(tmin, tmax))
+                    .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10).padding(.vertical, 2)
+            }
+            if let hint = freeDeliveryHint {
+                Text(hint)
                     .font(YMFont.caption).foregroundStyle(YMColor.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 10).padding(.vertical, 2)
@@ -650,6 +755,13 @@ struct CheckoutView: View {
         .padding(YMSpace.xs)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+    }
+
+    /// «30–45 мин»; нижняя граница 0 — «до 30 мин»; равные границы — «~30 мин».
+    static func etaText(_ lo: Int, _ hi: Int) -> String {
+        if lo <= 0 { return "до \(hi) мин" }
+        if lo >= hi { return "~\(hi) мин" }
+        return "\(lo)–\(hi) мин"
     }
 
     private func addressRow(_ a: Address) -> some View {
@@ -678,10 +790,54 @@ struct CheckoutView: View {
         HStack(spacing: YMSpace.sm) {
             Image(systemName: "number").font(.system(size: 15)).foregroundStyle(YMColor.muted)
             TextField("Номер стола", text: $tableNumber)
+                .focused($field, equals: .table)
                 .font(.system(size: 13.5))
                 .foregroundStyle(YMColor.text)
                 .tint(YMColor.accent)
                 .onChange(of: tableNumber) { v in CheckoutDraft.shopId = cart.shopId; CheckoutDraft.table = v }
+                // П-25 №6: table_number сервер хранит до 20 знаков.
+                .ymMaxLength($tableNumber, 20)
+        }
+        .padding(14)
+        .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+    }
+
+    /// Самовывоз: «Заберёте заказ в заведении» и адрес заведения (как Android).
+    private var pickupCard: some View {
+        HStack(alignment: .top, spacing: YMSpace.sm) {
+            Image(systemName: "bag").font(.system(size: 15)).foregroundStyle(YMColor.muted)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Заберёте заказ в заведении")
+                    .font(.system(size: 13.5)).foregroundStyle(YMColor.text)
+                if let a = pickupAddress {
+                    Text(a).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+    }
+
+    private var pickupAddress: String? {
+        let a = (shop?.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return a.isEmpty ? nil : a
+    }
+
+    /// «Сдача с» — необязательное поле для наличных (сервер хранит до 100 знаков).
+    private var changeField: some View {
+        HStack(spacing: YMSpace.sm) {
+            Image(systemName: "banknote").font(.system(size: 15)).foregroundStyle(YMColor.muted)
+            TextField("Сдача с (сумма купюры, необязательно)", text: $changeFrom)
+                .focused($field, equals: .change)
+                .keyboardType(.numberPad)
+                .font(.system(size: 13.5))
+                .foregroundStyle(YMColor.text)
+                .tint(YMColor.accent)
+                .ymMaxLength($changeFrom, 9)
         }
         .padding(14)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -693,6 +849,7 @@ struct CheckoutView: View {
             HStack(spacing: YMSpace.sm) {
                 Image(systemName: "ticket").font(.system(size: 15)).foregroundStyle(YMColor.muted)
                 TextField("Промокод", text: $promoInput)
+                    .focused($field, equals: .promo)
                     .font(.system(size: 13.5))
                     .foregroundStyle(YMColor.text)
                     .tint(YMColor.accent)
@@ -732,10 +889,13 @@ struct CheckoutView: View {
         HStack(spacing: YMSpace.sm) {
             Image(systemName: "square.and.pencil").font(.system(size: 15)).foregroundStyle(YMColor.muted)
             TextField("Комментарий к заказу…", text: $comment, axis: .vertical)
+                .focused($field, equals: .comment)
                 .font(.system(size: 13.5))
                 .foregroundStyle(YMColor.text)
                 .tint(YMColor.accent)
                 .onChange(of: comment) { v in CheckoutDraft.shopId = cart.shopId; CheckoutDraft.comment = v }
+                // П-25 №6: comment заказа сервер молча режет до 490 знаков.
+                .ymMaxLength($comment, 490)
         }
         .padding(14)
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -891,32 +1051,14 @@ struct CheckoutView: View {
 
     private var bottomCTA: some View {
         VStack(spacing: YMSpace.md) {
-            HStack {
-                Text("Итого").font(.system(size: 13.5)).foregroundStyle(YMColor.muted)
-                Spacer()
-                Text(Money.format(grandTotal)).font(.system(size: 22, weight: .heavy)).foregroundStyle(YMColor.text)
-            }
-            if let e = errorText {
-                Text(e).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if !session.isLoggedIn && !placing {
-                // Сессия истекла (или вышли из аккаунта в профиле), а оформление
-                // открыто: войти отсюда, корзина и введённое остаются.
-                Button(action: { Haptics.light(); showAuth = true }) {
-                    Text("Войти, чтобы оформить заказ")
-                }
-                .buttonStyle(YMPrimaryButtonStyle())
+            // Клавиатура открыта — вместо панели «Итого / Оформить» узкая
+            // полоса «Готово»: высокая панель поднималась над клавиатурой и
+            // закрывала поле (комментарий, промокод, стол), а у многострочного
+            // комментария нет клавиши, которая убирает клавиатуру.
+            if field != nil {
+                keyboardDoneRow
             } else {
-                Button(action: placeOrder) {
-                    HStack(spacing: YMSpace.sm) {
-                        if placing { ProgressView().tint(YMColor.onAccent) }
-                        Text(placing ? "Оформляем…" : ctaTitle)
-                    }
-                }
-                .buttonStyle(YMPrimaryButtonStyle())
-                .disabled(!ctaEnabled)
+                ctaContent
             }
         }
         // Шторка входа — на нижней панели, а не на корне экрана: там уже висит
@@ -928,14 +1070,59 @@ struct CheckoutView: View {
             .environmentObject(Session.shared)
         }
         .padding(.horizontal, YMSpace.lg)
-        .padding(.top, YMSpace.lg)
-        .padding(.bottom, YMSpace.xxl)
+        .padding(.top, field == nil ? YMSpace.lg : YMSpace.sm)
+        .padding(.bottom, field == nil ? YMSpace.xxl : YMSpace.sm)
         .background(
             Rectangle()
                 .fill(.ultraThinMaterial)
                 .overlay(alignment: .top) { YMColor.hairline.frame(height: 1) }
                 .ignoresSafeArea(edges: .bottom)
         )
+    }
+
+    private var keyboardDoneRow: some View {
+        HStack {
+            Spacer()
+            Button("Готово") { field = nil }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(YMColor.accent)
+        }
+    }
+
+    @ViewBuilder private var ctaContent: some View {
+        HStack {
+            Text("Итого").font(.system(size: 13.5)).foregroundStyle(YMColor.muted)
+            Spacer()
+            Text(Money.format(grandTotal)).font(.system(size: 22, weight: .heavy)).foregroundStyle(YMColor.text)
+        }
+        if let e = errorText {
+            Text(e).font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if !session.isLoggedIn && !placing {
+            // Сессия истекла (или вышли из аккаунта в профиле), а оформление
+            // открыто: войти отсюда, корзина и введённое остаются.
+            Button(action: { Haptics.light(); showAuth = true }) {
+                Text("Войти, чтобы оформить заказ")
+            }
+            .buttonStyle(YMPrimaryButtonStyle())
+        } else {
+            Button(action: placeOrder) {
+                HStack(spacing: YMSpace.sm) {
+                    if placing { ProgressView().tint(YMColor.onAccent) }
+                    Text(placing ? "Оформляем…" : ctaTitle)
+                }
+            }
+            .buttonStyle(YMPrimaryButtonStyle())
+            .disabled(!ctaEnabled)
+        }
+        // Причина серой кнопки — прямо под ней (см. ctaHint).
+        if session.isLoggedIn, errorText == nil, let hint = ctaHint {
+            Text(hint).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: - Загрузка / расчёт
@@ -1026,6 +1213,21 @@ struct CheckoutView: View {
         }
     }
 
+    /// «Сдача с» — только цифры (вставка из буфера могла принести пробелы и «₽»).
+    private var changeDigits: String { changeFrom.filter { $0.isNumber } }
+
+    /// Как на сайте (checkout.js): «Добавьте на N ₽ до бесплатной доставки»,
+    /// когда доставка платная, а у зоны/тарифа есть порог free_from (он в расчёте
+    /// доставки). Сравниваем с оплачиваемой суммой товаров — так считает сервер.
+    private var freeDeliveryHint: String? {
+        guard fulfillment == .delivery, !freeDelivery, let q = quote, q.available else { return nil }
+        let price = Money.parse(q.deliveryPrice ?? 0)
+        let from = Money.parse(q.freeFrom ?? 0)
+        let goods = Money.parse(quotedGoods ?? goodsForQuote)
+        guard price > 0, from > 0, goods < from else { return nil }
+        return "Добавьте на " + Money.format(from - goods) + " до бесплатной доставки"
+    }
+
     /// Что клиент платит за товары: корзина минус скидка и баллы (не меньше 0).
     private var goodsForQuote: Double {
         let paid = Money.parse(cart.total) - promoDiscount - codeOff - pointsSpent
@@ -1104,7 +1306,9 @@ struct CheckoutView: View {
             tableNumber: fulfillment == .dineIn && !tableNumber.trimmingCharacters(in: .whitespaces).isEmpty
                 ? String(tableNumber.trimmingCharacters(in: .whitespaces).prefix(20)) : nil,
             promoCode: appliedCode,
-            preorderAt: needTime ? preorderAt : nil
+            preorderAt: needTime ? preorderAt : nil,
+            // Только для наличных и только непустое — как сайт (change_from || null).
+            changeFrom: payment == .cash && !changeDigits.isEmpty ? changeDigits : nil
         )
 
         Task {
@@ -1236,7 +1440,8 @@ private struct AddAddressSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section { TextField("Название (Дом, Работа…)", text: $label) }
+                // П-25 №6: пределы полей адреса — как хранит сервер (лишнее он режет молча).
+                Section { TextField("Название (Дом, Работа…)", text: $label).ymMaxLength($label, 100) }
                 Section("Адрес") {
                     // Город берётся из настроек — не поле ввода.
                     if !cityName.isEmpty {
@@ -1244,6 +1449,7 @@ private struct AddAddressSheet: View {
                     }
                     TextField("Улица", text: $street)
                         .onChange(of: street) { v in scheduleSuggest(v) }
+                        .ymMaxLength($street, 190)
                     // Подсказки Dadata, отфильтрованные по выбранному городу.
                     ForEach(suggestions) { s in
                         Button { pick(s) } label: {
@@ -1254,11 +1460,15 @@ private struct AddAddressSheet: View {
                             }
                         }
                     }
-                    TextField("Дом", text: $house)
+                    TextField("Дом", text: $house).ymMaxLength($house, 30)
                     TextField("Квартира (по желанию)", text: $apartment).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($apartment, 30)
                     TextField("Подъезд (по желанию)", text: $entrance).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($entrance, 20)
                     TextField("Этаж (по желанию)", text: $floor).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($floor, 20)
                     TextField("Домофон (по желанию)", text: $intercom).keyboardType(.numbersAndPunctuation)
+                        .ymMaxLength($intercom, 50)
                 }
                 if let e = error { Text(e).foregroundStyle(YMColor.statusCancel).font(YMFont.caption) }
                 Section {

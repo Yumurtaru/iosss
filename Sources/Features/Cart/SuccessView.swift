@@ -51,7 +51,10 @@ struct SuccessView: View {
         }
         switch order.deliveryType {
         case "delivery":           return "Ожидаемая доставка: \(span)"
-        case "pickup", "dine_in":  return "Будет готов примерно через \(span)"
+        // «примерно через ~15 мин» — двойное «примерно»: тильду здесь убираем.
+        case "pickup", "dine_in":
+            let plain = span.hasPrefix("~") ? String(span.dropFirst()) : span
+            return "Будет готов примерно через \(plain)"
         default:                   return "Ориентировочно: \(span)"
         }
     }
