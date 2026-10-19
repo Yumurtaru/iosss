@@ -361,7 +361,8 @@ private struct AddAddressView: View {
             // Раньше ошибка (лимит 50 адресов, нет сети) глушилась, а окно
             // закрывалось так, будто адрес сохранён.
             do {
-                try await API.shared.postVoid("api/v1/profile/addresses", body: body)
+                // П-27.14: ключ повтора — повтор после обрыва связи не создаёт второй адрес.
+                try await API.shared.postVoid("api/v1/profile/addresses", body: body, retryKey: true)
                 await MainActor.run { Haptics.success(); dismiss() }
             } catch {
                 await MainActor.run {

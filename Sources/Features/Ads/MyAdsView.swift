@@ -197,7 +197,11 @@ struct MyAdsView: View {
         .sheet(item: Binding(get: { editId.map { AdEditTarget(id: $0) } },
                              set: { editId = $0?.id }),
                onDismiss: { Task { await vm.load() } }) { target in
-            AdFormView(editAdId: target.id) { _ in editId = nil; Task { await vm.load() } }
+            // П-26.6: признак закрытой рубрики — в форму правки.
+            AdFormView(editAdId: target.id,
+                       categoryOff: vm.items.first(where: { $0.stableId == target.id })?.categoryOff == true) { _ in
+                editId = nil; Task { await vm.load() }
+            }
         }
         .alert("Удалить объявление?", isPresented: Binding(
             get: { confirmDelete != nil },

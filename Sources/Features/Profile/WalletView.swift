@@ -32,15 +32,48 @@ final class WalletViewModel: ObservableObject {
     var minTopup: Decimal { info?.minTopup ?? 100 }
     var maxTopup: Decimal { info?.maxTopup ?? 300_000 }
 
+    /// П-27.11 (А72): история постранично — meta {page, per_page: 20, has_more}.
+    /// Старый сервер meta не шлёт — hasMore false, всё как раньше (одна выдача).
+    @Published var hasMore = false
+    @Published var loadingMore = false
+    @Published var moreFailed = false
+    private var page = 1
+
     func load() async {
         do {
-            info = try await API.shared.get("api/v1/wallet")
+            let r: WalletPage = try await API.shared.get("api/v1/wallet")
+            info = r.info
+            page = 1
+            hasMore = r.hasMore && !(r.info.transactions ?? []).isEmpty
+            moreFailed = false
             error = nil
         } catch is CancellationError {
         } catch {
             self.error = (error as? LocalizedError)?.errorDescription ?? "Не удалось загрузить"
         }
         loading = false
+    }
+
+    /// Следующая страница истории (page=N). Дубли на стыке страниц (новая
+    /// операция сдвинула выдачу) отбрасываем по id.
+    func loadMore() async {
+        guard hasMore, !loadingMore, info != nil else { return }
+        loadingMore = true
+        defer { loadingMore = false }
+        let next = page + 1
+        do {
+            let r: WalletPage = try await API.shared.get("api/v1/wallet", query: ["page": String(next)])
+            let old = info?.transactions ?? []
+            let seen = Set(old.compactMap { $0.id })
+            let fresh = (r.info.transactions ?? []).filter { t in t.id.map { !seen.contains($0) } ?? true }
+            info?.transactions = old + fresh
+            page = next
+            hasMore = r.hasMore && !(r.info.transactions ?? []).isEmpty
+            moreFailed = false
+        } catch is CancellationError {
+        } catch {
+            moreFailed = true
+        }
     }
 
     /// Платёж создаётся — второе «Пополнить» в это время создавало второй платёж.
@@ -239,6 +272,25 @@ struct WalletView: View {
                     .padding(.horizontal, YMSpace.md)
                     .padding(.vertical, YMSpace.xs)
                     .ymCard()
+
+                    // П-27.11: есть ещё операции — кнопка «Показать ещё» (не
+                    // автодогрузка: в обычном VStack подвал «виден» сразу).
+                    if vm.hasMore {
+                        Button { Task { await vm.loadMore() } } label: {
+                            Group {
+                                if vm.loadingMore { ProgressView() }
+                                else {
+                                    Text(vm.moreFailed ? "Не удалось загрузить — повторить" : "Показать ещё")
+                                        .font(YMFont.callout).fontWeight(.semibold)
+                                        .foregroundStyle(YMColor.accent)
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, YMSpace.sm)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(vm.loadingMore)
+                    }
                 }
             }
             .padding(.horizontal, YMSpace.xl)
@@ -286,6 +338,16 @@ struct WalletView: View {
         .padding(.top, YMSpace.sm)
         .frame(maxHeight: .infinity, alignment: .top)
     }
+}
+
+/// П-27.11: ответ GET api/v1/wallet вместе с meta конверта (has_more).
+/// Сам кошелёк разбирается как прежде (WalletInfo), meta приносит API.perform.
+private final class WalletPage: Decodable, PageMetaReceiving {
+    let info: WalletInfo
+    private var meta: PageMeta?
+    var hasMore: Bool { meta?.hasMore ?? false }
+    init(from decoder: Decoder) throws { info = try decoder.singleValueContainer().decode(WalletInfo.self) }
+    func receive(meta: PageMeta?) { self.meta = meta }
 }
 
 // MARK: - Строка истории

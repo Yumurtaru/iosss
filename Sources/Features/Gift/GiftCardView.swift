@@ -18,6 +18,11 @@ struct GiftCardView: View {
     @State private var card: GiftCard?
     @State private var loading = false
     @State private var error: String?
+    /// П-27.12: привязка найденной карты к аккаунту
+    /// (POST api/profile/giftcard/activate {code}) — только для вошедшего.
+    @ObservedObject private var session = Session.shared
+    @State private var activating = false
+    @State private var activateResult: (text: String, ok: Bool)?
 
     private var canCheck: Bool {
         code.trimmingCharacters(in: .whitespaces).count >= 4 && !loading
@@ -83,7 +88,7 @@ struct GiftCardView: View {
                 .frame(height: 54)
                 .background(YMColor.surface2,
                             in: RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous))
-                .onChange(of: code) { _ in error = nil; card = nil }
+                .onChange(of: code) { _ in error = nil; card = nil; activateResult = nil }
 
             Button { Haptics.light(); check() } label: {
                 Group {
@@ -140,6 +145,30 @@ struct GiftCardView: View {
                 // Срок — со временем (карта перестаёт действовать в этот момент);
                 // дата другого года теперь показывается с годом (DateFmt.short).
                 infoRow("Действует до", DateFmt.short(e))   // с временем: карта перестаёт действовать в этот момент
+            }
+            // П-27.12: активную карту можно привязать к своему аккаунту. Ответы
+            // сервера 404 / 400 / 409 / 429 — его текстом; свою карту повторно — 200.
+            if active && session.isLoggedIn {
+                if let r = activateResult {
+                    Text(r.text).font(YMFont.callout)
+                        .foregroundStyle(r.ok ? YMColor.statusDone : YMColor.statusCancel)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if activateResult?.ok != true {
+                    Button { Haptics.light(); activate() } label: {
+                        Group {
+                            if activating { ProgressView().tint(YMColor.accent) }
+                            else { Text("Привязать к аккаунту").font(YMFont.headline).foregroundStyle(YMColor.accent) }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: YMRadius.control, style: .continuous)
+                                .strokeBorder(YMColor.accent.opacity(0.55), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(activating)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -219,6 +248,30 @@ struct GiftCardView: View {
         }
     }
 
+    /// П-27.12: привязать карту к аккаунту. Конверт сайта {ok, data:{balance, amount}}.
+    private func activate() {
+        let input = code.trimmingCharacters(in: .whitespaces)
+        guard !activating, input.count >= 4 else { return }
+        activating = true; activateResult = nil
+        Task {
+            do {
+                let _: GiftActivateResp = try await API.shared.post("api/profile/giftcard/activate",
+                                                                    body: ["code": input])
+                if code.trimmingCharacters(in: .whitespaces) == input {
+                    Haptics.success()
+                    activateResult = ("Карта привязана к вашему аккаунту", true)
+                }
+            } catch is CancellationError {
+            } catch {
+                if code.trimmingCharacters(in: .whitespaces) == input {
+                    Haptics.error()
+                    activateResult = ((error as? LocalizedError)?.errorDescription ?? "Не удалось привязать карту", false)
+                }
+            }
+            activating = false
+        }
+    }
+
     // MARK: - Хелперы статуса
 
     private func isActive(_ status: String?) -> Bool {
@@ -239,4 +292,11 @@ struct GiftCardView: View {
         default:                                             return r
         }
     }
+}
+
+/// П-27.12: ответ привязки карты — {balance, amount}; поля экрану не нужны,
+/// но разбираются толерантно (строки "500.00" или числа).
+private struct GiftActivateResp: Decodable {
+    @LenientDecimal var balance: Decimal?
+    @LenientDecimal var amount: Decimal?
 }

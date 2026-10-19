@@ -455,7 +455,9 @@ private struct ApplyFormView: View {
         Task {
             do {
                 // form-urlencoded: сервер читает $_POST['name']/$_POST['phone'] (не JSON).
-                try await API.shared.postFormVoid("api/v1/jobs/\(jobId)/apply", form: ["name": n, "phone": ph])
+                // П-27.14: ключ повтора сервер учитывает только у вошедшего — гостю не шлём.
+                try await API.shared.postFormVoid("api/v1/jobs/\(jobId)/apply", form: ["name": n, "phone": ph],
+                                                  retryKey: TokenStore.access != nil)
                 await MainActor.run {
                     Haptics.success()
                     sending = false

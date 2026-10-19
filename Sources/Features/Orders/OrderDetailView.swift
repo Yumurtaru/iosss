@@ -202,6 +202,10 @@ final class OrderDetailViewModel: ObservableObject {
         }
     }
 
+    /// Пауза опроса в фоне: только таймер, проверка оплаты идёт дальше.
+    /// Возобновляет startTrackingIfActive при возврате в приложение.
+    func pauseTracking() { pollTimer?.invalidate(); pollTimer = nil }
+
     func stopTracking() {
         pollTimer?.invalidate(); pollTimer = nil
         // Проверка оплаты после ухода с экрана не нужна: раньше она ещё до 30 с
@@ -426,6 +430,10 @@ struct OrderDetailView: View {
         // было свёрнуто: перечитываем сразу и снова включаем опрос (он
         // останавливается сам, когда заказ завершён).
         .onChange(of: scenePhase) { phase in
+            // Ушли в фон — таймер опроса снимаем: иначе при возврате просроченный
+            // тик срабатывал сразу вместе с перечитыванием ниже (двойной запрос трека).
+            // Проверку оплаты не трогаем — человек может вернуться из приложения банка.
+            if phase == .background, vm.order != nil { vm.pauseTracking(); return }
             guard phase == .active, visible, vm.order != nil else { return }
             // Пока шёл reload, экран могли закрыть — без проверки опрос
             // перезапускался после onDisappear и тикал вхолостую.

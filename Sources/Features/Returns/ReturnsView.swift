@@ -507,7 +507,9 @@ struct ReturnCreateView: View {
                                         ? nil : comment.trimmingCharacters(in: .whitespacesAndNewlines))
         Task {
             do {
-                try await API.shared.postVoid("api/v1/returns", body: body)
+                // П-27.14: ключ повтора — после обрыва связи повтор получает ответ
+                // первого запроса, а не «уже есть заявка».
+                try await API.shared.postVoid("api/v1/returns", body: body, retryKey: true)
                 await MainActor.run { Haptics.success(); sending = false; done = true }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription; sending = false }

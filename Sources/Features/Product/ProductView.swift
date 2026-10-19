@@ -134,6 +134,8 @@ struct ProductView: View {
     /// Запрос избранного ещё идёт — новый тап по ♥ игнорируем (как на Главной):
     /// двойной тап слал POST и DELETE разом, и на сервере оставалось не то, что на экране.
     @State private var favBusy = false
+    /// ♥ не сохранилось — причина коротким сообщением (раньше откат был молча).
+    @State private var favError: String?
     @State private var photoIndex = 0
 
     // product state
@@ -181,6 +183,8 @@ struct ProductView: View {
             topControls
         }
         .navigationBarHidden(true)
+        // Причина отказа ♥ — над нижней кнопкой «В корзину».
+        .errorToast($favError, bottom: 96)
         .cartConflictDialog(
             isPresented: $localConflict,
             currentShop: cart.shopName,
@@ -253,6 +257,7 @@ struct ProductView: View {
                     favSyncing = true
                     isFav.toggle()
                     DispatchQueue.main.async { favSyncing = false }
+                    favError = error.userMessage
                 }
             }
             await MainActor.run { favBusy = false }

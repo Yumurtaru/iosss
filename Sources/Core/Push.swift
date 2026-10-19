@@ -20,4 +20,25 @@ final class Push {
             "api/v1/push/register",
             body: PushBody(token: token, platform: "ios", cityId: (city ?? 0) > 0 ? city : nil))
     }
+
+    /// П-28.6: сессия истекла (продление отказано) — гасим push-токен этого
+    /// телефона на сервере, иначе уведомления прежнего входа шли бы сюда и дальше.
+    /// POST api/v1/push/unregister {token} — без Authorization (сессии уже нет),
+    /// ответ не ждём и не разбираем. Следующий вход снова регистрирует токен
+    /// (Session.signIn → registerIfPossible), как и раньше. Старый сервер
+    /// ответит 404 — это ничего не ломает.
+    func unregisterSilently() {
+        guard let token = fcmToken, !token.isEmpty,
+              let url = URL(string: API.base + "/api/v1/push/unregister"),
+              let body = try? JSONSerialization.data(withJSONObject: ["token": token]) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        req.timeoutInterval = 15
+        // Отдельная сессия без cookie: заголовка входа и чужих cookie здесь быть не должно.
+        let s = URLSession(configuration: .ephemeral)
+        s.dataTask(with: req) { _, _, _ in }.resume()
+        s.finishTasksAndInvalidate()
+    }
 }

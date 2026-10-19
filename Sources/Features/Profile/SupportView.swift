@@ -263,8 +263,10 @@ struct SupportView: View {
         sending = true; status = nil
         Task {
             do {
+                // П-27.14: ключ повтора — повтор после обрыва связи не шлёт вторую жалобу.
                 try await API.shared.postVoid("api/v1/complaints",
-                    body: SupportComplaintBody(targetType: "platform", targetId: 0, reason: reason.value, text: t))
+                    body: SupportComplaintBody(targetType: "platform", targetId: 0, reason: reason.value, text: t),
+                    retryKey: true)
                 await MainActor.run {
                     Haptics.success()
                     status = ("Жалоба отправлена. Мы свяжемся с вами.", true)

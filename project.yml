@@ -43,6 +43,13 @@ targets:
       path: Generated/YumurtaPremium.entitlements
       properties:
         aps-environment: production
+        # П-28.16: universal links https://yumurta.ru/shop/… и /r/… (сервер
+        # отдаёт apple-app-site-association для ru.marketplace.client.premium).
+        # ВНИМАНИЕ: до сборки включить Associated Domains у App ID
+        # ru.marketplace.client.premium (developer.apple.com) и перевыпустить
+        # профиль yumurta_appstore в Codemagic — иначе подпись .ipa не пройдёт.
+        com.apple.developer.associated-domains:
+          - applinks:yumurta.ru
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ru.marketplace.client.premium

@@ -39,6 +39,8 @@ final class AdsBoardViewModel: ObservableObject {
     private var page = 1
     private var pages = 1
     private var searchTask: Task<Void, Never>?
+    /// Обрезанный текст, под который уже запущена перезагрузка (см. searchChanged).
+    private var searchedQuery = ""
     /// Номер последней перезагрузки: ответ на старый фильтр (или «ещё» от
     /// старого списка) после смены категории не должен попасть в новый список.
     private var gen = 0
@@ -164,6 +166,11 @@ final class AdsBoardViewModel: ObservableObject {
 
     /// Поиск с задержкой: печатают быстро, а запрос нужен один.
     func searchChanged() {
+        // Пробел по краям запрос не меняет: раньше лента перезагружалась тем же
+        // поиском (и обрывала уже идущий). Сравниваем обрезанный текст.
+        let key = query.trimmingCharacters(in: .whitespaces)
+        if key == searchedQuery, error == nil { return }   // после ошибки — пробуем снова, как раньше
+        searchedQuery = key
         searchTask?.cancel()
         searchTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 450_000_000)
@@ -182,6 +189,9 @@ final class AdsBoardViewModel: ObservableObject {
     /// в избранном фильтров нет.
     func toggleFavorites() {
         favOnly.toggle()
+        // Поиск сброшен здесь же и лента грузится ниже — отложенный поиск по
+        // onChange(query) повторял ту же загрузку через 0,45 с.
+        searchTask?.cancel(); searchedQuery = ""
         query = ""; categoryId = 0
         Task { await load(reset: true) }
     }

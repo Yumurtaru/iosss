@@ -2,7 +2,36 @@ import Foundation
 import os
 
 // Конверт ответа v1: {success, data, meta, error}
-struct APIEnvelope<T: Decodable>: Decodable { let success: Bool?; let data: T?; let meta: PageMeta?; let error: APIErr? }
+// errors — ошибки полей сайтового конверта {ok:false, error, errors} (Response::validation):
+// без них на 422 человек видел только «Проверьте правильность заполнения» без поля.
+struct APIEnvelope<T: Decodable>: Decodable { let success: Bool?; let data: T?; let meta: PageMeta?; let error: APIErr?; let errors: SiteFieldErrors? }
+
+/// Ошибки полей сайтового конверта: {"поле": ["текст", …]} или {"поле": "текст"}.
+/// Разбор никогда не бросает: errors бывает [] (пустой массив) или другой формы —
+/// тогда список пуст, и ответ целиком не теряется. Вложенные объекты пропускаем.
+struct SiteFieldErrors: Decodable {
+    /// Первый непустой текст каждого поля (поля по алфавиту — порядок стабилен).
+    let messages: [String]
+    private struct Key: CodingKey {
+        var stringValue: String
+        var intValue: Int?
+        init?(stringValue: String) { self.stringValue = stringValue; self.intValue = nil }
+        init?(intValue: Int) { self.stringValue = String(intValue); self.intValue = intValue }
+    }
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: Key.self) else { messages = []; return }
+        var found: [(String, String)] = []
+        for k in c.allKeys {
+            if let s = try? c.decode(String.self, forKey: k), !s.isEmpty {
+                found.append((k.stringValue, s))
+            } else if let list = try? c.decode([String].self, forKey: k),
+                      let s = list.first(where: { !$0.isEmpty }) {
+                found.append((k.stringValue, s))
+            }
+        }
+        messages = found.sorted { $0.0 < $1.0 }.map { $0.1 }
+    }
+}
 
 /// meta постраничных списков v1 (контракт, волна А3): page, per_page, has_more.
 /// Так отвечают GET api/v1/shops и api/v1/organizations (по 100), api/v1/orders
@@ -58,23 +87,30 @@ struct APIErr: Decodable {
     /// написать «пополните на 269 ₽». Другие формы details (например список
     /// сообщений по полям) декодируются в nil и никому не мешают.
     let details: [String: String]?
-    init(message: String?, details: [String: String]? = nil) {
+    /// П-27.14: машинный код ошибки v1 (`idempotency_in_progress`,
+    /// `idempotency_key_reused`…). Нет — nil, всё как раньше.
+    let code: String?
+    init(message: String?, details: [String: String]? = nil, code: String? = nil) {
         self.message = message
         self.details = details
+        self.code = code
     }
     init(from decoder: Decoder) throws {
         if let s = try? decoder.singleValueContainer().decode(String.self) {
             self.message = s
             self.details = nil
+            self.code = nil
         } else if let c = try? decoder.container(keyedBy: CodingKeys.self) {
             self.message = try? c.decode(String.self, forKey: .message)
             self.details = try? c.decode([String: String].self, forKey: .details)
+            self.code = try? c.decode(String.self, forKey: .code)
         } else {
             self.message = nil
             self.details = nil
+            self.code = nil
         }
     }
-    private enum CodingKeys: String, CodingKey { case message, details }
+    private enum CodingKeys: String, CodingKey { case message, details, code }
 }
 
 /// Журнал ошибок разбора ответа: Console.app / Xcode, категория «decode».
@@ -198,6 +234,13 @@ struct OrgApplyResult: Decodable {
     let status: String?          // "pending"
     /// П-23.5: заявка уже подана и ждёт разбора (200 duplicate: true).
     @LenientBool var duplicate: Bool?
+    // Волна А75: сервер сразу активирует организацию (поля аддитивные).
+    // approved == true — организация создана, можно входить в приложение
+    // продавца; нет поля (старый сервер) — nil, экран как раньше.
+    @LenientBool var approved: Bool?
+    @LenientBool var canLogin: Bool?
+    /// Текст сервера: что делать дальше (в т.ч. «Пароль … по ссылке из письма»).
+    let message: String?
 }
 // ── Лицензия организации ────────────────────────────────────────────────────
 // Медцентр, стоматология, аптека, ветклиника, автошкола обязаны показывать
@@ -258,6 +301,18 @@ struct ShopDetail: Codable, Identifiable {
     let paymentMethods: [String]?
     /// График по дням (0 = Вс … 6 = Сб) — для предзаказа у закрытого заведения.
     let statusSchedule: [ScheduleDay]?
+    /// П-27.1 (А68): настраивало ли заведение способы оплаты / получения.
+    /// false или нет поля (старый сервер) — «не настраивали», доступны все, как
+    /// раньше; true и пустой список — этот шаг заведение не принимает.
+    /// Сам список delivery_methods[] не разбираем: типы уже есть в fulfillment,
+    /// а нужные данные самовывоза и зала сервер дублирует полями ниже.
+    @LenientBool var paymentMethodsConfigured: Bool?
+    @LenientBool var deliveryMethodsConfigured: Bool?
+    /// Для заказа в зале нужен номер стола (настройка заведения).
+    @LenientBool var dineInTableRequired: Bool?
+    /// Адрес и пояснение самовывоза; адрес null — забирать по адресу заведения.
+    let pickupAddress: String?
+    let pickupComment: String?
 }
 /// День графика заведения: open/close — "HH:MM[:SS]" или nil (часы не заданы).
 struct ScheduleDay: Codable, Hashable {
@@ -820,7 +875,9 @@ struct MyAdsResponse: Codable {
 }
 /// Тело создания и правки. Деньги — строкой "0.00" (Money.wire), "" = цена не указана.
 struct AdSaveBody: Encodable {
-    let categoryId: Int
+    /// П-26.6: nil — рубрику не шлём (правка в закрытом разделе: сервер
+    /// оставляет прежнюю, а новый category_id там не принимается).
+    let categoryId: Int?
     let title: String
     let description: String
     let price: String
@@ -842,7 +899,7 @@ struct AdSaveBody: Encodable {
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(categoryId, forKey: .categoryId)
+        try c.encodeIfPresent(categoryId, forKey: .categoryId)
         try c.encode(title, forKey: .title)
         try c.encode(description, forKey: .description)
         try c.encode(price, forKey: .price)
@@ -1179,6 +1236,9 @@ struct AppointmentBody: Encodable {
 /// интервал и состав брони, не пересчитывая их сам.
 struct AppointmentResult: Codable {
     @LenientInt var orderId: Int?
+    /// П-28.11 (А68): номер записи за день — тот, что видит заведение. При
+    /// повторе (repeat=1) — номер существующей брони. Нет поля — nil, как раньше.
+    @LenientInt var dailyNumber: Int?
     let date: String?
     let time: String?
     let timeEnd: String?

@@ -394,6 +394,26 @@ struct CheckoutView: View {
         let allowed = Payment.allCases.filter { list.contains($0.apiValue) }
         return allowed.isEmpty ? fallback : allowed
     }
+    /// П-27.1: заведение настроило способы получения и выключило все
+    /// (delivery_methods_configured = true, список пуст) — сервер такой заказ
+    /// не примет никаким способом. Нет поля (старый сервер) — false, как раньше.
+    /// Услуги (mode == "service") не блокируем: у них fulfillment собран из
+    /// типов услуг, а не из способов получения, и пустой список ничего не значит.
+    private var fulfillmentNone: Bool {
+        shop?.mode != "service"
+            && shop?.deliveryMethodsConfigured == true && (shop?.fulfillment ?? []).isEmpty
+    }
+    /// П-27.1: то же для оплаты при получении (онлайн-оплаты на экране нет).
+    private var paymentNone: Bool {
+        shop?.paymentMethodsConfigured == true && (shop?.paymentMethods ?? []).isEmpty
+    }
+    /// П-27.1: заведение требует номер стола для заказа в зале, а он пуст.
+    /// Так же проверяет сайт при оформлении; без поля — как раньше, не обязателен.
+    private var tableMissing: Bool {
+        fulfillment == .dineIn && shop?.dineInTableRequired == true
+            && tableNumber.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     /// Заведение закрыто прямо сейчас (считает сервер — часы работы заданы его
     /// временем, а не временем телефона).
     private var shopClosed: Bool { shop?.isOpen == false }
@@ -427,6 +447,7 @@ struct CheckoutView: View {
         !placing && !cart.isEmpty && !outOfZone && !noAddress && !belowMin && !quoteMissing
             && (!needTime || preorderValid)
             && (cart.shopSlug == nil || shop != nil) && !promoPending
+            && !fulfillmentNone && !paymentNone && !tableMissing
     }
 
     /// Почему «Оформить заказ» сейчас серая — коротко, прямо у кнопки. Причины
@@ -439,6 +460,11 @@ struct CheckoutView: View {
         if cart.shopSlug != nil && shop == nil {
             return shopLoadError == nil ? nil : "Не удалось загрузить условия заведения — нажмите на сообщение вверху"
         }
+        // П-27.1: причины из настроек заведения (сервер отказал бы на последнем
+        // шаге) — первыми: иначе под кнопкой стояла бы подсказка про адрес.
+        if fulfillmentNone { return "Заведение сейчас не принимает заказы через приложение" }
+        if paymentNone { return "Заведение сейчас не принимает оплату при получении" }
+        if tableMissing { return "Укажите номер стола" }
         if noAddress {
             return selectedAddress == nil ? "Выберите или добавьте адрес доставки" : "У адреса нет точки на карте — добавьте его заново"
         }
@@ -789,7 +815,8 @@ struct CheckoutView: View {
     private var tableField: some View {
         HStack(spacing: YMSpace.sm) {
             Image(systemName: "number").font(.system(size: 15)).foregroundStyle(YMColor.muted)
-            TextField("Номер стола", text: $tableNumber)
+            // П-27.1: заведение требует номер стола — так и пишем в поле.
+            TextField(shop?.dineInTableRequired == true ? "Номер стола (обязательно)" : "Номер стола", text: $tableNumber)
                 .focused($field, equals: .table)
                 .font(.system(size: 13.5))
                 .foregroundStyle(YMColor.text)
@@ -814,6 +841,11 @@ struct CheckoutView: View {
                     Text(a).font(YMFont.caption).foregroundStyle(YMColor.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // П-27.1: пояснение продавца к самовывозу («вход со двора»…).
+                if let c = shop?.pickupComment?.trimmingCharacters(in: .whitespacesAndNewlines), !c.isEmpty {
+                    Text(c).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -823,6 +855,9 @@ struct CheckoutView: View {
     }
 
     private var pickupAddress: String? {
+        // П-27.1: у самовывоза бывает свой адрес (точка выдачи); нет — адрес заведения.
+        let own = (shop?.pickupAddress ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !own.isEmpty { return own }
         let a = (shop?.address ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return a.isEmpty ? nil : a
     }
@@ -1560,7 +1595,8 @@ private struct AddAddressSheet: View {
         )
         Task {
             do {
-                try await API.shared.postVoid("api/v1/profile/addresses", body: body)
+                // П-27.14: ключ повтора — повтор после обрыва связи не создаёт второй адрес.
+                try await API.shared.postVoid("api/v1/profile/addresses", body: body, retryKey: true)
                 // Перечитываем список — сервер догеокодировал координаты; берём созданный адрес (макс. id).
                 let list: [Address] = (try? await API.shared.list("api/v1/profile/addresses")) ?? []
                 let created = list.max(by: { $0.id < $1.id }) ?? optimistic

@@ -8,6 +8,8 @@
 //  API: POST api/v1/organizations/apply  body {org_name, full_name, phone, type, city_id}
 //       → OrgApplyResult {registration_id, status:"pending"}. Заявка падает в shop_registrations
 //       (pending) → модерация в админке. Тип — канон API: store | restaurant | service | lodging.
+//       Волна А75: сервер может сразу создать организацию — approved: true, message
+//       (что делать дальше). Тогда вместо «на рассмотрении» — «Организация создана».
 //
 //  Токены — только YM. Light + dark. Русские литералы.
 //
@@ -62,6 +64,10 @@ struct BecomeSellerView: View {
     @State private var submitted = false
     /// П-23.5: сервер ответил duplicate: true — заявка уже есть, новую не создал.
     @State private var duplicate = false
+    /// Волна А75: approved == true — организация уже создана (не «на рассмотрении»).
+    @State private var approved = false
+    /// Текст сервера к созданной организации (в т.ч. про пароль по ссылке из письма).
+    @State private var serverNote: String?
 
     private let benefits: [(String, String)] = [
         ("Витрина в приложении", "Ваши товары и услуги видят клиенты вашего города."),
@@ -81,8 +87,15 @@ struct BecomeSellerView: View {
         .navigationTitle("Стать продавцом")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showForm) {
-            ApplyOrgFormView { ok, dup in
-                if ok { duplicate = dup; withAnimation { submitted = true } }
+            ApplyOrgFormView { ok, dup, result in
+                if ok {
+                    duplicate = dup
+                    // Старый сервер поля approved не шлёт — nil, экран прежний.
+                    approved = result?.approved == true
+                    let note = result?.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    serverNote = approved && !note.isEmpty ? note : nil
+                    withAnimation { submitted = true }
+                }
             }
         }
     }
@@ -128,14 +141,32 @@ struct BecomeSellerView: View {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 64)).foregroundStyle(YMColor.accent)
                 .padding(.top, YMSpace.xxxl)
-            // П-23.5: при повторе — честное «уже подана», а не «отправлена».
-            Text(duplicate ? "Заявка уже подана" : "Заявка отправлена!").font(YMFont.title2).foregroundStyle(YMColor.text)
-            Text(duplicate
-                 ? "Ваша прошлая заявка ещё на рассмотрении. Мы свяжемся с вами по указанному телефону."
-                 : "Мы проверим данные и свяжемся с вами по указанному телефону. Обычно это занимает до 24 часов.")
-                .font(YMFont.body).foregroundStyle(YMColor.muted)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
+            if approved {
+                // Волна А75: организация активирована сразу — «на рассмотрении»
+                // было бы неправдой; ведём в приложение продавца.
+                Text("Организация создана").font(YMFont.title2).foregroundStyle(YMColor.text)
+                Text("Войдите в приложение продавца (Yumurta Бизнес) — заполните товары и отправьте на публикацию.")
+                    .font(YMFont.body).foregroundStyle(YMColor.muted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let serverNote {
+                    // Текст сервера: дальнейшие шаги и, для нового владельца,
+                    // «Пароль для входа задайте по ссылке из письма».
+                    Text(serverNote)
+                        .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                // П-23.5: при повторе — честное «уже подана», а не «отправлена».
+                Text(duplicate ? "Заявка уже подана" : "Заявка отправлена!").font(YMFont.title2).foregroundStyle(YMColor.text)
+                Text(duplicate
+                     ? "Ваша прошлая заявка ещё на рассмотрении. Мы свяжемся с вами по указанному телефону."
+                     : "Мы проверим данные и свяжемся с вами по указанному телефону. Обычно это занимает до 24 часов.")
+                    .font(YMFont.body).foregroundStyle(YMColor.muted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, YMSpace.xxxl)
@@ -148,8 +179,9 @@ struct BecomeSellerView: View {
 
 private struct ApplyOrgFormView: View {
     /// success — родитель показывает экран «ждите модерацию»;
-    /// второй флаг — П-23.5: заявка уже была подана (duplicate).
-    let onResult: (Bool, Bool) -> Void
+    /// второй флаг — П-23.5: заявка уже была подана (duplicate);
+    /// третий — ответ сервера (волна А75: approved, message), nil при неудаче.
+    let onResult: (Bool, Bool, OrgApplyResult?) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var orgName = ""
@@ -329,7 +361,7 @@ private struct ApplyOrgFormView: View {
                 await MainActor.run {
                     Haptics.success()
                     sending = false
-                    onResult(true, r.duplicate == true)
+                    onResult(true, r.duplicate == true, r)
                     dismiss()
                 }
             } catch {

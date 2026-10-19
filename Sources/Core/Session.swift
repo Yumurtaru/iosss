@@ -26,7 +26,13 @@ final class Session: ObservableObject {
         let c = UserDefaults.standard.integer(forKey: "cityId"); cityId = c == 0 ? nil : c
         cityName = UserDefaults.standard.string(forKey: "cityName")
         // При 401 (истёкший токен) аккуратно выходим из аккаунта.
-        API.shared.onUnauthorized = { [weak self] in self?.signOut() }
+        // П-28.6: истекла именно сессия вошедшего (не гость) — после выхода
+        // гасим push-токен этого телефона на сервере (без ожидания ответа).
+        API.shared.onUnauthorized = { [weak self] in
+            let wasLoggedIn = self?.token != nil
+            self?.signOut()
+            if wasLoggedIn { Push.shared.unregisterSilently() }
+        }
         // Запуск в фоне до первой разблокировки после перезагрузки (push, прогрев
         // iOS): Keychain и настройки ещё закрыты, токен читался как nil — и до
         // выгрузки приложения человек выглядел вышедшим, хотя вход сохранён.

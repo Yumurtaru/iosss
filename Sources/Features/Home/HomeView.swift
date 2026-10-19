@@ -170,6 +170,8 @@ struct HomeView: View {
     /// вперемешку, а loadFavs затирал ещё не подтверждённую отметку.
     @State private var favBusyShops: Set<Int> = []
     @State private var favBusyProducts: Set<Int> = []
+    /// ♥ не сохранилось — причина коротким сообщением (раньше откат был молча).
+    @State private var favError: String?
     /// Гость нажал ♥ — сначала вход.
     @State private var showAuth = false
     @State private var appeared = false
@@ -283,6 +285,8 @@ struct HomeView: View {
             .onChange(of: session.cityId) { _ in
                 Task { await vm.load(session: session) }
             }
+            // Причина отказа ♥ на Главной.
+            .errorToast($favError)
             // Переходы из карточек: организация → OrgView, популярный товар → ProductView.
             // ОДИН destination на все переходы таба (организация / товар / листинг категорий).
             .navigationDestination(isPresented: Binding(
@@ -609,7 +613,10 @@ struct HomeView: View {
                     if on { try await API.shared.postVoid("api/v1/favorites/\(id)") }
                     else  { try await API.shared.deleteVoid("api/v1/favorites/\(id)") }
                 } catch {
-                    await MainActor.run { if on { favShops.remove(id) } else { favShops.insert(id) } }
+                    await MainActor.run {
+                        if on { favShops.remove(id) } else { favShops.insert(id) }
+                        favError = error.userMessage
+                    }
                 }
                 await MainActor.run { _ = favBusyShops.remove(id) }
             }
@@ -627,7 +634,10 @@ struct HomeView: View {
                     if on { try await API.shared.postVoid("api/v1/product-favorites/\(id)") }
                     else  { try await API.shared.deleteVoid("api/v1/product-favorites/\(id)") }
                 } catch {
-                    await MainActor.run { if on { favPopular.remove(id) } else { favPopular.insert(id) } }
+                    await MainActor.run {
+                        if on { favPopular.remove(id) } else { favPopular.insert(id) }
+                        favError = error.userMessage
+                    }
                 }
                 await MainActor.run { _ = favBusyProducts.remove(id) }
             }

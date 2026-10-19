@@ -245,8 +245,10 @@ struct OrgReviewCard: View {
         reportSending = true; reportError = nil
         defer { reportSending = false }
         do {
+            // П-27.14: ключ повтора — повтор после обрыва связи не шлёт вторую жалобу.
             try await API.shared.postVoid("api/v1/complaints",
-                body: ReviewComplaintBody(targetType: "review", targetId: rid, reason: reason))
+                body: ReviewComplaintBody(targetType: "review", targetId: rid, reason: reason),
+                retryKey: true)
             Haptics.success()
             ReviewComplaints.sent.insert(rid)
             reportSentFor = rid

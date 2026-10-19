@@ -93,6 +93,9 @@ private struct SearchSection: View {
     /// Поиск не выполнился (сеть/сервер) — раньше показывалось «Ничего не найдено».
     @State private var searchFailed = false
     @State private var searchTask: Task<Void, Never>?
+    /// Обрезанный текст последнего запущенного поиска: пробел в конце или в
+    /// начале не меняет запрос — раньше он отменял идущий поиск и слал тот же заново.
+    @State private var searchedKey = ""
     // Пустые на старте — заполняет .onAppear ниже. Начальное значение @State
     // вычисляется при КАЖДОЙ пересборке экрана (а она идёт с корня вкладок при
     // любом изменении корзины, сети, сессии): чтение настроек и разбор JSON
@@ -106,6 +109,8 @@ private struct SearchSection: View {
     /// Товары, по которым запрос ♥ ещё идёт: повторный тап игнорируем (как на
     /// Главной) — двойной тап слал POST и DELETE разом, итог на сервере был случайным.
     @State private var favBusyProducts: Set<Int> = []
+    /// ♥ не сохранилось — причина коротким сообщением (раньше откат был молча).
+    @State private var favError: String?
     /// Гость нажал ♥ — сначала вход (избранное хранится в аккаунте).
     @State private var showAuth = false
 
@@ -187,10 +192,13 @@ private struct SearchSection: View {
         // при каждом появлении, иначе они не обновлялись (и после смены
         // аккаунта показывали чужие).
         .onAppear { history = SearchHistoryStore.load(); recent = RecentStore.load() }
-        .onChange(of: q) { _ in scheduleSearch() }
+        // Тот же запрос без пробелов по краям — новый поиск не нужен (после
+        // ошибки — ищем снова, как раньше).
+        .onChange(of: q) { _ in if trimmed != searchedKey || searchFailed { scheduleSearch() } }
         // Сменили город на Главной — результаты прежнего города под тем же
         // запросом оставались до следующей буквы. Ищем заново.
         .onChange(of: session.cityId) { _ in scheduleSearch() }
+        .errorToast($favError)
         .sheet(isPresented: $showAuth) {
             NavigationStack {
                 AuthView(onAuthed: { showAuth = false })
@@ -474,7 +482,8 @@ private struct SearchSection: View {
     private func scheduleSearch() {
         searchTask?.cancel()
         let query = trimmed
-        guard query.count >= 2 else { clearResults(); return }
+        guard query.count >= 2 else { searchedKey = ""; clearResults(); return }
+        searchedKey = query
         searchTask = Task {
             try? await Task.sleep(nanoseconds: 300_000_000)
             if Task.isCancelled { return }
@@ -530,8 +539,11 @@ private struct SearchSection: View {
             if on { try await API.shared.postVoid("api/v1/product-favorites/\(id)") }
             else  { try await API.shared.deleteVoid("api/v1/product-favorites/\(id)") }
         } catch {
-            // откат при ошибке
-            await MainActor.run { if on { favProducts.remove(id) } else { favProducts.insert(id) } }
+            // откат при ошибке + причина словами
+            await MainActor.run {
+                if on { favProducts.remove(id) } else { favProducts.insert(id) }
+                favError = error.userMessage
+            }
         }
     }
 }
@@ -608,7 +620,10 @@ private struct CategoriesSection: View {
                     if loading {
                         grid(count: 6) { SkeletonBox(radius: 18).frame(height: 104) }
                     } else if cats.isEmpty {
-                        emptyState
+                        // П-28.15б: у ресторанов рубрик нет — сервер всегда отдаёт [],
+                        // и «пока пусто» под «Едой» вводило в заблуждение. Пустой
+                        // блок не показываем; у других вкладок — как раньше.
+                        if tab != .food { emptyState }
                     } else {
                         LazyVGrid(columns: [GridItem(.flexible(), spacing: YMSpace.md),
                                             GridItem(.flexible(), spacing: YMSpace.md)],
@@ -756,6 +771,8 @@ private struct FavoritesSection: View {
     /// Запрос ♥ ещё идёт — повторный тап по этой карточке игнорируем (как на Главной).
     @State private var favBusyShops: Set<Int> = []
     @State private var favBusyProducts: Set<Int> = []
+    /// ♥ не сохранилось — причина коротким сообщением (раньше откат был молча).
+    @State private var favError: String?
     @State private var route: DiscoverRoute?
     /// Гость нажал «Войти» на экране избранного.
     @State private var showAuth = false
@@ -858,6 +875,7 @@ private struct FavoritesSection: View {
             }
         }
         .task(id: reloadKey) { await load() }
+        .errorToast($favError)
         // Вход гостя: после него перечитываем избранное (reloadKey).
         .sheet(isPresented: $showAuth) {
             NavigationStack {
@@ -956,13 +974,23 @@ private struct FavoritesSection: View {
         do {
             if on { try await API.shared.postVoid("api/v1/favorites/\(id)") }
             else  { try await API.shared.deleteVoid("api/v1/favorites/\(id)") }
-        } catch { await MainActor.run { if on { favShops.remove(id) } else { favShops.insert(id) } } }
+        } catch {
+            await MainActor.run {
+                if on { favShops.remove(id) } else { favShops.insert(id) }
+                favError = error.userMessage
+            }
+        }
     }
     private func toggleProductFav(_ id: Int, on: Bool) async {
         do {
             if on { try await API.shared.postVoid("api/v1/product-favorites/\(id)") }
             else  { try await API.shared.deleteVoid("api/v1/product-favorites/\(id)") }
-        } catch { await MainActor.run { if on { favProducts.remove(id) } else { favProducts.insert(id) } } }
+        } catch {
+            await MainActor.run {
+                if on { favProducts.remove(id) } else { favProducts.insert(id) }
+                favError = error.userMessage
+            }
+        }
     }
 }
 

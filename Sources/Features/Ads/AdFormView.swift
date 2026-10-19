@@ -67,7 +67,9 @@ final class AdFormViewModel: ObservableObject {
         return out
     }
 
-    func start(editAdId: Int) async {
+    /// П-26.6: categoryOff — признак из «Моих объявлений» (GET api/v1/ads/my):
+    /// рубрика закрыта, даже если по списку рубрик этого не видно.
+    func start(editAdId: Int, categoryOff: Bool = false) async {
         // Рубрики не пришли (нет сети) — список выбора пуст, и «Сохранить»
         // молча отвечало «Выберите категорию», хотя выбрать было не из чего.
         var catsFailed = false
@@ -101,7 +103,10 @@ final class AdFormViewModel: ObservableObject {
             photos = a.photos ?? []
             canChangeCategory = (a.status ?? "draft") == "draft"
             chosen = cats.first { $0.cat.stableId == (a.categoryId ?? 0) }?.cat
-            if chosen == nil, !catsFailed, let cid = a.categoryId, cid > 0 {
+            // П-26.6: сервер сказал «раздел закрыт» — рубрику не выбираем из
+            // списка и при сохранении не шлём.
+            if categoryOff, let cid = a.categoryId, cid > 0 { chosen = nil }
+            if chosen == nil, (!catsFailed || categoryOff), let cid = a.categoryId, cid > 0 {
                 offCatId = cid
                 offCatName = a.categoryName ?? ""
             }
@@ -128,7 +133,7 @@ final class AdFormViewModel: ObservableObject {
         body(catId: cat.stableId, priceAllowed: cat.priceAllowed)
     }
 
-    private func body(catId: Int, priceAllowed: Bool) -> AdSaveBody {
+    private func body(catId: Int?, priceAllowed: Bool) -> AdSaveBody {
         AdSaveBody(
             categoryId: catId,
             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -165,13 +170,14 @@ final class AdFormViewModel: ObservableObject {
     @discardableResult
     func save(silent: Bool) async -> Int {
         // Закрытая рубрика уже сохранённого объявления — правку сохраняем в ней же.
-        let catId: Int
+        let catId: Int?
         let priceAllowed: Bool
         if let c = chosen {
             catId = c.stableId
             priceAllowed = c.priceAllowed
-        } else if let oid = offCatId, adId > 0 {
-            catId = oid
+        } else if offCatId != nil, adId > 0 {
+            // П-26.6: закрытая рубрика — category_id не шлём, сервер оставит прежнюю.
+            catId = nil
             priceAllowed = true
         } else {
             toast = "Выберите категорию"
@@ -298,6 +304,8 @@ final class AdFormViewModel: ObservableObject {
 
 struct AdFormView: View {
     let editAdId: Int
+    /// П-26.6: рубрика объявления закрыта (category_off из «Моих объявлений»).
+    var categoryOff: Bool = false
     let onPublished: (Int) -> Void
 
     @StateObject private var vm = AdFormViewModel()
@@ -323,7 +331,7 @@ struct AdFormView: View {
             // Набранный, но не сохранённый текст смахиванием тоже не теряем —
             // закрыть можно кнопкой «Закрыть».
             .interactiveDismissDisabled(vm.busy || vm.hasUnsavedText)
-            .task { await vm.start(editAdId: editAdId) }
+            .task { await vm.start(editAdId: editAdId, categoryOff: categoryOff) }
             .navigationDestination(isPresented: $showWallet) { WalletView() }
             // Один параметр: двухпараметрический onChange — это iOS 17, а цель
             // развёртывания проекта 16.0 (project.yml), и сборка на нём падает.
@@ -359,7 +367,18 @@ struct AdFormView: View {
     private var form: some View {
         Form {
             Section("Категория") {
-                Picker("Категория", selection: Binding(
+                // П-26.6: рубрика закрыта — показываем её текстом, а не пустым
+                // выбором «— выберите —». Черновик (и только он) можно перенести
+                // в открытую рубрику — для него выбор ниже остаётся.
+                if vm.offCatId != nil && vm.chosen == nil {
+                    HStack {
+                        Text(vm.offCatName.isEmpty ? "Рубрика" : vm.offCatName).foregroundStyle(YMColor.text)
+                        Spacer()
+                        Text("раздел закрыт").font(YMFont.caption).foregroundStyle(YMColor.statusCancel)
+                    }
+                }
+                if vm.offCatId == nil || vm.canChangeCategory {
+                Picker(vm.offCatId != nil ? "Перенести в рубрику" : "Категория", selection: Binding(
                     get: { vm.chosen?.stableId ?? 0 },
                     set: { id in vm.chosen = vm.cats.first { $0.cat.stableId == id }?.cat }
                 )) {
@@ -370,6 +389,7 @@ struct AdFormView: View {
                     }
                 }
                 .disabled(!vm.canChangeCategory)
+                }
                 if !vm.canChangeCategory {
                     Text("Категорию можно выбрать только до публикации.")
                         .font(YMFont.caption).foregroundStyle(YMColor.muted)

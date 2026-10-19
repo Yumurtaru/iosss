@@ -42,6 +42,9 @@ final class OrgViewModel: ObservableObject {
     /// (try?), и меню показывало «В этом разделе пока пусто» без «Повторить».
     @Published var productsError: String?
     @Published var productsReloading = false
+    /// ♥ не сохранилось (нет связи, нужно войти, отказ сервера): раньше
+    /// сердечко молча возвращалось назад — теперь причина коротким сообщением.
+    @Published var favError: String?
 
     /// В избранном ли эта организация (синхронизируется с сервером при загрузке).
     @Published var isFav = false
@@ -178,6 +181,7 @@ final class OrgViewModel: ObservableObject {
             favSyncing = true
             isFav.toggle()   // откат
             DispatchQueue.main.async { self.favSyncing = false }
+            favError = error.userMessage
         }
     }
 
@@ -281,6 +285,8 @@ struct OrgView: View {
             topControls
         }
         .navigationBarHidden(true)
+        // Причина отказа ♥ — над липкой корзиной.
+        .errorToast($vm.favError, bottom: 96)
         .task { if vm.detail == nil { await vm.load() } }
         // Внутренние переходы флоу (организация → товар / услуга).
         // ОДИН navigationDestination на экран. Раньше их было два подряд —

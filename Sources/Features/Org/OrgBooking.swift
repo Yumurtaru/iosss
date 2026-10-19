@@ -1102,7 +1102,14 @@ private struct SuccessBookingSheet: View {
             Text("Вы записаны!")
                 .font(.system(size: 20, weight: .heavy))
                 .foregroundStyle(YMColor.text)
-            if orderId > 0 {
+            // П-28.11: есть номер записи за день — показываем его (по нему
+            // запись находят в заведении); нет — прежний номер заказа.
+            if let n = info?.dailyNumber, n > 0 {
+                Text("Номер записи №\(n)")
+                    .font(.system(size: 15))
+                    .foregroundStyle(YMColor.muted)
+                    .padding(.top, 4)
+            } else if orderId > 0 {
                 Text("Заказ №\(orderId)")
                     .font(.system(size: 15))
                     .foregroundStyle(YMColor.muted)
