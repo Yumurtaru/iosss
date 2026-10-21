@@ -626,6 +626,51 @@ def guarded(label, fn, *a):
     return None
 
 
+def notes_text():
+    """«Что нового»: APP_STORE_WHATS_NEW → файл APP_STORE_WHATS_NEW_FILE →
+    release-notes/ru.txt (как шаг «Что нового» в codemagic.yaml)."""
+    t = env("APP_STORE_WHATS_NEW")
+    if t:
+        return t, "переменная APP_STORE_WHATS_NEW"
+    f = env("APP_STORE_WHATS_NEW_FILE") or "release-notes/ru.txt"
+    t = read_text(f)
+    return (cut(t, 4000, "«Что нового»") if t else None), f
+
+
+def fill_whats_new(asc, ver, first):
+    """Вписать «Что нового» в ТУ ЖЕ карточку версии, которую потом проверяет
+    шлагбаум (21.10.2026: шаг CLI «Что нового» однажды не вписал текст, а
+    причина в логе не видна). Пустые поля — во все локализации; заполненное
+    не трогаем без APP_STORE_WHATS_NEW_FORCE=1. Ошибку Apple печатаем целиком."""
+    if first:
+        say("  «Что нового»: первый выпуск — у первой версии этого поля нет, пропускаю.")
+        return
+    text, src = notes_text()
+    if not text:
+        say("  «Что нового»: текста нет (%s пуст или отсутствует) — подача обновления упадёт на 409 whatsNew." % src)
+        return
+    force = env("APP_STORE_WHATS_NEW_FORCE") == "1"
+    locs = asc.data("/v1/appStoreVersions/%s/appStoreVersionLocalizations" % ver["id"])
+    if not locs:
+        say("  «Что нового»: у карточки версии нет локализаций — вписать некуда.")
+        return
+    for loc in locs:
+        a = attrs(loc)
+        name = a.get("locale") or "?"
+        if (a.get("whatsNew") or "").strip() and not force:
+            say("  «Что нового» (%s) — уже заполнено, не трогаю (перезаписать: APP_STORE_WHATS_NEW_FORCE=1)." % name)
+            continue
+        try:
+            asc.call("PATCH", "/v1/appStoreVersionLocalizations/%s" % loc["id"], body={"data": {
+                "type": "appStoreVersionLocalizations", "id": loc["id"], "attributes": {"whatsNew": text}}})
+            # Перечитываем: записалось ли на самом деле.
+            back = attrs((asc.get("/v1/appStoreVersionLocalizations/%s" % loc["id"]) or {}).get("data"))
+            ok = (back.get("whatsNew") or "").strip() != ""
+            say("  «Что нового» (%s) — %s (из %s, %d симв.)." % (name, "записано" if ok else "Apple принял запрос, но поле пустое", src, len(text)))
+        except ApiError as e:
+            say("  «Что нового» (%s) — Apple не принял: %s" % (name, e))
+
+
 def apply_version_only(asc, cfg):
     """Только карточка версии: найти редактируемую, переименовать в наш номер
     или создать. Без неё «Что нового» некуда вписать, а подача обновления
@@ -637,7 +682,8 @@ def apply_version_only(asc, cfg):
     number = project_version()
     ver, first, why = pick_version(asc, app_id, number, create=True)
     if ver:
-        say("Карточка версии %s (%s) готова." % (attrs(ver).get("versionString"), vstate(ver) or "?"))
+        say("Карточка версии %s (%s, id %s) готова." % (attrs(ver).get("versionString"), vstate(ver) or "?", ver["id"]))
+        guarded("«Что нового»", fill_whats_new, asc, ver, first)
     else:
         say("Карточки версии нет: %s." % why)
     return app_id, ver
@@ -707,7 +753,8 @@ def check(asc, cfg):
         if not (a.get(k) or "").strip():
             miss.append("пусто: %s" % t)
     if not first and not (a.get("whatsNew") or "").strip():
-        miss.append("пусто: «Что нового» (release-notes/ru.txt)")
+        miss.append("пусто: «Что нового» в карточке версии %s (id %s, язык %s) — что ответил Apple, видно выше в шаге «Карточка версии»"
+                    % (attrs(ver).get("versionString"), ver["id"], a.get("locale")))
     sets = shot_sets(asc, loc["id"])
     okshots = 0
     for t in SHOT_REQUIRED_ANY:
