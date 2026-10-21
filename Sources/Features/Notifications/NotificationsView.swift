@@ -171,6 +171,8 @@ private struct NotifTarget {
     enum Kind {
         case org(String), chat(Int), order(Int), product(Int), ad(Int)
         case wallet, support, bonuses, cart, trips, nothing
+        /// А79: посылка (pool_parcel, call_id) — карточка тут же, в профиле.
+        case parcel(Int)
     }
     let kind: Kind
 
@@ -217,6 +219,7 @@ private struct NotifTarget {
         let screen = (d["screen"] as? String) ?? ""
         if type == "new_shop" || type == "shop_reopened", !slug.isEmpty { return .org(slug) }
         if isSellerSide(type, d) { return .nothing }
+        if type == "pool_parcel", let id = positiveInt(d["call_id"]) { return .parcel(id) }
         if type == "order_chat", let id = positiveInt(d["order_id"]) { return .chat(id) }
         if let id = positiveInt(d["order_id"]) { return .order(id) }
         if type.isEmpty, let pid = positiveInt(d["product_id"]) { return .product(pid) }
@@ -258,6 +261,8 @@ private struct NotifTarget {
             ProfilePushIntent.open(.support)
         case .bonuses:
             ProfilePushIntent.open(.bonuses)
+        case .parcel(let id):
+            ProfilePushIntent.open(.parcel(id))
         case .cart:
             coord.revealForPush(closeAll: true) { DeepLinkRouter.shared.requestedTab = 2 }
         case .trips:

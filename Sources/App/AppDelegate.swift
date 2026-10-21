@@ -53,6 +53,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // Волна 4313: открытые деталь заказа / чат по нему перечитываются сразу,
         // а не ждут своего опроса.
         if let id = Self.buyerOrderId(info) { NotificationCenter.default.post(name: .ymOrderPushed, object: id) }
+        // А79: открытые карточка и список посылок перечитываются сразу.
+        if let id = Self.parcelId(info) { NotificationCenter.default.post(name: .ymParcelPushed, object: id) }
         completionHandler([.banner, .sound, .badge])
     }
 
@@ -103,7 +105,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let alertDict = alert as? [String: Any]
         let alertTitle = (alertDict?["title"] as? String) ?? ""
         let alertBody = (alertDict?["body"] as? String) ?? (alert as? String) ?? ""
-        let dedupKey = ["type", "order_id", "status", "product_id", "slug", "screen", "ad_id", "booking_id", "ticket_id", "title", "body"]
+        let dedupKey = ["type", "order_id", "status", "product_id", "slug", "screen", "ad_id", "booking_id", "ticket_id", "title", "body", "call_id", "event"]
             .map { k -> String in "\(k)=" + (userInfo[k].map { v in "\(v)" } ?? "") }.joined(separator: "&")
             + "&aps_title=" + alertTitle + "&aps_body=" + alertBody
         if let last = lastHandled, last.key == dedupKey, Date().timeIntervalSince(last.at) < 5 { return }
@@ -123,6 +125,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             }
             // Открытые деталь / чат этого заказа перечитываются сразу.
             if let id = Self.buyerOrderId(userInfo) { NotificationCenter.default.post(name: .ymOrderPushed, object: id) }
+            if let id = Self.parcelId(userInfo) { NotificationCenter.default.post(name: .ymParcelPushed, object: id) }
             UIApplication.shared.applicationIconBadgeNumber = 0
         }
     }
@@ -132,6 +135,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let type = (userInfo["type"] as? String) ?? ""
         if isSellerSide(type, userInfo) { return nil }
         guard let id = intValue(userInfo["order_id"]), id > 0 else { return nil }
+        return id
+    }
+
+    /// А79: id посылки из push pool_parcel (call_id строкой) — карточка «Посылка №…».
+    private static func parcelId(_ userInfo: [AnyHashable: Any]) -> Int? {
+        guard (userInfo["type"] as? String) == "pool_parcel",
+              let id = intValue(userInfo["call_id"]), id > 0 else { return nil }
         return id
     }
 
@@ -194,6 +204,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // Push продавцу (владелец вошёл тем же аккаунтом) — заказ не его как
         // покупателя: просто открываем приложение.
         if isSellerSide(type, userInfo) { return nil }
+        // А79: посылка (accepted, arrived, picked, delivered, failed, released,
+        // expired, cancelled) — карточка посылки в профиле («Мои посылки»).
+        if let pid = parcelId(userInfo) {
+            return {
+                nav.revealForPush(closeAll: true) {
+                    DeepLinkRouter.shared.requestedTab = 0
+                    nav.profileOpen = true
+                    ProfilePushIntent.open(.parcel(pid))
+                }
+            }
+        }
         if type == "order_chat", let id = orderId, id > 0 {
             // Открытые корзина/«Жильё» не дали бы показать чат — сначала закрываем.
             return { nav.revealForPush(closeAll: false) { nav.openChat(orderId: id) } }

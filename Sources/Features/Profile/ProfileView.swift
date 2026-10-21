@@ -62,6 +62,10 @@ struct ProfileView: View {
     @State private var favCount = 0
     @State private var bookingsCount = 0
     @State private var unreadNotifs = 0
+    /// «Отправить посылку» (А79): кнопка — только если quote отвечает 200;
+    /// «Мои посылки» — ещё и когда посылки уже были (раздел могли выключить).
+    @State private var parcelCanSend = false
+    @State private var hasParcels = false
 
     // Внутренняя навигация по разделам профиля (стек маршрутов).
     @State private var path = NavigationPath()
@@ -122,6 +126,14 @@ struct ProfileView: View {
             .navigationDestination(for: ProfileRoute.self) { route in
                 profileDestination(route)
             }
+            .navigationDestination(for: ParcelRoute.self) { route in
+                ParcelRouteView(route: route,
+                                open: { path.append($0) },
+                                replace: { next in
+                                    if !path.isEmpty { path.removeLast() }
+                                    path.append(next)
+                                })
+            }
         }
         // Профиль открывается модально (sheet) и НЕ наследует preferredColorScheme
         // корневого экрана — применяем тему здесь же, чтобы смена «Светлая/Тёмная»
@@ -132,12 +144,20 @@ struct ProfileView: View {
         // открывался только корень профиля — нужный раздел искали сами.
         .onAppear { consumePushIntent() }
         .onReceive(NotificationCenter.default.publisher(for: ProfilePushIntent.note)) { _ in consumePushIntent() }
+        // Push посылки или новый вызов — видимость раздела перепроверяем.
+        .onReceive(NotificationCenter.default.publisher(for: .ymParcelPushed)) { _ in
+            guard session.isLoggedIn else { return }
+            ParcelGate.invalidate()
+            Task { await loadParcelGate() }
+        }
         .onChange(of: session.isLoggedIn) { logged in
             if logged { Task { await load() } } else {
                 profile = nil
                 // Счётчики прежнего аккаунта не должны показываться следующему,
                 // пока у него грузится профиль.
                 ordersCount = 0; favCount = 0; bookingsCount = 0; unreadNotifs = 0
+                parcelCanSend = false; hasParcels = false
+                ParcelGate.reset()
                 // Сессия кончилась на открытом разделе (кошелёк, бонусы, записи):
                 // экран прежнего аккаунта оставался в стеке, и после входа другого
                 // человека тот видел чужие данные. Возвращаемся к корню профиля.
@@ -154,6 +174,7 @@ struct ProfileView: View {
                 Task {
                     await loadUnread()
                     if let p: Profile = try? await API.shared.get("api/v1/profile"), session.isLoggedIn { profile = p }
+                    await loadParcelGate()
                 }
             }
         }
@@ -327,6 +348,7 @@ struct ProfileView: View {
     private var menu: some View {
         VStack(spacing: YMSpace.lg) {
             loyaltyMenu
+            if parcelCanSend || hasParcels { parcelMenu }
             VStack(spacing: 0) {
                 menuRow(icon: "✏️", label: "Редактировать профиль") { path.append(ProfileRoute.editProfile) }
                 divider
@@ -352,6 +374,20 @@ struct ProfileView: View {
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
             .padding(.horizontal, YMSpace.xl)
         }
+    }
+
+    // ── Посылки (А79): видно, только если раздел включён или посылки уже были ──
+    private var parcelMenu: some View {
+        VStack(spacing: 0) {
+            if parcelCanSend {
+                menuRow(icon: "📦", label: "Отправить посылку") { path.append(ParcelRoute.send(nil)) }
+                divider
+            }
+            menuRow(icon: "🚚", label: "Мои посылки") { path.append(ParcelRoute.list(canSend: parcelCanSend)) }
+        }
+        .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+        .padding(.horizontal, YMSpace.xl)
     }
 
     private var divider: some View {
@@ -500,6 +536,8 @@ struct ProfileView: View {
 
     private func load() async {
         var q: [String: String] = [:]
+        // Город читаем здесь, до async let: дочерние задачи не трогают session.
+        let parcelCity = session.cityId
         if let cid = session.cityId { q["city_id"] = String(cid) }
         let query = q
         // Шесть независимых запросов шли по очереди — на мобильной сети шапка и
@@ -517,6 +555,7 @@ struct ProfileView: View {
         // meta.unread — непрочитанные ВСЕГО (волна А3); на странице их максимум 20.
         // Старый сервер unread не присылает — считаем по первой странице, как раньше.
         async let notifReq: Page<AppNotification>? = try? await API.shared.page("api/v1/notifications")
+        async let parcelReq = ParcelGate.flags(cityId: parcelCity)
 
         // Сбой (метро, смена вкладки без сети) не стирает уже показанное: раньше
         // шапка превращалась в «Профиль» без телефона, а счётчики — в нули.
@@ -541,6 +580,15 @@ struct ProfileView: View {
         }
         let notifPage = await notifReq
         unreadNotifs = notifPage.map { p in p.meta?.unread ?? p.items.filter { !$0.read }.count } ?? 0
+        let gate = await parcelReq
+        if session.isLoggedIn { parcelCanSend = gate.canSend; hasParcels = gate.hasParcels }
+    }
+
+    /// Видимость раздела посылок (после возврата к корню профиля — могли отправить).
+    private func loadParcelGate() async {
+        let city = session.cityId
+        let gate = await ParcelGate.flags(cityId: city)
+        if session.isLoggedIn { parcelCanSend = gate.canSend; hasParcels = gate.hasParcels }
     }
 
     /// Счётчик «заказы» без записей на услугу. Вся история на одной странице —
@@ -568,6 +616,13 @@ struct ProfileView: View {
         case .support:       path.append(ProfileRoute.support)
         case .bonuses:       path.append(ProfileRoute.bonuses)
         case .notifications: path.append(ProfileRoute.notifications)
+        // Push pool_parcel: карточка посылки. Она уже открыта — только перечитываем.
+        case .parcel(let id):
+            if ParcelLive.cardId == id {
+                NotificationCenter.default.post(name: .ymParcelPushed, object: id)
+            } else {
+                path.append(ParcelRoute.detail(id))
+            }
         }
     }
 
@@ -591,7 +646,7 @@ struct ProfileView: View {
 /// Старше 15 с — не исполняется: иначе застрявшая просьба сработала бы
 /// позже, когда человек сам откроет профиль.
 enum ProfilePushIntent {
-    enum Screen { case wallet, support, bonuses, notifications }
+    enum Screen { case wallet, support, bonuses, notifications, parcel(Int) }
     static let note = Notification.Name("ym.profilePushIntent")
     private static var pending: (screen: Screen, at: Date)?
 

@@ -663,3 +663,65 @@ final class RetryKeys {
         return s.split(separator: "&").sorted().joined(separator: "&")
     }
 }
+
+// MARK: - А79 «Отправить посылку»: сырой ответ (код + тело)
+
+extension API {
+    /// Запрос с готовым JSON-телом и ответом «как есть» (HTTP-код + байты).
+    /// Нужен экрану посылок: общий разбор отбрасывает error.code и details по
+    /// полям (у посылок это списки строк: {"fee": ["…"]}), а без них нельзя
+    /// подсветить поле 422 и понять 409 price_changed. Вход, продление токена
+    /// по 401 и ошибки сети — как у остальных запросов. Без повторов: это
+    /// создание и действия, их повторяет сам экран с тем же ключом.
+    func raw(_ method: String, _ path: String, json: Data?, headers: [String: String] = [:]) async throws -> (status: Int, data: Data) {
+        var req = try makeRequest(method, path)
+        req.httpBody = json
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        return try await rawPerform(req, isRetryAfterRefresh: false)
+    }
+
+    private func rawPerform(_ req: URLRequest, isRetryAfterRefresh: Bool) async throws -> (status: Int, data: Data) {
+        let data: Data; let resp: URLResponse
+        do {
+            (data, resp) = try await session.data(for: req)
+        } catch let urlError as URLError {
+            if urlError.code == .cancelled { throw CancellationError() }
+            if urlError.code == .timedOut {
+                if await API.offlineNow() { throw APIError.network }
+                throw APIError.timeout
+            }
+            throw APIError.network
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw APIError.network
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 401 {
+            // Та же логика, что в perform: свежий токен от параллельного запроса,
+            // иначе одно продление и один повтор.
+            if !isRetryAfterRefresh {
+                if let current = TokenStore.access, !current.isEmpty,
+                   req.value(forHTTPHeaderField: "Authorization") != "Bearer \(current)" {
+                    var retry = req
+                    retry.setValue("Bearer \(current)", forHTTPHeaderField: "Authorization")
+                    return try await rawPerform(retry, isRetryAfterRefresh: false)
+                }
+                switch await refreshAccessToken() {
+                case .token(let newToken):
+                    var retry = req
+                    retry.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+                    return try await rawPerform(retry, isRetryAfterRefresh: true)
+                case .unavailable:
+                    throw APIError.network
+                case .rejected:
+                    break
+                }
+            }
+            if let handler = onUnauthorized { await MainActor.run { handler() } }
+            if req.value(forHTTPHeaderField: "Authorization") == nil { throw APIError.guestNeedsLogin }
+            throw APIError.unauthorized
+        }
+        return (status, data)
+    }
+}
