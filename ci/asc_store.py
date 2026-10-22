@@ -57,6 +57,12 @@ VERSION_EDITABLE = {"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED",
 # Версия хоть раз была в продаже — значит, это обновление, а не первый выпуск.
 SOLD = {"READY_FOR_SALE", "READY_FOR_DISTRIBUTION", "REPLACED_WITH_NEW_VERSION",
         "REMOVED_FROM_SALE", "DEVELOPER_REMOVED_FROM_SALE"}
+# Версия подана и ждёт Apple: новая сборка в неё не попадёт, а новую карточку
+# Apple не даст создать, пока эта не решена (ошибка 22.10.2026, клиент 1.2).
+IN_REVIEW = {"WAITING_FOR_REVIEW", "IN_REVIEW", "PENDING_APPLE_RELEASE", "PROCESSING_FOR_DISTRIBUTION",
+             "PROCESSING_FOR_APP_STORE"}
+# Одобрена или выпущена: номер версии закрыт, нужен следующий.
+CLOSED = SOLD | {"PENDING_DEVELOPER_RELEASE", "ACCEPTED", "APPROVED", "PREORDER_READY_FOR_SALE"}
 APPINFO_EDITABLE = {"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED",
                     "METADATA_REJECTED", "READY_FOR_REVIEW"}
 
@@ -294,6 +300,22 @@ def versions(asc, app_id):
                     params={"filter[platform]": "IOS", "limit": 200})
 
 
+REVIEW_HELP = ("Варианты: (1) дождаться решения Apple, затем поднять номер версии в project.yml "
+               "(CFBundleShortVersionString и все MARKETING_VERSION) и запустить снова; "
+               "(2) App Store Connect → эта версия → «Удалить из проверки» — карточка станет редактируемой, "
+               "и следующий запуск положит в неё новую сборку (место в очереди Apple теряется)")
+
+
+def busy_reason(number, state):
+    """Почему карточку версии number нельзя взять, и что делать — человеческим языком."""
+    if state in IN_REVIEW:
+        return "версия %s уже подана и ждёт Apple (%s) — новая сборка в неё не попадёт. %s" % (number, state, REVIEW_HELP)
+    if state in CLOSED:
+        return ("версия %s уже одобрена или выпущена (%s) — номер закрыт: поднимите номер версии в project.yml "
+                "(CFBundleShortVersionString и все MARKETING_VERSION) и «Что нового» в release-notes/ru.txt" % (number, state))
+    return "карточка версии %s в состоянии %s — править нельзя" % (number, state or "?")
+
+
 def pick_version(asc, app_id, number, create):
     """(версия, первый_ли_выпуск, почему_нет). Редактируемая карточка версии."""
     vs = versions(asc, app_id)
@@ -303,7 +325,7 @@ def pick_version(asc, app_id, number, create):
         v = mine[0]
         if vstate(v) in VERSION_EDITABLE:
             return v, first, None
-        return None, first, "карточка версии %s в состоянии %s — уже подана или выпущена, править нельзя" % (number, vstate(v) or "?")
+        return None, first, busy_reason(number, vstate(v))
     editable = [v for v in vs if vstate(v) in VERSION_EDITABLE]
     if editable:
         v = editable[0]
@@ -320,8 +342,16 @@ def pick_version(asc, app_id, number, create):
         except ApiError as e:
             say("  Переименовать карточку %s в %s не удалось (%s) — работаю с ней как есть." % (old, number, e))
         return v, first, None
+    waiting = [v for v in vs if vstate(v) in IN_REVIEW]
+    hint = ""
+    if waiting:
+        w = waiting[0]
+        hint = (" Версия %s ещё на проверке у Apple (%s) — пока её не решат, новую карточку Apple обычно не даёт создать. "
+                % (attrs(w).get("versionString") or "?", vstate(w)) + REVIEW_HELP)
     if not create:
-        return None, first, "редактируемой карточки версии нет — её создаст шаг «Карточка App Store» или публикация"
+        if waiting:
+            return None, first, "карточки версии %s нет." % number + hint
+        return None, first, "редактируемой карточки версии нет — её создаст шаг «Карточка версии» (режим version) или «+ Версия» в App Store Connect"
     try:
         j = asc.call("POST", "/v1/appStoreVersions", body={"data": {
             "type": "appStoreVersions",
@@ -330,7 +360,7 @@ def pick_version(asc, app_id, number, create):
         say("  Создана карточка версии %s." % number)
         return j["data"], first, None
     except ApiError as e:
-        return None, first, "создать карточку версии %s не удалось: %s" % (number, e)
+        return None, first, "создать карточку версии %s не удалось: %s.%s" % (number, e, hint)
 
 
 def pick_locale(items, want, key="locale"):
@@ -742,7 +772,7 @@ def check(asc, cfg):
     if not ver:
         # Без редактируемой карточки «Что нового» не вписан: Codemagic создаст её
         # уже после сборки, пустой, и Apple ответит 409 whatsNew.
-        miss.append("нет редактируемой карточки версии %s (%s) — её создаёт шаг карточки; создайте руками «+ Версия» в App Store Connect" % (number, why))
+        miss.append("нет редактируемой карточки версии %s: %s" % (number, why))
         return miss, warn
     loc = pick_locale(asc.data("/v1/appStoreVersions/%s/appStoreVersionLocalizations" % ver["id"]), cfg.get("locale", "ru"))
     if not loc:
