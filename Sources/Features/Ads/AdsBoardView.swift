@@ -34,7 +34,8 @@ final class AdsBoardViewModel: ObservableObject {
     /// Грузим один раз, поиск фильтрует на месте; ошибка объявлениям не мешает.
     @Published var shopJobs: [Job]?
     @Published var jobsExpanded = false
-    private var jobsLoading = false
+    /// А97: идёт загрузка вакансий — «Все» не спешит с «Объявлений пока нет».
+    @Published private(set) var jobsLoading = false
 
     private var page = 1
     private var pages = 1
@@ -63,7 +64,10 @@ final class AdsBoardViewModel: ObservableObject {
     /// во весь экран (иначе поле пропадало вместе с клавиатурой).
     var hasFilter: Bool { !favOnly && (!query.isEmpty || categoryId != 0) }
 
-    var showJobs: Bool { enabled && !favOnly && isJobsAdCategory(cats, categoryId) }
+    /// А97: «Все» (categoryId = 0) — тоже с вакансиями магазинов, как рубрика «Работа».
+    var showJobs: Bool { enabled && !favOnly && (categoryId == 0 || isJobsAdCategory(cats, categoryId)) }
+    /// «Все»: вакансии ещё грузятся (рубрика «Работа» — как раньше).
+    var jobsPending: Bool { categoryId == 0 && showJobs && shopJobs == nil && jobsLoading }
 
     var visibleJobs: [Job] {
         guard showJobs else { return [] }
@@ -115,7 +119,10 @@ final class AdsBoardViewModel: ObservableObject {
             // снова, иначе чипы рубрик не появлялись до перезапуска.
             started = false
         }
+        // А97: вакансии магазинов для «Все» — параллельно с лентой.
+        async let jobs: Void = loadJobsIfNeeded()
         await load(reset: true)
+        await jobs
         if Task.isCancelled { started = false }   // ушли до ответа — при возврате загрузим снова
     }
 
@@ -194,6 +201,8 @@ final class AdsBoardViewModel: ObservableObject {
         searchTask?.cancel(); searchedQuery = ""
         query = ""; categoryId = 0
         Task { await load(reset: true) }
+        // А97: из «Избранных» вернулись в общую ленту («Все») — вакансии нужны снова.
+        Task { await loadJobsIfNeeded() }
     }
 }
 
@@ -316,7 +325,7 @@ struct AdsBoardView: View {
                          subtitle: "Заходите позже — раздел скоро откроется.")
         } else if vm.loading && !vm.hasFilter {
             AdsSkeletonView()
-        } else if let e = vm.error, vm.items.isEmpty, !vm.hasFilter {
+        } else if let e = vm.error, vm.items.isEmpty, !vm.hasFilter, vm.visibleJobs.isEmpty, !vm.jobsPending {
             ErrorRetryView(message: e) { Task { await vm.load(reset: true) } }
         } else {
             ScrollView {
@@ -341,7 +350,7 @@ struct AdsBoardView: View {
                     if !vm.visibleJobs.isEmpty {
                         shopJobsSection
                     }
-                    if vm.loading && vm.items.isEmpty {
+                    if vm.items.isEmpty && (vm.loading || vm.jobsPending) {
                         ProgressView().frame(maxWidth: .infinity).padding(.top, YMSpace.xl)
                     } else if vm.items.isEmpty && vm.error != nil {
                         EmptyView()

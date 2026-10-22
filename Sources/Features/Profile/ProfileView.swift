@@ -66,6 +66,19 @@ struct ProfileView: View {
     /// «Мои посылки» — ещё и когда посылки уже были (раздел могли выключить).
     @State private var parcelCanSend = false
     @State private var hasParcels = false
+    /// А97: GET /api/v1/features — «Отправить посылку» и «Стать курьером».
+    @ObservedObject private var features = FeaturesStore.shared
+    /// А97: у аккаунта уже есть заявка курьера (GET /pool/me) — пункт виден и при courier_signup: false.
+    @State private var courierHasRecord = false
+    /// Гость нажал «Стать курьером» / «Отправить посылку» — после входа открываем этот экран.
+    @State private var afterAuth: AfterAuthTarget?
+    private enum AfterAuthTarget { case courier, parcel }
+
+    /// «Отправить посылку»: parcels: true / false — сервер сказал прямо; неизвестно (старый сервер,
+    /// нет сети) — как раньше, по quote.
+    private var parcelSendShown: Bool { features.current.parcels ?? parcelCanSend }
+    /// «Стать курьером»: courier_signup: true — всем; заявка уже есть — вошедшему всегда.
+    private var courierShown: Bool { features.current.courierSignup == true || (session.isLoggedIn && courierHasRecord) }
 
     // Внутренняя навигация по разделам профиля (стек маршрутов).
     @State private var path = NavigationPath()
@@ -140,6 +153,7 @@ struct ProfileView: View {
         // менялась на экране профиля сразу, без переоткрытия.
         .preferredColorScheme(themeScheme)
         .task { if session.isLoggedIn { await load() } }
+        .task { await features.refresh() }
         // Push/строка ленты «кошелёк пополнен», «ответ поддержки»: раньше
         // открывался только корень профиля — нужный раздел искали сами.
         .onAppear { consumePushIntent() }
@@ -150,14 +164,37 @@ struct ProfileView: View {
             ParcelGate.invalidate()
             Task { await loadParcelGate() }
         }
+        // А97: решение по заявке курьера — видимость пункта перепроверяем.
+        .onReceive(NotificationCenter.default.publisher(for: .ymCourierPushed)) { _ in
+            guard session.isLoggedIn else { return }
+            CourierGate.invalidate()
+            Task { courierHasRecord = await CourierGate.check() }
+        }
         .onChange(of: session.isLoggedIn) { logged in
-            if logged { Task { await load() } } else {
+            if logged {
+                Task { await load() }
+                // Гость нажимал «Стать курьером» / «Отправить посылку» — вошёл: открываем экран
+                // (после того как экран входа закроется).
+                if let next = afterAuth {
+                    afterAuth = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        guard session.isLoggedIn else { return }
+                        path = NavigationPath()
+                        switch next {
+                        case .courier: path.append(ProfileRoute.courier)
+                        case .parcel:  path.append(ParcelRoute.send(nil))
+                        }
+                    }
+                }
+            } else {
                 profile = nil
                 // Счётчики прежнего аккаунта не должны показываться следующему,
                 // пока у него грузится профиль.
                 ordersCount = 0; favCount = 0; bookingsCount = 0; unreadNotifs = 0
                 parcelCanSend = false; hasParcels = false
                 ParcelGate.reset()
+                courierHasRecord = false
+                CourierGate.reset()
                 // Сессия кончилась на открытом разделе (кошелёк, бонусы, записи):
                 // экран прежнего аккаунта оставался в стеке, и после входа другого
                 // человека тот видел чужие данные. Возвращаемся к корню профиля.
@@ -170,11 +207,16 @@ struct ProfileView: View {
         // Шапку перечитываем тоже (после «Редактировать профиль» там было старое
         // имя и телефон), но без стирания: не пришло — остаётся прежняя.
         .onChange(of: path.count) { n in
+            // Гость ушёл со входа, не войдя, — отложенный переход забываем.
+            if n == 0, !session.isLoggedIn { afterAuth = nil }
             if n == 0, session.isLoggedIn {
                 Task {
                     await loadUnread()
                     if let p: Profile = try? await API.shared.get("api/v1/profile"), session.isLoggedIn { profile = p }
                     await loadParcelGate()
+                    // А97: заявку курьера могли только что отправить (кэш — без лишнего запроса).
+                    let courier = await CourierGate.check()
+                    if session.isLoggedIn { courierHasRecord = courier }
                 }
             }
         }
@@ -220,6 +262,8 @@ struct ProfileView: View {
         case .applications: ApplicationsView()
         case .returns:      ReturnsView()
         case .auth:         AuthView()
+        // А97: «Стать курьером»; 422 errors.phone — «Редактировать профиль» поверх.
+        case .courier:      CourierSignupView(openEditProfile: { path.append(ProfileRoute.editProfile) })
         }
     }
 
@@ -348,7 +392,7 @@ struct ProfileView: View {
     private var menu: some View {
         VStack(spacing: YMSpace.lg) {
             loyaltyMenu
-            if parcelCanSend || hasParcels { parcelMenu }
+            if parcelSendShown || parcelCanSend || hasParcels || courierShown { parcelMenu }
             VStack(spacing: 0) {
                 menuRow(icon: "✏️", label: "Редактировать профиль") { path.append(ProfileRoute.editProfile) }
                 divider
@@ -377,13 +421,20 @@ struct ProfileView: View {
     }
 
     // ── Посылки (А79): видно, только если раздел включён или посылки уже были ──
+    // А97: здесь же «Стать курьером»; «Отправить посылку» — по features.parcels (неизвестно — как раньше).
     private var parcelMenu: some View {
         VStack(spacing: 0) {
-            if parcelCanSend {
+            if parcelSendShown {
                 menuRow(icon: "📦", label: "Отправить посылку") { path.append(ParcelRoute.send(nil)) }
-                divider
             }
-            menuRow(icon: "🚚", label: "Мои посылки") { path.append(ParcelRoute.list(canSend: parcelCanSend)) }
+            if parcelCanSend || hasParcels || parcelSendShown {
+                if parcelSendShown { divider }
+                menuRow(icon: "🚚", label: "Мои посылки") { path.append(ParcelRoute.list(canSend: parcelSendShown)) }
+            }
+            if courierShown {
+                if parcelSendShown || parcelCanSend || hasParcels { divider }
+                menuRow(icon: "🛵", label: "Стать курьером") { path.append(ProfileRoute.courier) }
+            }
         }
         .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
@@ -430,6 +481,15 @@ struct ProfileView: View {
     // ── Меню гостя: разделы без входа (как в Android) ──
     private var guestMenu: some View {
         VStack(spacing: 0) {
+            // А97: «Отправить посылку» и «Стать курьером» — когда сервер их включил; сначала вход.
+            if features.current.parcels == true {
+                menuRow(icon: "📦", label: "Отправить посылку") { afterAuth = .parcel; path.append(ProfileRoute.auth) }
+                divider
+            }
+            if features.current.courierSignup == true {
+                menuRow(icon: "🛵", label: "Стать курьером") { afterAuth = .courier; path.append(ProfileRoute.auth) }
+                divider
+            }
             menuRow(icon: "🎁", label: "Подарочная карта") { path.append(ProfileRoute.gift) }
             divider
             menuRow(icon: "💼", label: "Вакансии") { path.append(ProfileRoute.jobs) }
@@ -556,6 +616,7 @@ struct ProfileView: View {
         // Старый сервер unread не присылает — считаем по первой странице, как раньше.
         async let notifReq: Page<AppNotification>? = try? await API.shared.page("api/v1/notifications")
         async let parcelReq = ParcelGate.flags(cityId: parcelCity)
+        async let courierReq = CourierGate.check()
 
         // Сбой (метро, смена вкладки без сети) не стирает уже показанное: раньше
         // шапка превращалась в «Профиль» без телефона, а счётчики — в нули.
@@ -582,6 +643,8 @@ struct ProfileView: View {
         unreadNotifs = notifPage.map { p in p.meta?.unread ?? p.items.filter { !$0.read }.count } ?? 0
         let gate = await parcelReq
         if session.isLoggedIn { parcelCanSend = gate.canSend; hasParcels = gate.hasParcels }
+        let courier = await courierReq
+        if session.isLoggedIn { courierHasRecord = courier }
     }
 
     /// Видимость раздела посылок (после возврата к корню профиля — могли отправить).
@@ -623,6 +686,15 @@ struct ProfileView: View {
             } else {
                 path.append(ParcelRoute.detail(id))
             }
+        // А97: карточка «Отправить посылку» на главной — тот же экран, что здесь.
+        case .parcelNew:     path.append(ParcelRoute.send(nil))
+        // А97: push pool_account — экран «Стать курьером». Уже открыт — только перечитываем.
+        case .courier:
+            if CourierLive.open {
+                NotificationCenter.default.post(name: .ymCourierPushed, object: nil)
+            } else {
+                path.append(ProfileRoute.courier)
+            }
         }
     }
 
@@ -646,7 +718,7 @@ struct ProfileView: View {
 /// Старше 15 с — не исполняется: иначе застрявшая просьба сработала бы
 /// позже, когда человек сам откроет профиль.
 enum ProfilePushIntent {
-    enum Screen { case wallet, support, bonuses, notifications, parcel(Int) }
+    enum Screen { case wallet, support, bonuses, notifications, parcel(Int), parcelNew, courier }
     static let note = Notification.Name("ym.profilePushIntent")
     private static var pending: (screen: Screen, at: Date)?
 
@@ -666,6 +738,7 @@ enum ProfilePushIntent {
 private enum ProfileRoute: Hashable {
     case addresses, bookings, notifications, editProfile, settings, support
     case plus, loyalty, wallet, myAds, favorites, bonuses, referral, gift, jobs, applications, returns, auth
+    case courier
 }
 
 /// Опция темы ↔ значение @AppStorage(AppStorageKey.theme) ("system"|"light"|"dark").

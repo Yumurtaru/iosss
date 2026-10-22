@@ -177,6 +177,11 @@ struct HomeView: View {
     @State private var appeared = false
     /// Чип, выбранный до нажатия на «Жильё» — к нему возвращаемся (см. ChipRow).
     @State private var lastKind: OrgKind = .all
+    /// А97: GET /api/v1/features — карточка «Отправить посылку» только при parcels: true.
+    @ObservedObject private var features = FeaturesStore.shared
+    /// Гость нажал «Отправить посылку» — после входа открываем форму.
+    @State private var parcelAfterAuth = false
+    private var showParcelCard: Bool { features.current.parcels == true }
 
     // Единый маршрут навигации таба. ВАЖНО: несколько .navigationDestination(isPresented:)
     // в одном NavigationStack конфликтуют в SwiftUI (срабатывает только первый) — поэтому
@@ -276,6 +281,9 @@ struct HomeView: View {
             // ручного обновления, потому что первая загрузка уже «случилась».
             .refreshable { await Task { await vm.load(session: session) }.value }
             .task { await Task { await vm.firstLoad(session: session) }.value }
+            // А97: что включено на площадке (кэш на минуту — запрос не чаще раза в минуту).
+            .task { await features.refresh() }
+            .onAppear { Task { await features.refresh() } }
             // Отметки избранного: по входу/выходу и при возврате на Главную
             // (сердечко могли поменять в заведении или в Поиске).
             .task(id: session.isLoggedIn) { await loadFavs() }
@@ -470,6 +478,10 @@ struct HomeView: View {
                                                   reduceMotion: reduceMotion),
                                 value: appeared
                             )
+                            // А97: «Отправить посылку» — после второго заведения (меньше — после последнего).
+                            if showParcelCard && idx == min(1, vm.shops.count - 1) {
+                                ParcelPromoCard { openParcel() }
+                            }
                             // Промо-карточка «Стать продавцом» после каждых 3 заведений.
                             if (idx + 1) % 3 == 0 {
                                 BecomeSellerPromoCard { go(.becomeSeller) }
@@ -489,15 +501,38 @@ struct HomeView: View {
             if vm.popular.isEmpty && vm.shops.isEmpty {
                 emptyState
             }
+            // А97: заведений нет (пустой город / раздел) — карточка посылки отдельно.
+            if showParcelCard && vm.shops.isEmpty && vm.error == nil {
+                ParcelPromoCard { openParcel() }
+                    .padding(.horizontal, YMSpace.xl)
+                    .padding(.top, 18)
+            }
         }
         // Вход для ♥ гостя. Шторка — на содержимом, а не на корне экрана:
         // там уже висят выбор города и профиль.
-        .sheet(isPresented: $showAuth) {
+        .sheet(isPresented: $showAuth, onDismiss: {
+            // А97: гость нажимал «Отправить посылку» — вошёл: открываем форму.
+            guard parcelAfterAuth else { return }
+            parcelAfterAuth = false
+            if session.isLoggedIn { openParcel() }
+        }) {
             NavigationStack {
                 AuthView(onAuthed: { showAuth = false })
             }
             .environmentObject(session)
         }
+    }
+
+    /// А97: «Отправить посылку» — тот же экран, что «Профиль → Отправить посылку» (в шторке профиля).
+    /// Гость — сначала вход.
+    private func openParcel() {
+        guard session.isLoggedIn else {
+            parcelAfterAuth = true
+            showAuth = true
+            return
+        }
+        coord.profileOpen = true
+        ProfilePushIntent.open(.parcelNew)
     }
 
     private var sectionTitle: String {
@@ -660,6 +695,45 @@ struct HomeView: View {
             for b in favBusyShops { if favShops.contains(b) { next.insert(b) } else { next.remove(b) } }
             favShops = next
         }
+    }
+}
+
+// MARK: - ParcelPromoCard (А97)
+
+/// «Отправить посылку» между заведениями — в стиле карточки «Добавьте свою организацию»
+/// (BecomeSellerPromoCard). Тексты — общие с Android (HomeScreen.ParcelPromoCard).
+struct ParcelPromoCard: View {
+    var onTap: () -> Void
+
+    var body: some View {
+        Button {
+            Haptics.light()
+            onTap()
+        } label: {
+            VStack(alignment: .leading, spacing: YMSpace.sm) {
+                Text("КУРЬЕР YUMURTA")
+                    .font(YMFont.caption2).fontWeight(.semibold)
+                    .foregroundStyle(YMColor.accent)
+                Text("Отправить посылку")
+                    .font(YMFont.title3).foregroundStyle(YMColor.text)
+                Text("Курьер заберёт и привезёт документы, пакеты, коробки и грузы. Людей и животных не возим.")
+                    .font(YMFont.callout).foregroundStyle(YMColor.muted)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 4) {
+                    Text("Вызвать курьера").font(YMFont.headline).foregroundStyle(YMColor.accent)
+                    Image(systemName: "arrow.right").font(.system(size: 13, weight: .bold)).foregroundStyle(YMColor.accent)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(YMSpace.lg)
+            .background(YMColor.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: YMRadius.card, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: YMRadius.card, style: .continuous)
+                    .strokeBorder(YMColor.accent.opacity(0.45), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 

@@ -30,6 +30,9 @@ targets:
         # локальная сборка в Xcode не расходилась).
         CFBundleShortVersionString: "1.2"
         NSLocationWhenInUseUsageDescription: "Нужно, чтобы определить ваш город и показать курьера на карте во время доставки"
+        # А97 «Стать курьером»: фото лица и водительских прав для заявки курьера (камера
+        # открывается только по кнопке «Сфотографировать»; галерея — системный выбор без разрешения).
+        NSCameraUsageDescription: "Камера нужна, чтобы сфотографировать ваше лицо и водительские права для заявки курьера"
         UILaunchScreen:
           UIColorName: LaunchBG
           UIImageRespectsSafeAreaInsets: true

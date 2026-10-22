@@ -55,6 +55,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         if let id = Self.buyerOrderId(info) { NotificationCenter.default.post(name: .ymOrderPushed, object: id) }
         // А79: открытые карточка и список посылок перечитываются сразу.
         if let id = Self.parcelId(info) { NotificationCenter.default.post(name: .ymParcelPushed, object: id) }
+        // А97: решение по заявке курьера — открытый экран «Стать курьером» и профиль перечитают /pool/me.
+        if (info["type"] as? String) == "pool_account" { NotificationCenter.default.post(name: .ymCourierPushed, object: nil) }
         completionHandler([.banner, .sound, .badge])
     }
 
@@ -212,6 +214,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                     DeepLinkRouter.shared.requestedTab = 0
                     nav.profileOpen = true
                     ProfilePushIntent.open(.parcel(pid))
+                }
+            }
+        }
+        // А97: решение по заявке курьера (pool_account + event approve|reject) — сервер шлёт его
+        // в клиентское приложение, если приложения курьера нет. Тап — «Профиль → Стать курьером».
+        if type == "pool_account" {
+            return {
+                nav.revealForPush(closeAll: true) {
+                    DeepLinkRouter.shared.requestedTab = 0
+                    nav.profileOpen = true
+                    ProfilePushIntent.open(.courier)
                 }
             }
         }
