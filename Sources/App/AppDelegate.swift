@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // А79: открытые карточка и список посылок перечитываются сразу.
         if let id = Self.parcelId(info) { NotificationCenter.default.post(name: .ymParcelPushed, object: id) }
         // А97: решение по заявке курьера — открытый экран «Стать курьером» и профиль перечитают /pool/me.
+        // А98: и блокировка / разблокировка (event block|unblock). Баннер — текст сервера.
         if (info["type"] as? String) == "pool_account" { NotificationCenter.default.post(name: .ymCourierPushed, object: nil) }
         completionHandler([.banner, .sound, .badge])
     }
@@ -219,6 +220,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
         // А97: решение по заявке курьера (pool_account + event approve|reject) — сервер шлёт его
         // в клиентское приложение, если приложения курьера нет. Тап — «Профиль → Стать курьером».
+        // А98 (П-50 №2): так же event block|unblock — экран перечитает статус («заблокирован» / «вы курьер»).
+        // Другие и будущие event — тот же экран: он лишь перечитывает статус, вреда нет (как в А97).
         if type == "pool_account" {
             return {
                 nav.revealForPush(closeAll: true) {

@@ -3,7 +3,8 @@
 //
 //  Профиль → «Стать курьером», push pool_account. Те же ручки и тот же аккаунт, что
 //  в приложении курьера «Yumurta Курьер»:
-//    • GET  api/v1/pool/me    — при каждом открытии экрана (и по push / возврату в приложение);
+//    • GET  api/v1/pool/me?lite=1 — при каждом открытии экрана (и по push / возврату в приложение); А98:
+//      лёгкий статус без побочных действий, старый сервер отдаёт полный /pool/me — разбор тот же;
 //    • GET  api/v1/pool/rules — правило «только грузы и посылки», если /pool/me его не прислал;
 //    • POST api/v1/pool/apply — заявка (multipart): full_name, city_id, car_model, car_color,
 //      car_plate, self_employed, consent=1, no_passengers=1 + photo, license (JPEG).

@@ -4,7 +4,9 @@ import SwiftUI
 // А97 (задача владельца): «Отправить посылку» на главной, «Стать курьером» в профиле.
 //
 //   GET  /api/v1/features   — что включено на площадке (без входа), routes/downloads.php;
-//   GET  /api/v1/pool/me    — заявка курьера этого аккаунта (CourierPool::courierMe);
+//   GET  /api/v1/pool/me    — заявка курьера этого аккаунта (CourierPool::courierMe); с А98 — ?lite=1
+//                             (CourierPool::courierLite: те же enabled, consent_version, rules, courier + lite: true,
+//                             без денег и линии); старый сервер параметр не знает — полный ответ, разбор тот же;
 //   GET  /api/v1/pool/rules — правило «только грузы и посылки» (без входа);
 //   POST /api/v1/pool/apply — заявка (multipart), те же поля, что у приложения курьера.
 //
@@ -265,7 +267,11 @@ enum CourierGate {
 
 enum CourierAPI {
     static func me() async throws -> CourierMe {
-        let (status, data) = try await API.shared.raw("GET", "api/v1/pool/me", json: nil)
+        // А98 (П-50 №1): лёгкий статус ?lite=1 — заявка, её статус и правило, без побочных действий
+        // (не списывает комиссию из кошелька, не трогает линию). Форма — та же, что у полного /pool/me
+        // (enabled, consent_version, rules, courier) + lite: true, без денег и линии. Старый сервер
+        // параметр не знает и отдаёт обычный /pool/me — разбор CourierMe.parse тот же.
+        let (status, data) = try await API.shared.raw("GET", "api/v1/pool/me?lite=1", json: nil)
         guard (200..<300).contains(status) else { throw failure(status: status, data: data) }
         guard let m = CourierMe.parse(data) else { throw APIError.decoding }
         return m
