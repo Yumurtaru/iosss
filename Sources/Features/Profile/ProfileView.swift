@@ -73,6 +73,10 @@ struct ProfileView: View {
     /// Гость нажал «Стать курьером» / «Отправить посылку» — после входа открываем этот экран.
     @State private var afterAuth: AfterAuthTarget?
     private enum AfterAuthTarget { case courier, parcel }
+    /// А102: гость тапнул push ответа поддержки или посылки — экран откроем после входа.
+    /// Отдельно от ProfilePushIntent: его 15 с не хватает на вход по коду. Профиль закрыли
+    /// или ушли со входа, не войдя, — забываем.
+    @State private var pendingPush: ProfilePushIntent.Screen?
 
     /// «Отправить посылку»: parcels: true / false — сервер сказал прямо; неизвестно (старый сервер,
     /// нет сети) — как раньше, по quote.
@@ -157,6 +161,8 @@ struct ProfileView: View {
         // Push/строка ленты «кошелёк пополнен», «ответ поддержки»: раньше
         // открывался только корень профиля — нужный раздел искали сами.
         .onAppear { consumePushIntent() }
+        // А102: профиль закрыли, не войдя, — отложенный переход из push забываем.
+        .onDisappear { if !session.isLoggedIn { pendingPush = nil } }
         .onReceive(NotificationCenter.default.publisher(for: ProfilePushIntent.note)) { _ in consumePushIntent() }
         // Push посылки или новый вызов — видимость раздела перепроверяем.
         .onReceive(NotificationCenter.default.publisher(for: .ymParcelPushed)) { _ in
@@ -175,6 +181,15 @@ struct ProfileView: View {
                 Task { await load() }
                 // Гость нажимал «Стать курьером» / «Отправить посылку» — вошёл: открываем экран
                 // (после того как экран входа закроется).
+                // А102: гость тапнул push (переписка, посылка) и вошёл — открываем его экран.
+                if let push = pendingPush {
+                    pendingPush = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        guard session.isLoggedIn else { return }
+                        path = NavigationPath()
+                        openPush(push)
+                    }
+                }
                 if let next = afterAuth {
                     afterAuth = nil
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -208,7 +223,7 @@ struct ProfileView: View {
         // имя и телефон), но без стирания: не пришло — остаётся прежняя.
         .onChange(of: path.count) { n in
             // Гость ушёл со входа, не войдя, — отложенный переход забываем.
-            if n == 0, !session.isLoggedIn { afterAuth = nil }
+            if n == 0, !session.isLoggedIn { afterAuth = nil; pendingPush = nil }
             if n == 0, session.isLoggedIn {
                 Task {
                     await loadUnread()
@@ -264,6 +279,8 @@ struct ProfileView: View {
         case .auth:         AuthView()
         // А97: «Стать курьером»; 422 errors.phone — «Редактировать профиль» поверх.
         case .courier:      CourierSignupView(openEditProfile: { path.append(ProfileRoute.editProfile) })
+        // А102: переписка с поддержкой (push type=support + ticket_id, строка ленты).
+        case .supportTicket(let id): SupportTicketView(id: id)
         }
     }
 
@@ -673,7 +690,21 @@ struct ProfileView: View {
 
     /// Раздел, о котором просит push или строка ленты уведомлений (см. ProfilePushIntent).
     private func consumePushIntent() {
-        guard let screen = ProfilePushIntent.take(), session.isLoggedIn else { return }
+        guard let screen = ProfilePushIntent.take() else { return }
+        guard session.isLoggedIn else {
+            // А102: гостю — после входа (onChange(of: isLoggedIn)). Только переписка и посылка:
+            // остальные разделы гостю, как раньше, не открываем.
+            switch screen {
+            case .ticket, .parcel: pendingPush = screen
+            default: break
+            }
+            return
+        }
+        openPush(screen)
+    }
+
+    /// Открыть раздел по push / строке ленты (только вошедшему).
+    private func openPush(_ screen: ProfilePushIntent.Screen) {
         switch screen {
         case .wallet:        path.append(ProfileRoute.wallet)
         case .support:       path.append(ProfileRoute.support)
@@ -694,6 +725,13 @@ struct ProfileView: View {
                 NotificationCenter.default.post(name: .ymCourierPushed, object: nil)
             } else {
                 path.append(ProfileRoute.courier)
+            }
+        // А102: ответ поддержки — переписка этого обращения. Уже открыта — только перечитываем.
+        case .ticket(let id):
+            if SupportTicketLive.openId == id {
+                NotificationCenter.default.post(name: .ymSupportPushed, object: id)
+            } else {
+                path.append(ProfileRoute.supportTicket(id))
             }
         }
     }
@@ -718,7 +756,7 @@ struct ProfileView: View {
 /// Старше 15 с — не исполняется: иначе застрявшая просьба сработала бы
 /// позже, когда человек сам откроет профиль.
 enum ProfilePushIntent {
-    enum Screen { case wallet, support, bonuses, notifications, parcel(Int), parcelNew, courier }
+    enum Screen { case wallet, support, bonuses, notifications, parcel(Int), parcelNew, courier, ticket(Int) }
     static let note = Notification.Name("ym.profilePushIntent")
     private static var pending: (screen: Screen, at: Date)?
 
@@ -739,6 +777,7 @@ private enum ProfileRoute: Hashable {
     case addresses, bookings, notifications, editProfile, settings, support
     case plus, loyalty, wallet, myAds, favorites, bonuses, referral, gift, jobs, applications, returns, auth
     case courier
+    case supportTicket(Int)
 }
 
 /// Опция темы ↔ значение @AppStorage(AppStorageKey.theme) ("system"|"light"|"dark").

@@ -1,5 +1,5 @@
 # =============================================================================
-#  codemagic.yaml — Yumurta (клиент, ru.marketplace.client.premium, App Store ID 6787053938)
+#  codemagic.yaml — Yumurta (клиент, ru.marketplace.client.premium, App Store ID 6794675250)
 # -----------------------------------------------------------------------------
 #    ios-testflight  Прежний процесс (до 21.10.2026 назывался ios-release):
 #                    собрать, загрузить, отправить в TestFlight. В App Store
@@ -99,7 +99,7 @@ workflows:
         name: Версия свободна в App Store Connect
         script: |
           cd "$CM_BUILD_DIR"
-          APP_ID="6787053938"
+          APP_ID="6794675250"
           V=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "Generated/Info.plist" 2>/dev/null || true)
           if [ -z "$V" ]; then echo "Не смог прочитать версию из Info.plist — проверку пропускаю."; exit 0; fi
           if ! OUT=$(app-store-connect apps app-store-versions "$APP_ID" --platform IOS --json 2>/tmp/asc_err.txt); then
@@ -227,7 +227,7 @@ workflows:
           # Разбор ответа устойчив к форме: массив, {"data": [...]} или один объект.
           NORM="d=json.load(sys.stdin); d=d.get('data',d) if isinstance(d,dict) else d; d=[d] if isinstance(d,dict) else (d or [])"
 
-          APP_ID="${APP_STORE_APP_ID:-6787053938}"
+          APP_ID="${APP_STORE_APP_ID:-6794675250}"
           if [ -z "$APP_ID" ]; then
             if ! AJ=$(app-store-connect apps list --bundle-id-identifier "$BUNDLE" --strict-match-identifier --json 2>/tmp/asc_wn_err.txt); then
               echo "App Store Connect не ответил — пропускаю. Начало ответа:"
@@ -366,7 +366,7 @@ workflows:
             exit 0
           fi
           NORM="d=json.load(sys.stdin); d=d.get('data',d) if isinstance(d,dict) else d; d=[d] if isinstance(d,dict) else (d or [])"
-          APP_ID="${APP_STORE_APP_ID:-6787053938}"
+          APP_ID="${APP_STORE_APP_ID:-6794675250}"
           if [ -z "$APP_ID" ]; then
             if ! AJ=$(app-store-connect apps list --bundle-id-identifier "ru.marketplace.client.premium" --strict-match-identifier --json 2>/tmp/asc_sr_err.txt); then
               echo "App Store Connect не ответил — пропускаю. Начало ответа:"
@@ -456,7 +456,7 @@ workflows:
             exit 0
           fi
           NORM="d=json.load(sys.stdin); d=d.get('data',d) if isinstance(d,dict) else d; d=[d] if isinstance(d,dict) else (d or [])"
-          APP_ID="${APP_STORE_APP_ID:-6787053938}"
+          APP_ID="${APP_STORE_APP_ID:-6794675250}"
           if [ -z "$APP_ID" ]; then
             AJ=$(app-store-connect apps list --bundle-id-identifier "ru.marketplace.client.premium" --strict-match-identifier --json 2>/dev/null)
             APP_ID=$(printf '%s' "$AJ" | python3 -c "import json,sys; $NORM; print(d[0]['id'] if d else '')" 2>/dev/null)

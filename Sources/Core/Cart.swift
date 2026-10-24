@@ -80,8 +80,19 @@ final class Cart: ObservableObject {
     var isEmpty: Bool { lines.isEmpty }
     private var snapshotTask: Task<Void, Never>?
     /// Ключ повтора оформления: один, пока корзина не меняется.
+    /// Любое изменение состава (save()) выдаёт новый ключ — сервер сравнивает
+    /// только ключ (orders.idempotency_key), поэтому повтор с другой корзиной
+    /// не должен прийти со старым. Ключ пишется на диск вместе с корзиной:
+    /// раньше он жил только в памяти, и после таймаута + выгрузки приложения
+    /// повторное «Оформить» шло с новым ключом — второй заказ (как Android Cart.kt).
     private(set) var checkoutKey = Cart.makeKey()
     private static func makeKey() -> String { UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
+    private static let checkoutKeyStore = "cart_checkout_key"
+    /// Когда ключ выдан (секунды с 1970). Сервер ищет дубль по shop_id + ключ
+    /// без срока давности: ключ недельной давности на той же корзине вернул бы
+    /// старый заказ (duplicate) вместо нового. Защита нужна на минуты/часы.
+    private static let checkoutKeyAtStore = "cart_checkout_key_at"
+    static let checkoutKeyTTL: TimeInterval = 24 * 60 * 60
 
     private init() { load() }
 
@@ -145,6 +156,13 @@ final class Cart: ObservableObject {
         UserDefaults.standard.set(shopId ?? 0, forKey: "cart_shop")
         UserDefaults.standard.set(shopName, forKey: "cart_shop_name")
         UserDefaults.standard.set(shopSlug, forKey: "cart_shop_slug")
+        // Пустая корзина — ключ не нужен (после заказа clear() его и сменит).
+        if lines.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Cart.checkoutKeyStore)
+            UserDefaults.standard.removeObject(forKey: Cart.checkoutKeyAtStore)
+        } else {
+            storeKey(at: Date().timeIntervalSince1970)
+        }
         syncSnapshot()
     }
 
@@ -164,6 +182,29 @@ final class Cart: ObservableObject {
         let s = UserDefaults.standard.integer(forKey: "cart_shop"); shopId = s == 0 ? nil : s
         shopName = UserDefaults.standard.string(forKey: "cart_shop_name")
         shopSlug = UserDefaults.standard.string(forKey: "cart_shop_slug")
+        // Ключ повтора переживает выгрузку: таймаут → выгрузили → снова
+        // «Оформить» вернёт уже созданный заказ, а не создаст второй.
+        // Ключ старше суток не берём: выдаём новый и сразу пишем на диск, иначе
+        // после следующей выгрузки снова получился бы другой ключ.
+        guard !lines.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        if let k = UserDefaults.standard.string(forKey: Cart.checkoutKeyStore), !k.isEmpty, k.count <= 64 {
+            let at = UserDefaults.standard.double(forKey: Cart.checkoutKeyAtStore)
+            if at <= 0 {
+                // Записан без времени (сборка до срока) — свежий, но ровно один раз.
+                checkoutKey = k; storeKey(at: now)
+            } else if abs(now - at) <= Cart.checkoutKeyTTL {
+                checkoutKey = k
+            } else {
+                storeKey(at: now)   // checkoutKey уже новый (makeKey при создании)
+            }
+        } else {
+            storeKey(at: now)
+        }
+    }
+    private func storeKey(at t: TimeInterval) {
+        UserDefaults.standard.set(checkoutKey, forKey: Cart.checkoutKeyStore)
+        UserDefaults.standard.set(t, forKey: Cart.checkoutKeyAtStore)
     }
 }
 

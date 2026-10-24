@@ -173,6 +173,8 @@ private struct NotifTarget {
         case wallet, support, bonuses, cart, trips, nothing
         /// А79: посылка (pool_parcel, call_id) — карточка тут же, в профиле.
         case parcel(Int)
+        /// А102: ответ поддержки (type=support, ticket_id) — переписка обращения, в профиле.
+        case ticket(Int)
     }
     let kind: Kind
 
@@ -225,6 +227,7 @@ private struct NotifTarget {
         if type.isEmpty, let pid = positiveInt(d["product_id"]) { return .product(pid) }
         // wallet_topup без data — строки ленты до появления screen=wallet.
         if screen == "wallet" || feedType == "wallet_topup" { return .wallet }
+        if type == "support", let id = positiveInt(d["ticket_id"]) { return .ticket(id) }
         if type == "support" { return .support }
         if type == "bonus_expiring" { return .bonuses }
         if type == "abandoned_cart" { return .cart }
@@ -263,6 +266,8 @@ private struct NotifTarget {
             ProfilePushIntent.open(.bonuses)
         case .parcel(let id):
             ProfilePushIntent.open(.parcel(id))
+        case .ticket(let id):
+            ProfilePushIntent.open(.ticket(id))
         case .cart:
             coord.revealForPush(closeAll: true) { DeepLinkRouter.shared.requestedTab = 2 }
         case .trips:

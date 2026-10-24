@@ -105,12 +105,14 @@ final class ParcelFormModel: ObservableObject {
     var showsSize: Bool { !(quote?.sizes.isEmpty ?? true) && (!hasPicker || vehicleClass == "car") }
 
     var whenOptions: [(min: Int, label: String)] {
-        var o: [(min: Int, label: String)] = [(0, "Сейчас"), (15, "Через 15 мин"), (30, "Через 30 мин"), (60, "Через 1 ч"), (120, "Через 2 ч")]
         // Межгород заказывают заранее — до 7 суток (pickup_in_min ≤ 10080), по городу — до 240 мин.
-        if trip == "intercity" {
-            o += [(240, "Через 4 ч"), (1440, "Завтра (через сутки)"), (2880, "Через 2 суток"), (4320, "Через 3 суток")]
-        }
-        return o
+        // А101: с quote.scheduled_search — ещё «на потом» (1,5 / 3 / 4 ч); старый сервер — как было.
+        ParcelSchedule.options(intercity: trip == "intercity", sched: quote?.scheduledSearch)
+    }
+    /// А101: «Ищем курьера до 15:30 — за 15 мин до забора» под выбором; nil — старый сервер или «Сейчас».
+    var whenHint: String? {
+        guard let q = quote else { return nil }
+        return ParcelSchedule.hint(q.scheduledSearch, pickIn: whenMin, searchMinutes: q.searchMinutes, targetDriver: selectedDriver != nil)
     }
 
     /// Город отправления: города с заведениями (как на сайте) + текущий, если его там нет.
@@ -240,7 +242,9 @@ final class ParcelFormModel: ObservableObject {
         guard let q = quote else { return "" }
         let n = q.couriersOnline ?? 0
         if n > 0 { return "Курьеров на линии в городе: \(n). Кто первый возьмёт — тот и повезёт." }
-        return "Сейчас на линии никого нет — вызов получит первый, кто выйдет на линию (ждём \(q.searchMinutes ?? 5) мин)."
+        // А101 (как сайт): вызов «на потом» ждёт до времени забора.
+        let later = q.scheduledSearch != nil ? ", а если забрать позже — до времени забора" : ""
+        return "Сейчас на линии никого нет — вызов получит первый, кто выйдет на линию (ждём \(q.searchMinutes ?? 5) мин\(later))."
     }
 
     // MARK: Выбор
@@ -463,6 +467,7 @@ struct ParcelFormView: View {
                     }
                     .pickerStyle(.menu)
                     .tint(YMColor.accent)
+                    if let h = m.whenHint { Text(h).font(YMFont.caption).foregroundStyle(YMColor.muted) }
                     if let e = m.error("pickup_in_min") { ParcelErrorLine(text: e) }
                     field("Комментарий курьеру", text: $m.comment, prompt: "Подъезд, этаж, домофон", limit: 500, error: m.error("comment"))
                 }

@@ -1,6 +1,12 @@
 //
 //  SupportView.swift — Поддержка + форма жалобы (premium-клиент)
 //
+//  «Спросить помощника» (ИИ, волна сайта А100) — сверху, если GET api/v1/assistant/status
+//  ответил enabled = true или login_required = true (А102: сервер шлёт login_required только
+//  при включённом помощнике — гостю экран помощника предложит войти). Ошибка, 404 старого
+//  сервера, выключен — карточки нет, экран как раньше. Экран — Features/Assistant/AssistantView.
+//  «Мои обращения» (А102) — вошедшему: список и переписка (SupportTicketsView.swift);
+//  старый сервер (404) — там же «раздел пока недоступен».
 //  Быстрые контакты (mailto/tel через openURL), FAQ (раскрывающиеся строки),
 //  форма жалобы (тема + описание). Токены YM, light+dark, Dynamic Type.
 //
@@ -78,10 +84,15 @@ struct SupportView: View {
     @State private var sending = false
     /// Сообщение под кнопкой: nil — нет; иначе (текст, успех?).
     @State private var status: (message: String, ok: Bool)?
+    /// А100: помощник включён на сервере — показываем «Спросить помощника».
+    @State private var assistantOn = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: YMSpace.xl) {
+                if assistantOn { assistantCard }
+                // А102: «Мои обращения» — только вошедшему (ручки под auth).
+                if session.isLoggedIn { ticketsCard }
                 contactsSection
                 faqSection
                 complaintSection
@@ -96,6 +107,70 @@ struct SupportView: View {
         .background(YMColor.bg.ignoresSafeArea())
         .navigationTitle("Поддержка")
         .navigationBarTitleDisplayMode(.inline)
+        // А100: спрашиваем при открытии и после входа/выхода. Любая ошибка — кнопки нет.
+        // А102 (П-55 №2): login_required = enabled && guest && !guests_allowed — карточка и гостю,
+        // нажатие ведёт на экран помощника, а он предлагает войти.
+        .task(id: session.isLoggedIn) {
+            let st = try? await AssistantAPI.status()
+            let on = st?.enabled == true || st?.loginRequired == true
+            if !Task.isCancelled { assistantOn = on }
+        }
+    }
+
+    // ── А100: «Спросить помощника» ──
+    private var assistantCard: some View {
+        NavigationLink { AssistantView() } label: {
+            HStack(spacing: YMSpace.md) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 18)).foregroundStyle(YMColor.accent)
+                    .frame(width: 40, height: 40)
+                    .background(YMColor.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: YMRadius.chip, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Спросить помощника").font(.system(size: 15, weight: .heavy)).foregroundStyle(YMColor.text)
+                    Text("ИИ ответит сразу, сложный вопрос передаст сотруднику")
+                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(YMColor.muted)
+            }
+            .padding(YMSpace.md)
+            .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.accent.opacity(0.45), lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // ── А102: «Мои обращения» ──
+    private var ticketsCard: some View {
+        NavigationLink { SupportTicketsView() } label: {
+            HStack(spacing: YMSpace.md) {
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 17)).foregroundStyle(YMColor.accent)
+                    .frame(width: 40, height: 40)
+                    .background(YMColor.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: YMRadius.chip, style: .continuous))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Мои обращения").font(.system(size: 15, weight: .heavy)).foregroundStyle(YMColor.text)
+                    Text("Вопросы в поддержку и ответы на них")
+                        .font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(YMColor.muted)
+                    .accessibilityHidden(true)
+            }
+            .padding(YMSpace.md)
+            .background(YMColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(YMColor.hairline, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Открыть список обращений")
     }
 
     // ── Контакты ──

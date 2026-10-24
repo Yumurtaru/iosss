@@ -58,6 +58,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // А97: решение по заявке курьера — открытый экран «Стать курьером» и профиль перечитают /pool/me.
         // А98: и блокировка / разблокировка (event block|unblock). Баннер — текст сервера.
         if (info["type"] as? String) == "pool_account" { NotificationCenter.default.post(name: .ymCourierPushed, object: nil) }
+        // А102: ответ поддержки — открытые «Мои обращения» и переписка перечитаются сразу.
+        if (info["type"] as? String) == "support" { NotificationCenter.default.post(name: .ymSupportPushed, object: Self.ticketId(info)) }
         completionHandler([.banner, .sound, .badge])
     }
 
@@ -129,6 +131,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             // Открытые деталь / чат этого заказа перечитываются сразу.
             if let id = Self.buyerOrderId(userInfo) { NotificationCenter.default.post(name: .ymOrderPushed, object: id) }
             if let id = Self.parcelId(userInfo) { NotificationCenter.default.post(name: .ymParcelPushed, object: id) }
+            if (userInfo["type"] as? String) == "support" { NotificationCenter.default.post(name: .ymSupportPushed, object: Self.ticketId(userInfo)) }
             UIApplication.shared.applicationIconBadgeNumber = 0
         }
     }
@@ -138,6 +141,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let type = (userInfo["type"] as? String) ?? ""
         if isSellerSide(type, userInfo) { return nil }
         guard let id = intValue(userInfo["order_id"]), id > 0 else { return nil }
+        return id
+    }
+
+    /// А102: номер обращения из push ответа поддержки (type=support, ticket_id строкой).
+    static func ticketId(_ userInfo: [AnyHashable: Any]) -> Int? {
+        guard (userInfo["type"] as? String) == "support",
+              let id = intValue(userInfo["ticket_id"]), id > 0 else { return nil }
         return id
     }
 
@@ -209,6 +219,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         if isSellerSide(type, userInfo) { return nil }
         // А79: посылка (accepted, arrived, picked, delivered, failed, released,
         // expired, cancelled) — карточка посылки в профиле («Мои посылки»).
+        // А101: event no_courier_yet («Курьера пока нет» за 30 мин до забора) и любой будущий
+        // event — так же: баннер с текстом сервера, тап — карточка; открытая — перечитывается.
         if let pid = parcelId(userInfo) {
             return {
                 nav.revealForPush(closeAll: true) {
@@ -257,8 +269,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 }
             }
         }
+        // А102: ответ поддержки с номером обращения — сразу его переписка (профиль →
+        // SupportTicketView). Гость — профиль с «Войти», как у посылок (consumePushIntent).
+        if let tid = ticketId(userInfo) {
+            return {
+                nav.revealForPush(closeAll: true) {
+                    DeepLinkRouter.shared.requestedTab = 0
+                    nav.profileOpen = true
+                    ProfilePushIntent.open(.ticket(tid))
+                }
+            }
+        }
         // П-21.1: кошелёк (screen=wallet) и ответ поддержки (type=support) — оба
-        // раздела в профиле. Волна 4313: «баллы сгорают» (bonus_expiring, только
+        // раздела в профиле (А102: support без ticket_id — «Поддержка», как раньше).
+        // Волна 4313: «баллы сгорают» (bonus_expiring, только
         // type) — «Бонусы» тоже в профиле; раньше тап просто открывал приложение.
         if screen == "wallet" || type == "support" || type == "bonus_expiring" {
             // Волна 4313: сразу нужный раздел профиля (его открывает ProfileView).

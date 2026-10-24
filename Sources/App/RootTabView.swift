@@ -27,6 +27,9 @@ struct RootTabView: View {
     /// по pendingOrgSlug: если шторка организации не смогла открыться, корзина
     /// и чат не работали до перезапуска приложения.
     @State private var orgShown = false
+    /// П-52: мягкое окно «Вышла новая версия» ждёт «Главной» без окон и онбординга.
+    @ObservedObject private var updates = AppUpdateStore.shared
+    @AppStorage(AppStorageKey.onboarded) private var onboarded = false
 
     init() {
         // Фон таб-бара — системный материал (blur), тонкая золотая линия сверху.
@@ -186,6 +189,23 @@ struct RootTabView: View {
             .environmentObject(coord)
             .environmentObject(Session.shared)
         }
+        // ── П-52: «Вышла новая версия» (мягкое окно). Не поверх входа, шторок, обложек,
+        // диалога корзины и онбординга — ждёт, пока человек окажется на «Главной».
+        .modifier(SoftUpdatePrompt(store: updates, canShow: {
+            onboarded && tab == 0 && !orgShown && referralPrompt == nil
+                && !coord.showCart && !coord.cartConflict && !coord.showLodging
+                && !coord.profileOpen && coord.chatOrderId == nil && coord.pendingOrgSlug == nil
+        }, presentationKey: updatePresentationKey))
+    }
+}
+
+extension RootTabView {
+    /// П-52: слепок того, что push/ссылка/экраны открывают поверх вкладок. Изменился, пока на
+    /// экране окно «Вышла новая версия», — окно убирается (без «Позже»), чтобы не мешать.
+    fileprivate var updatePresentationKey: String {
+        "\(coord.showCart)|\(coord.cartConflict)|\(coord.showLodging)|\(coord.profileOpen)|"
+            + "\(coord.chatOrderId ?? 0)|\(coord.pendingOrgSlug ?? "")|\(coord.pendingOrderDetail ?? 0)|\(coord.pendingProductId ?? 0)|"
+            + "\(router.requestedTab ?? -1)|\(router.referralCode ?? "")|\(referralPrompt?.code ?? "")"
     }
 }
 

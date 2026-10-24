@@ -333,6 +333,69 @@ enum ParcelFmt {
         let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.timeZone = .autoupdatingCurrent
         f.dateFormat = "dd.MM, HH:mm"; return f
     }()
+    private static let dayClockOut: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.timeZone = .autoupdatingCurrent
+        f.dateFormat = "dd.MM HH:mm"; return f
+    }()
+
+    /// А101: «15:30» в тот же день, что now, иначе «24.10 09:15». Часовой пояс — как у time().
+    static func untilClock(_ d: Date, now: Date) -> String {
+        Calendar.current.isDate(d, inSameDayAs: now) ? timeOut.string(from: d) : dayClockOut.string(from: d)
+    }
+
+    /// А101: вызов «на потом» ищет курьера до времени забора — expires_at бывает через часы.
+    /// До конца поиска больше часа — «Ищем курьера до 15:30» (не сегодня — «до 24.10 09:15»);
+    /// час и меньше (и обычный вызов) — nil: показываем как раньше.
+    static func searchUntil(_ s: String?, now: Date = Date()) -> String? {
+        guard let d = date(s), d.timeIntervalSince(now) > 3600 else { return nil }
+        return "Ищем курьера до " + untilClock(d, now: now)
+    }
+}
+
+// MARK: - А101: вызов «на потом»
+
+enum ParcelSchedule {
+    /// «Когда забрать» по городу — как было до А101.
+    static let city: [(min: Int, label: String)] = [(0, "Сейчас"), (15, "Через 15 мин"), (30, "Через 30 мин"), (60, "Через 1 ч"), (120, "Через 2 ч")]
+    /// Межгород заказывают заранее — до 7 суток (pickup_in_min ≤ 10080).
+    static let intercity: [(min: Int, label: String)] = [(240, "Через 4 ч"), (1440, "Завтра (через сутки)"), (2880, "Через 2 суток"), (4320, "Через 3 суток")]
+    /// «На потом» по городу — как у продавца на сайте, до 4 ч (сервер по городу принимает ≤ 240 мин).
+    static let later: [(min: Int, label: String)] = [(90, "Через 1,5 ч"), (180, "Через 3 ч"), (240, "Через 4 ч")]
+
+    /// Варианты «Когда забрать». Старый сервер (scheduled_search нет) — ровно как раньше.
+    /// С scheduled_search — ещё 1,5 / 3 / 4 ч, но не дальше max_hours; список по возрастанию.
+    static func options(intercity isIntercity: Bool, sched: ParcelSchedSearch?) -> [(min: Int, label: String)] {
+        let base = city + (isIntercity ? intercity : [])
+        guard let sched else { return base }
+        let cap = min((sched.maxHours.flatMap { $0 > 0 ? $0 : nil } ?? 24) * 60, 240)
+        var out: [(min: Int, label: String)] = []
+        for o in base + later.filter({ $0.min <= cap }) where !out.contains(where: { $0.min == o.min }) { out.append(o) }
+        return out.sorted { $0.min < $1.min }
+    }
+
+    /// Подсказка под «Когда забрать» — повтор seller-pool.js (whenHint). nil — без подсказки
+    /// (старый сервер или «Сейчас»). targetDriver — выбран водитель межгорода: у него свой срок ответа.
+    static func hint(_ sched: ParcelSchedSearch?, pickIn: Int, searchMinutes: Int?, targetDriver: Bool, now: Date = Date()) -> String? {
+        guard let sched else { return nil }
+        if targetDriver { return "Предложение получит только выбранный водитель — ждём его ответа." }
+        let sm = searchMinutes.flatMap { $0 > 0 ? $0 : nil } ?? 5
+        let from = sched.fromMin.flatMap { $0 > 0 ? $0 : nil } ?? 30
+        if pickIn <= from { return pickIn > 0 ? "Ищем курьера \(sm) мин." : nil }
+        let lead = sched.leadMin.flatMap { $0 > 0 ? $0 : nil } ?? 0
+        let byPickup = pickIn - lead > sm   // иначе — минимум search_minutes, а не «за N мин до забора»
+        let until = now.addingTimeInterval(TimeInterval(max(pickIn - lead, sm) * 60))
+        let cap = now.addingTimeInterval(TimeInterval((sched.maxHours.flatMap { $0 > 0 ? $0 : nil } ?? 24) * 3600))
+        let u = min(until, cap)
+        let rem: String
+        // Срок упёрся в max_hours (забор дальше) — сервер напоминает только за час до забора и пока
+        // поиск идёт (CourierPool::tick), а поиск к тому времени кончится: напоминания не обещаем.
+        if sched.remind == false || until >= cap { rem = "" }
+        else if pickIn >= 50 { rem = "курьерам напомним за час и за 30 мин" }
+        else { rem = "курьерам напомним за 30 мин" }
+        return "Ищем курьера до " + ParcelFmt.untilClock(u, now: now)
+            + (until < cap && byPickup ? " — за \(lead) мин до забора" : "")
+            + (rem.isEmpty ? "." : "; " + rem + ".")
+    }
 }
 
 // MARK: - Выбор города (поиск по списку)

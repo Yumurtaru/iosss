@@ -456,7 +456,8 @@ private struct CourierApplyForm: View {
         .fullScreenCover(item: $cameraReq) { req in
             CourierCameraPicker(front: req.kind == "photo") { image in
                 cameraReq = nil
-                if let img = image, let raw = img.jpegData(compressionQuality: 0.92) { process(req.kind, raw) }
+                // Кадр 12 Мп в JPEG кодируем не здесь (главный поток), а в process.
+                if let img = image { process(req.kind, image: img) }
             }
             .ignoresSafeArea()
         }
@@ -643,9 +644,20 @@ private struct CourierApplyForm: View {
 
     /// Сжать снимок вне главного потока и запомнить готовый JPEG.
     private func process(_ kind: String, _ raw: Data) {
+        process(kind, source: { raw })
+    }
+
+    /// Снимок камеры: jpegData(0.92) кадра 12 Мп — сотни мс, раньше шло на
+    /// главном потоке в колбэке камеры. Теперь и это кодирование в Task.detached.
+    private func process(_ kind: String, image: UIImage) {
+        process(kind, source: { image.jpegData(compressionQuality: 0.92) })
+    }
+
+    private func process(_ kind: String, source: @escaping @Sendable () -> Data?) {
         processing = kind
-        Task {
+        Task { @MainActor in
             let (out, small) = await Task.detached(priority: .userInitiated) { () -> (Data?, Data?) in
+                guard let raw = source() else { return (nil, nil) }
                 let o = CourierSignupText.jpeg(raw)
                 let t = o.flatMap { ImageUpload.jpeg(from: $0, maxSide: 300, quality: 0.8) }
                 return (o, t)

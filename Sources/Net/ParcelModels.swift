@@ -184,6 +184,27 @@ struct ParcelDriver: Decodable, Hashable, Identifiable {
     }
 }
 
+/// А101 (CourierPool::schedQuote): забор позже, чем через fromMin минут, — курьера ищем до
+/// времени забора минус leadMin, но не дольше maxHours часов; remind — напоминания курьерам
+/// за час и за 30 мин до забора. Ноль/нет поля — умолчания сайта (seller-pool.js).
+struct ParcelSchedSearch: Decodable, Hashable {
+    let fromMin: Int?
+    let leadMin: Int?
+    let maxHours: Int?
+    let remind: Bool?
+    init(fromMin: Int? = nil, leadMin: Int? = nil, maxHours: Int? = nil, remind: Bool? = nil) {
+        self.fromMin = fromMin; self.leadMin = leadMin; self.maxHours = maxHours; self.remind = remind
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fromMin = c.pInt(.fromMin)
+        leadMin = c.pInt(.leadMin)
+        maxHours = c.pInt(.maxHours)
+        remind = c.pBool(.remind)
+    }
+    private enum CodingKeys: String, CodingKey { case fromMin, leadMin, maxHours, remind }
+}
+
 /// Ответ quote (CourierPool::parcelQuote + cargoQuote).
 struct ParcelQuote: Decodable {
     let enabled: Bool?
@@ -209,6 +230,9 @@ struct ParcelQuote: Decodable {
     let loaderPrice: Decimal?
     let cargo: ParcelCargoQuote?
     let drivers: [ParcelDriver]
+    /// А101: вызов «на потом» — ищем курьера до времени забора. Старый сервер поля не шлёт —
+    /// выбор «Когда забрать» и подсказки как раньше.
+    let scheduledSearch: ParcelSchedSearch?
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -240,10 +264,12 @@ struct ParcelQuote: Decodable {
         loaderPrice = c.pMoney(.loaderPrice)
         cargo = try? c.decodeIfPresent(ParcelCargoQuote.self, forKey: .cargo)
         drivers = c.pList(.drivers, ParcelDriver.self)
+        scheduledSearch = try? c.decodeIfPresent(ParcelSchedSearch.self, forKey: .scheduledSearch)
     }
     private enum CodingKeys: String, CodingKey {
         case enabled, cityId, couriersOnline, distanceKm, suggestedFee, minFee, maxFee, base, perKm
         case searchMinutes, maxActive, sizes, rules, rule, vehicles, intercityEnabled, loaderPrice, cargo, drivers
+        case scheduledSearch
     }
 }
 

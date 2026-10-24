@@ -107,6 +107,21 @@ final class API {
         return URLSession(configuration: cfg)
     }()
 
+    /// А100: «Помощник Yumurta» отвечает 10–30 с, общая сессия ждёт только 20/40 с.
+    /// Своя сессия — ожидание ответа до 60 с, без cookie, как общая. Сеть не ждём:
+    /// без связи вопрос сразу получает «Нет соединения», а не висит минуту.
+    private let longSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 60
+        cfg.timeoutIntervalForResource = 70
+        cfg.waitsForConnectivity = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.httpCookieStorage = nil
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        return URLSession(configuration: cfg)
+    }()
+
     /// Удалить cookie сайта из общего хранилища (их туда клали прежние версии).
     static func clearCookies() {
         guard let url = URL(string: base) else { return }
@@ -673,17 +688,20 @@ extension API {
     /// подсветить поле 422 и понять 409 price_changed. Вход, продление токена
     /// по 401 и ошибки сети — как у остальных запросов. Без повторов: это
     /// создание и действия, их повторяет сам экран с тем же ключом.
-    func raw(_ method: String, _ path: String, json: Data?, headers: [String: String] = [:]) async throws -> (status: Int, data: Data) {
-        var req = try makeRequest(method, path)
+    /// long: true — сессия с ожиданием ответа до 60 с (помощник, А100).
+    func raw(_ method: String, _ path: String, json: Data?, headers: [String: String] = [:],
+             query: [String: String] = [:], long: Bool = false) async throws -> (status: Int, data: Data) {
+        var req = try makeRequest(method, path, query: query)
         req.httpBody = json
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-        return try await rawPerform(req, isRetryAfterRefresh: false)
+        if long { req.timeoutInterval = 60 }
+        return try await rawPerform(req, isRetryAfterRefresh: false, long: long)
     }
 
-    private func rawPerform(_ req: URLRequest, isRetryAfterRefresh: Bool) async throws -> (status: Int, data: Data) {
+    private func rawPerform(_ req: URLRequest, isRetryAfterRefresh: Bool, long: Bool = false) async throws -> (status: Int, data: Data) {
         let data: Data; let resp: URLResponse
         do {
-            (data, resp) = try await session.data(for: req)
+            (data, resp) = try await (long ? longSession : session).data(for: req)
         } catch let urlError as URLError {
             if urlError.code == .cancelled { throw CancellationError() }
             if urlError.code == .timedOut {
@@ -705,13 +723,13 @@ extension API {
                    req.value(forHTTPHeaderField: "Authorization") != "Bearer \(current)" {
                     var retry = req
                     retry.setValue("Bearer \(current)", forHTTPHeaderField: "Authorization")
-                    return try await rawPerform(retry, isRetryAfterRefresh: false)
+                    return try await rawPerform(retry, isRetryAfterRefresh: false, long: long)
                 }
                 switch await refreshAccessToken() {
                 case .token(let newToken):
                     var retry = req
                     retry.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
-                    return try await rawPerform(retry, isRetryAfterRefresh: true)
+                    return try await rawPerform(retry, isRetryAfterRefresh: true, long: long)
                 case .unavailable:
                     throw APIError.network
                 case .rejected:

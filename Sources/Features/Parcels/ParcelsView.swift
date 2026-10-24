@@ -167,6 +167,15 @@ struct ParcelsListView: View {
                 .font(YMFont.callout).foregroundStyle(YMColor.text).lineLimit(2)
             Text(rowMeta(p)).font(YMFont.caption).foregroundStyle(YMColor.muted).lineLimit(2)
             if let c = p.cargoLine { Text(c).font(YMFont.caption).foregroundStyle(YMColor.text) }
+            // А101: вызов «на потом» — до конца поиска больше часа: «Ищем курьера до 15:30».
+            // Часы раз в 30 с: строка гаснет, когда остался час, даже если ответ опроса тот же.
+            if p.status == "searching", p.target == nil, ParcelFmt.searchUntil(p.expiresAt) != nil {
+                TimelineView(.periodic(from: .now, by: 30)) { tl in
+                    if let u = ParcelFmt.searchUntil(p.expiresAt, now: tl.date) {
+                        Text(u).font(YMFont.caption).foregroundStyle(YMColor.text)
+                    }
+                }
+            }
             if let cp = p.complaint { Text(cp.line).font(YMFont.caption).foregroundStyle(YMColor.muted) }
         }
         .padding(YMSpace.lg)
@@ -355,7 +364,18 @@ struct ParcelDetailView: View {
                     if busy { ProgressView() }
                 }
                 if p.status == "searching" {
-                    Text(searchLine(p)).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                    // А101: вызов «на потом» — до конца поиска больше часа: «Ищем курьера до 15:30»
+                    // (не сегодня — «до 24.10 09:15»). Час и меньше, выбранный водитель — как раньше.
+                    // Часы раз в 30 с: строка сменится, даже если ответ опроса тот же.
+                    TimelineView(.periodic(from: .now, by: 30)) { tl in
+                        let until = p.target == nil ? ParcelFmt.searchUntil(p.expiresAt, now: tl.date) : nil
+                        VStack(alignment: .leading, spacing: YMSpace.sm) {
+                            if let until {
+                                Text(until).font(YMFont.callout.weight(.semibold)).foregroundStyle(YMColor.text)
+                            }
+                            Text(searchLine(p, until: until != nil)).font(YMFont.caption).foregroundStyle(YMColor.muted)
+                        }
+                    }
                 }
                 if let t = p.target, p.status == "searching" {
                     Text("Ждём ответа водителя: \(t.name)" + (t.vehicleLabel.isEmpty ? "" : " · " + t.vehicleLabel))
@@ -398,10 +418,11 @@ struct ParcelDetailView: View {
         }
     }
 
-    private func searchLine(_ p: Parcel) -> String {
+    /// until — над строкой уже «Ищем курьера до …» (А101): «ждём до» не повторяем.
+    private func searchLine(_ p: Parcel, until: Bool) -> String {
         var s = "Предложено курьерам: \(p.offeredTo ?? 0)"
         let t = ParcelFmt.time(p.expiresAt)
-        if !t.isEmpty { s += " · ждём до " + t }
+        if !t.isEmpty, !until { s += " · ждём до " + t }
         return s
     }
 

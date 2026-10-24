@@ -16,6 +16,8 @@ struct YumurtaApp: App {
     @StateObject private var net = NetworkMonitor.shared
     @StateObject private var router = DeepLinkRouter.shared
     @StateObject private var coord = NavCoordinator.shared
+    /// П-52: проверка «Вышла новая версия» — при запуске и каждом возврате на передний план.
+    @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage(AppStorageKey.theme) private var theme = "system"
     @AppStorage(AppStorageKey.onboarded) private var onboarded = false
@@ -57,7 +59,11 @@ struct YumurtaApp: App {
                 // влияет на раскладку того, на что накладывается.
                 .overlay {
                     if splashVisible {
-                        SplashView(onFinished: { splashVisible = false })
+                        SplashView(onFinished: {
+                            splashVisible = false
+                            // П-52: окно обновления ждёт конца анимации запуска.
+                            AppUpdateStore.shared.splashDidFinish()
+                        })
                             .ignoresSafeArea()
                             .preferredColorScheme(colorScheme)
                     }
@@ -66,7 +72,12 @@ struct YumurtaApp: App {
                 .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
                     if let url = activity.webpageURL { router.handle(url: url) }
                 }
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active { AppUpdateStore.shared.onForeground() }
+                }
                 .task {
+                    // П-52: в фоне, запуск не ждёт (не чаще раза в 6 часов).
+                    await MainActor.run { AppUpdateStore.shared.onForeground() }
                     Push.shared.requestAuthorization()
                     await Push.shared.registerIfPossible()
                 }
